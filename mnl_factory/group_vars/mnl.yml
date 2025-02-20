@@ -1,29 +1,28 @@
 ---
-# Variables related to mnl
-
+# Basic application configuration
 mnl_app_name: "mnl_ee"
-
+mnl_app_version: "1.0.0"
+mnl_app_env: "develop"   # Options: "staging", "qa", "preprod", "prod", "develop"
 mnl_dev_mode: false
 
-mnl_app_env: "develop"   # "staging" "qa" "preprod" "prod" or even "develop"
-mnl_app_version: "1.0.0"
-
+# File system configuration
 mnl_base_folder: "/var/cache/{{ mnl_app_name }}"
 mnl_local_cache_folder: "{{ mnl_base_folder }}/_local_cache"
 
-
-#mnl_container_registry_url: "docker.io"
+# Container configuration
 mnl_docker_image_name: "mnl_ee_container"
 mnl_container_registry_user: "naeural"
 mnl_container_image: "edge_node"
 mnl_docker_image_url: "{{ mnl_container_registry_user }}/{{ mnl_container_image }}:{{ mnl_app_env }}"
 
+# Runtime configuration
 mnl_device: "cuda:0"
 mnl_docker_gpus: "--gpus all"
-
 mnl_port_forward: "{{ '-p 1883:1883' if mnl_dev_mode else '' }}"
-
 mnl_container_memory_limit: 30GB
 
-# Enables or disables restart. Enabled -> '', Disabled -> '#'
-mnl_commented_restart: ''
+# Container behavior
+mnl_commented_restart: ''  # Empty -> restart enabled, '#' -> restart disabled
+
+# Optional settings (commented out)
+#mnl_container_registry_url: "docker.io"
