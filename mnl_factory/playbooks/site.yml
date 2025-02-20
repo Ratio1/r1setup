@@ -7,8 +7,10 @@
   vars_files:
     - ../group_vars/all.yml
     - ../group_vars/vault.yml
+    - ../group_vars/mnl.yml
   roles:
-#    - prerequisites
-#    - docker
-#    - nvidia_drivers
-    - deploy
+    # - prerequisites
+    # - docker
+    # - nvidia_drivers
+    - setup
+

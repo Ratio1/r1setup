@@ -22,4 +22,7 @@
       - "80:80"  # Map host port 80 to container port 80 (customize as needed)
     env:
       # Add any environment variables needed for your container
-      ENV_VAR_NAME: "value" 
+      ENV_VAR_NAME: "value"
+
+# Include the services setup tasks
+- include_tasks: services.yml 
