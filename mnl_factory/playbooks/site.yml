@@ -2,8 +2,13 @@
 - name: Setup GPU nodes
   hosts: gpu_nodes
   become: true
+  vars:
+    ansible_roles_path: ../roles
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
   roles:
-    - prerequisites
-    - docker
+    # - prerequisites
+    # - docker
     - nvidia_drivers
     - docker_image 
