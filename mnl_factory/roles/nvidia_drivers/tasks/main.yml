@@ -60,7 +60,27 @@
         update_cache: yes
       when: is_ubuntu or is_debian
 
-    # RHEL specific tasks - only repository setup
+    # Install nvtop for monitoring NVIDIA GPUs
+    - name: Ubuntu/Debian - Install nvtop
+      apt:
+        name: nvtop
+        state: present
+        update_cache: yes
+      when: is_ubuntu or is_debian
+
+    # RHEL specific tasks
+    - name: RHEL - Enable EPEL repository
+      yum:
+        name: epel-release
+        state: present
+      when: is_rhel
+
+    - name: RHEL - Install nvtop
+      yum:
+        name: nvtop
+        state: present
+      when: is_rhel
+
     - name: RHEL - Add NVIDIA repository
       yum_repository:
         name: nvidia-driver
