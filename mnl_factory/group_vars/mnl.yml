@@ -5,6 +5,9 @@ mnl_app_version: "1.0.0"
 mnl_app_env: "develop"   # Options: "staging", "qa", "preprod", "prod", "develop"
 mnl_dev_mode: false
 
+# Service configuration
+mnl_service_name: "mnl_execution_engine"
+
 # File system configuration
 mnl_base_folder: "/var/cache/{{ mnl_app_name }}"
 mnl_local_cache_folder: "{{ mnl_base_folder }}/_local_cache"

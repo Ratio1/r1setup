@@ -11,8 +11,24 @@
 
 - name: "Create service for {{ mnl_app_name }}"
   ansible.builtin.template:
-    src: mnl_ee.service.j2
-    dest: /etc/systemd/system/{{ mnl_app_name }}.service
+    src: mnl_execution_engine.service.j2
+    dest: /etc/systemd/system/{{ mnl_service_name }}.service
     mode: '0644'
     force: true
   notify: reload systemd
+
+############################### SCRIPTS ########################################
+## Additional file creating tasks: create show and restart scripts
+- name: Create get_logs.sh script
+  ansible.builtin.template:
+    src: get_logs.sh.j2
+    dest: "/usr/local/bin/get_logs"
+    mode: '0755'
+  become: true
+
+- name: Create restart_service.sh script  # Using template
+  ansible.builtin.template:  # Changed from copy to template
+    src: restart_service.sh.j2  # New template file
+    dest: "/usr/local/bin/restart_service"  # Updated destination
+    mode: '0755'
+  become: true
