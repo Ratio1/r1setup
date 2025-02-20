@@ -1,0 +1,43 @@
+# Ansible
+*.retry
+*.pyc
+__pycache__/
+.ansible/
+.ansible_vault_pass
+
+# Environment
+.env
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Sensitive data
+vault.yml
+*vault.yml
+*.vault
+*vault*
+*.key
+*.pem
+*.crt
+*.cer
+*.p12
+*.pfx
+
+# Local configuration
+inventory/local.yml
+group_vars/local.yml
+host_vars/local.yml 

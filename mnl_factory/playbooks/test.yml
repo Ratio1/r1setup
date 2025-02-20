@@ -1,0 +1,12 @@
+---
+- name: Test connection
+  hosts: gpu_nodes
+  become: true
+  tasks:
+    - name: Get OS information
+      command: cat /etc/os-release
+      register: os_info
+
+    - name: Display OS information
+      debug:
+        var: os_info.stdout_lines 

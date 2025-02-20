@@ -1,0 +1,90 @@
+---
+- name: Detect OS family
+  set_fact:
+    is_ubuntu: ansible_distribution == "Ubuntu"
+    is_debian: ansible_distribution == "Debian"
+    is_rhel: ansible_os_family == "RedHat"
+
+- name: Add NVIDIA repository for Ubuntu/Debian
+  block:
+    - name: Add NVIDIA repository
+      apt_repository:
+        repo: ppa:graphics-drivers/ppa
+        state: present
+  when: is_ubuntu or is_debian
+
+- name: Add NVIDIA repository for RHEL
+  block:
+    - name: Add NVIDIA repository
+      yum_repository:
+        name: nvidia-driver
+        description: NVIDIA Driver Repository
+        baseurl: https://download.nvidia.com/linux/{{ ansible_distribution | lower }}/$releasever/$basearch
+        gpgkey: https://download.nvidia.com/linux/{{ ansible_distribution | lower }}/nvidia-driver-local-repo-{{ ansible_distribution | lower }}-{{ ansible_distribution_version }}.pub
+        gpgcheck: yes
+        enabled: yes
+  when: is_rhel
+
+- name: Install NVIDIA drivers for Ubuntu/Debian
+  apt:
+    name: 
+      - nvidia-driver-{{ nvidia_driver_version }}
+    state: present
+    update_cache: yes
+  when: is_ubuntu or is_debian
+
+- name: Install NVIDIA drivers for RHEL
+  dnf:
+    name:
+      - nvidia-driver
+      - nvidia-driver-cuda
+    state: present
+  when: is_rhel
+
+- name: Download NVIDIA container toolkit GPG key
+  get_url:
+    url: https://nvidia.github.io/nvidia-docker/gpgkey
+    dest: /usr/share/keyrings/nvidia-docker-keyring.asc
+
+- name: Add NVIDIA container toolkit repository for Ubuntu/Debian
+  block:
+    - name: Add repository
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/nvidia-docker-keyring.asc] https://nvidia.github.io/nvidia-docker/{{ ansible_distribution | lower }}{{ ansible_distribution_version }}/nvidia-docker.list"
+        state: present
+        filename: nvidia-docker
+  when: is_ubuntu or is_debian
+
+- name: Add NVIDIA container toolkit repository for RHEL
+  block:
+    - name: Add repository
+      yum_repository:
+        name: nvidia-container-toolkit
+        description: NVIDIA Container Toolkit Repository
+        baseurl: https://nvidia.github.io/nvidia-docker/$releasever/$basearch
+        gpgkey: https://nvidia.github.io/nvidia-docker/gpgkey
+        gpgcheck: yes
+        enabled: yes
+  when: is_rhel
+
+- name: Install NVIDIA Docker packages for Ubuntu/Debian
+  apt:
+    name:
+      - nvidia-docker2
+      - nvidia-container-toolkit
+    state: present
+    update_cache: yes
+  when: is_ubuntu or is_debian
+
+- name: Install NVIDIA Docker packages for RHEL
+  dnf:
+    name:
+      - nvidia-docker2
+      - nvidia-container-toolkit
+    state: present
+  when: is_rhel
+
+- name: Restart Docker service
+  service:
+    name: docker
+    state: restarted 

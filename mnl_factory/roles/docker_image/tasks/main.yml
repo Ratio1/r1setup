@@ -1,0 +1,13 @@
+---
+- name: Log into Docker registry
+  docker_login:
+    registry: "{{ docker_registry }}"
+    username: "{{ docker_registry_username | default(omit) }}"
+    password: "{{ docker_registry_password | default(omit) }}"
+  when: docker_registry != ""
+
+- name: Pull Docker image
+  docker_image:
+    name: "{{ docker_image_name }}"
+    source: pull
+    force_source: yes 

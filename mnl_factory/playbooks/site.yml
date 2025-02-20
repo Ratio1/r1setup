@@ -1,0 +1,9 @@
+---
+- name: Setup GPU nodes
+  hosts: gpu_nodes
+  become: true
+  roles:
+    - prerequisites
+    - docker
+    - nvidia_drivers
+    - docker_image 
