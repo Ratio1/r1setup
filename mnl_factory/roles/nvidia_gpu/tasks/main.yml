@@ -1,0 +1,167 @@
+---
+# GPU Installation and Setup
+- name: Check if NVIDIA-SMI is available and working (Error is ok)
+  command: nvidia-smi
+  ignore_errors: true
+  register: nvidia_smi_check1
+  # This task checks if NVIDIA's System Management Interface (nvidia-smi) is available.
+  # It is a quick way to verify if NVIDIA drivers are properly installed.
+
+- name: Ensure mokutil is installed
+  package:
+    name: mokutil
+    state: present
+  when: nvidia_smi_check1.rc != 0
+
+- name: Check if Secure Boot is enabled
+  command: mokutil --sb-state
+  register: sb_state
+  when: nvidia_smi_check1.rc != 0
+  ignore_errors: true
+
+- name: Display Secure Boot state
+  debug:
+    var: sb_state.stdout
+  when: nvidia_smi_check1.rc != 0
+
+# This task checks if Secure Boot is enabled and fails the playbook if it is.
+# Secure Boot can prevent the installation of unsigned drivers, including NVIDIA drivers.
+- name: Fail task with error if Secure Boot is enabled
+  assert:
+    that: "'SecureBoot enabled' not in sb_state.stdout"
+    msg: "Secure Boot is enabled. Please disable Secure Boot in the BIOS settings and reboot the system."    
+  when: |
+    - nvidia_smi_check1.rc != 0
+
+- name: Cleanup existing NVIDIA drivers
+  shell: "apt autoremove nvidia* --purge -y"
+  when: nvidia_smi_check1.rc != 0
+  ignore_errors: true
+  # Runs only if initial nvidia-smi check failed.
+  # This task removes any existing NVIDIA drivers only if nvidia-smi is not found.
+  # It ensures that the system is cleaned up before installing new drivers.
+
+- name: Reboot the system
+  when: nvidia_smi_check1.rc != 0
+  reboot:
+  # Runs only if initial nvidia-smi check failed.
+  # A reboot is required after removing the NVIDIA drivers to ensure that changes take effect.
+  # The system will only reboot if the NVIDIA drivers were removed.
+
+- name: Wait for system to come back online after reboot
+  when: nvidia_smi_check1.rc != 0
+  wait_for_connection:
+    delay: 30
+    timeout: 300
+  # Runs only if initial nvidia-smi check failed.
+  # This task waits for the system to come back online after a reboot.
+  # It ensures that subsequent tasks do not run before the system is ready.
+
+- name: Update package lists
+  apt:
+    update_cache: yes
+    upgrade: yes
+  when: ansible_os_family == "Debian"
+
+- name: List GPGPU drivers
+  when: nvidia_smi_check1.rc != 0
+  command: ubuntu-drivers list --gpgpu
+  register: gpu_drivers_list
+  # Runs only if initial nvidia-smi check failed.
+  # Lists the available GPGPU drivers, a helpful step to check compatible drivers.
+
+- name: Output GPGPU drivers list
+  when: nvidia_smi_check1.rc != 0
+  debug:
+    msg: "{{ gpu_drivers_list.stdout }}"
+  # Runs only if initial nvidia-smi check failed.
+  # Outputs the list of available GPGPU drivers for informational purposes.
+
+- name: Extra update package lists
+  become: true
+  apt:
+    update_cache: yes
+    upgrade: yes
+  when: ansible_os_family == "Debian"
+
+- name: "Install NVIDIA driver: {{ aixp_nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
+  become: true
+  when: nvidia_smi_check1.rc != 0 and ansible_os_family == "Debian"
+  apt:
+    update_cache: yes
+    name:
+      - "{{ aixp_nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
+    state: present
+  register: nvidia_driver_installation
+  # Runs only if initial nvidia-smi check failed.
+  # Installs the specified NVIDIA driver. The version should be updated as needed.
+  # This task is executed only if the initial check for NVIDIA drivers failed.
+
+- name: Output NVIDIA driver installation result
+  when: nvidia_smi_check1.rc != 0
+  debug:
+    var: nvidia_driver_installation
+  # Runs only if initial nvidia-smi check failed.
+  # Outputs the result of the NVIDIA driver installation for verification.
+
+- name: "Hold the nvidia driver package {{ aixp_nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
+  become: true
+  when: nvidia_smi_check1.rc != 0 and ansible_os_family == "Debian"
+  ansible.builtin.dpkg_selections:
+    name:  "{{ aixp_nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
+    selection: hold
+  # Runs only if initial nvidia-smi check failed.
+  # This task holds the NVIDIA driver package to prevent it from being automatically updated.
+
+- name: Reboot the system
+  when: nvidia_smi_check1.rc != 0
+  reboot:
+  # Runs only if initial nvidia-smi check failed.
+  # Rebooting again to ensure the new NVIDIA drivers are properly loaded.
+
+- name: Wait for system to come back online after reboot
+  when: nvidia_smi_check1.rc != 0
+  wait_for_connection:
+    delay: 30
+    timeout: 300
+  # Runs only if initial nvidia-smi check failed.
+  # Waits for the system to be ready after the second reboot.
+
+- name: Check NVIDIA-SMI
+  command: "nvidia-smi --query-gpu=gpu_name,memory.total,driver_version,pci.device_id --format=csv"
+  register: nvidia_smi_output
+  failed_when: nvidia_smi_output.rc != 0
+  # Verifies that NVIDIA-SMI is functional after driver installation.
+  # This is a second check to ensure that the NVIDIA drivers were properly installed.
+
+- name: Output nvidia-smi results
+  debug:
+    msg: "{{ nvidia_smi_output.stdout }}"
+  # Outputs the nvidia-smi results for confirmation.
+
+- name: "Check if  {{ aixp_nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}} is held"
+  command: "dpkg --get-selections | grep  {{ aixp_nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
+  register: nvidia_driver_held
+  when: ansible_os_family == "Debian"
+
+- name: "Show held {{ aixp_nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
+  debug:
+    var: nvidia_driver_held
+  when: ansible_os_family == "Debian"
+  # Outputs the result of the check for the held NVIDIA driver package.
+
+- name: Install nvtop via Snap
+  ansible.builtin.command:
+    cmd: snap install nvtop
+  become: true
+  # Installs nvtop, a tool for monitoring NVIDIA GPUs, which can be useful for diagnostics and performance monitoring.
+
+- name: Show nvtop version
+  ansible.builtin.command:
+    cmd: snap info nvtop
+  register: nvtop_info
+  become: true
+
+- name: Debug nvtop version
+  ansible.builtin.debug:
+    msg: "{{ nvtop_info.stdout }}" 

@@ -9,8 +9,8 @@
     - ../group_vars/vault.yml
     - ../group_vars/mnl.yml
   roles:
-    # - prerequisites
-    # - docker
-    # - nvidia_drivers
+    - prerequisites
+    - nvidia_gpu
+    - docker
     - setup
 
