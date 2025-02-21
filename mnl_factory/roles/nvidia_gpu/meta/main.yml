@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  author: Your Name
+  description: Role for installing and configuring NVIDIA GPU drivers
+  license: MIT
+  min_ansible_version: 2.9
+  platforms:
+    - name: Ubuntu
+      versions:
+        - focal
+        - jammy
+  galaxy_tags:
+    - nvidia
+    - gpu
+    - driver
+dependencies: [] 

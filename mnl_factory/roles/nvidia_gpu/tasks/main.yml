@@ -93,6 +93,9 @@
       - "{{ aixp_nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
     state: present
   register: nvidia_driver_installation
+  retries: 3
+  delay: 10
+  until: nvidia_driver_installation is success
   # Runs only if initial nvidia-smi check failed.
   # Installs the specified NVIDIA driver. The version should be updated as needed.
   # This task is executed only if the initial check for NVIDIA drivers failed.
@@ -154,6 +157,11 @@
   ansible.builtin.command:
     cmd: snap install nvtop
   become: true
+  register: nvtop_install
+  changed_when: "'installed' in nvtop_install.stderr"
+  failed_when: 
+    - nvtop_install.rc != 0 
+    - "'already installed' not in nvtop_install.stderr"
   # Installs nvtop, a tool for monitoring NVIDIA GPUs, which can be useful for diagnostics and performance monitoring.
 
 - name: Show nvtop version
@@ -165,3 +173,18 @@
 - name: Debug nvtop version
   ansible.builtin.debug:
     msg: "{{ nvtop_info.stdout }}" 
+
+- name: Remove old NVIDIA packages
+  apt:
+    name: "{{ item }}"
+    state: absent
+    purge: yes
+  with_items:
+    - "nvidia-*"
+    - "libnvidia-*"
+  when: 
+    - nvidia_smi_check1.rc != 0
+    - ansible_os_family == "Debian"
+  register: nvidia_cleanup
+  ignore_errors: true
+  before: "Cleanup existing NVIDIA drivers" 
