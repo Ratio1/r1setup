@@ -1,0 +1,39 @@
+[Unit]
+Description=MultiNodeLauncher Execution Engine
+After=docker.service
+Requires=docker.service
+
+[Service]
+StartLimitBurst=0
+TimeoutStartSec=0
+Restart=always
+
+# Stop the container if it exists
+ExecStartPre=-/usr/bin/docker stop -t 20 {{ mnl_docker_image_name }}
+
+# Pull the latest image
+ExecStartPre=-/usr/bin/docker pull {{ mnl_docker_image_url }}
+
+# Start the container
+ExecStart=/bin/sh -c '/usr/bin/docker run \
+    {{ mnl_docker_gpus }} \
+    {{ mnl_port_forward | default('') }} \
+    -m {{ mnl_container_memory_limit | default('30GB') }} \
+    --rm \
+    --cap-add SYSLOG \
+    --network=host \
+    --ipc=host \
+    --name {{ mnl_docker_image_name }} \
+    -v /dev/shm:/dev/shm \
+    -v /etc/timezone:/etc/timezone \
+    {{ mnl_docker_image_url }}; \
+    echo $? > /tmp/ee-node.exit'
+
+# Stop the container
+ExecStop=/usr/bin/docker stop -t 20 {{ mnl_docker_image_name }}
+
+# Exit code 10 causes a system reboot
+{{ mnl_commented_restart | default('') }}ExecStopPost=/bin/sh -c 'EXIT_STATUS=$(cat /tmp/ee-node.exit); if [ "$EXIT_STATUS" -eq 10 ]; then shutdown -r now; fi'
+
+[Install]
+WantedBy=multi-user.target

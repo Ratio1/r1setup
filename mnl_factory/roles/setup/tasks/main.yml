@@ -1,0 +1,28 @@
+---
+- name: Log into Docker registry
+  docker_login:
+    registry: "{{ docker_registry }}"
+    username: "{{ docker_registry_username | default(omit) }}"
+    password: "{{ docker_registry_password | default(omit) }}"
+  when: docker_registry != ""
+
+- name: Pull Docker image
+  docker_image:
+    name: "{{ docker_image_name }}"
+    source: pull
+    force_source: yes
+
+#- name: Start Docker container
+#  docker_container:
+#    name: "{{ docker_container_name }}"  # Use the variable for the container name
+#    image: "{{ docker_image_name }}"
+#    state: started
+#    restart_policy: always  # Optional: ensures the container restarts on failure
+#    ports:
+#      - "80:80"  # Map host port 80 to container port 80 (customize as needed)
+#    env:
+#      # Add any environment variables needed for your container
+#      ENV_VAR_NAME: "value"
+
+# Include the services setup tasks
+- include_tasks: services.yml 

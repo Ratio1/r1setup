@@ -1,0 +1,13 @@
+---
+# Docker configuration
+docker_compose_version: "2.23.3"
+docker_container_name: "edge_node_container"  # Define the container name variable
+
+# NVIDIA configuration
+nvidia_driver: "nvidia-driver-550"  # Change this to match your needs
+nvidia_driver_version: "550"  # Change this to match your needs
+cuda_version: "12.2"
+
+# Docker image configuration
+docker_image_name: "naeural/edge_node:develop"  # Replace with your image name
+docker_registry: ""  # Add your registry if needed 

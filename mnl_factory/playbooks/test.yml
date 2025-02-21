@@ -1,0 +1,34 @@
+---
+- name: Test connection
+  hosts: gpu_nodes
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+  tasks:
+    - name: Get OS information
+      command: cat /etc/os-release
+      register: os_info
+
+    - name: Display OS information
+      debug:
+        var: os_info.stdout_lines
+
+    - name: Display all variables
+      debug:
+        msg: |
+          Docker Compose Version: {{ docker_compose_version | default('NOT DEFINED') }}
+          Docker Registry: {{ docker_registry | default('NOT DEFINED') }}
+          Docker Registry Username: {{ docker_registry_username | default('NOT DEFINED') }}
+          Ansible User: {{ ansible_user | default('NOT DEFINED') }}
+          SSH Private Key: {{ ansible_ssh_private_key_file | default('NOT DEFINED') }}
+          NVIDIA Driver Version: {{ nvidia_driver_version | default('NOT DEFINED') }}
+          CUDA Version: {{ cuda_version | default('NOT DEFINED') }}
+          Docker Image Name: {{ docker_image_name | default('NOT DEFINED') }}
+
+    - name: Display ansible facts
+      debug:
+        msg: |
+          Inventory Directory: {{ inventory_dir | default('NOT DEFINED') }}
+          Playbook Directory: {{ playbook_dir | default('NOT DEFINED') }}
+          Current Working Directory: {{ lookup('pipe', 'pwd') }}

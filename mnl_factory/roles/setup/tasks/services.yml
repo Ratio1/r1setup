@@ -1,0 +1,68 @@
+---
+#- name: Setup services
+#  systemd:
+#    name: my_service  # Replace with your actual service name
+#    state: started
+#    enabled: yes
+#  when: ansible_os_family == "Linux"
+
+# Add more service-related tasks here
+
+
+############### DOCKER ############################
+- name: Create /etc/docker/daemon.json
+  ansible.builtin.template:
+    src: docker_daemon.json.j2
+    dest: /etc/docker/daemon.json
+    mode: '0644'
+  notify: reload docker
+
+
+- name: Reload systemd for docker
+  ansible.builtin.command:
+    cmd: systemctl daemon-reload
+  become: yes
+  when:
+    - (mnl_debug_deploy is not defined) or (not mnl_debug_deploy | bool)
+
+- name: Restart docker
+  ansible.builtin.command:
+    cmd: systemctl restart docker
+  become: yes
+  when:
+    - (mnl_debug_deploy is not defined) or (not mnl_debug_deploy | bool)
+
+
+- name: "Create service for {{ mnl_app_name }}"
+  ansible.builtin.template:
+    src: mnl_execution_engine.service.j2
+    dest: /etc/systemd/system/{{ mnl_service_name }}.service
+    mode: '0644'
+    force: true
+  notify: reload systemd
+
+- name: Stop the service
+  ansible.builtin.systemd:
+    name: "{{ mnl_service_name }}"
+    state: stopped
+
+- name: Start the service
+  ansible.builtin.systemd:
+    name: "{{ mnl_service_name }}"
+    state: started
+
+############################### SCRIPTS ########################################
+## Additional file creating tasks: create show and restart scripts
+- name: Create get_logs.sh script
+  ansible.builtin.template:
+    src: get_logs.sh.j2
+    dest: "/usr/local/bin/get_logs"
+    mode: '0755'
+  become: true
+
+- name: Create restart_service.sh script  # Using template
+  ansible.builtin.template:  # Changed from copy to template
+    src: restart_service.sh.j2  # New template file
+    dest: "/usr/local/bin/restart_service"  # Updated destination
+    mode: '0755'
+  become: true

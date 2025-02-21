@@ -1,0 +1,74 @@
+#!/bin/bash
+
+# Function to display help message
+show_help() {
+  echo "Usage: $0 [-h] [-n LINES] [-f] [START_DATE] [END_DATE]"
+  echo
+  echo "Options:"
+  echo "  -h, --help    Show this help message and exit"
+  echo "  -n LINES      Number of lines to display (default: 1000)"
+  echo "  -f            Follow the log output"
+  echo
+  echo "Arguments:"
+  echo "  START_DATE    Start date in the format YYYY-MM-DD HH:MM:SS"
+  echo "  END_DATE      End date in the format YYYY-MM-DD HH:MM:SS"
+}
+
+# Default value for the number of lines
+DEFAULT_LINES=1000
+LINES="$DEFAULT_LINES"
+FOLLOW=""
+
+# Parse command-line options
+while getopts ":hn:f" opt; do
+  case ${opt} in
+    h )
+      show_help
+      exit 0
+      ;;
+    n )
+      LINES="$OPTARG"
+      ;;
+    f )
+      FOLLOW="-f"  # Set FOLLOW to -f if the option is provided
+      ;;
+    \? )
+      echo "Invalid option: $OPTARG" 1>&2
+      exit 1
+      ;;
+    : )
+      echo "Invalid option: $OPTARG requires an argument" 1>&2
+      exit 1
+      ;;
+  esac
+done
+shift $((OPTIND -1))
+
+# Validate date format function
+validate_date() {
+  date -d "$1" "+%Y-%m-%d %H:%M:%S" > /dev/null 2>&1
+  if [ $? -ne 0 ]; then
+    echo "Invalid date format: $1"
+    exit 1
+  fi
+}
+
+# Check if exactly two or three parameters are given
+if [ "$#" -ge 1 ]; then
+  # Validate the date formats
+  validate_date "$1"
+  if [ "$#" -eq 2 ]; then
+    validate_date "$2"
+    # Run journalctl with -S and -U options using the provided parameters
+    journalctl -a -n "$LINES" $FOLLOW -u {{ mnl_service_name }} -S "$1" -U "$2"
+  else
+    # Run the normal journalctl command with the specified number of lines
+    journalctl -a -n "$LINES" $FOLLOW -u {{ mnl_service_name }}
+  fi
+else
+  # Run the normal journalctl command with the default number of lines
+  journalctl -a -n "$LINES" $FOLLOW -u {{ mnl_service_name }}
+fi
+
+# Log the execution
+logger "get_logs.sh executed with parameters: $@"

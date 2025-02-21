@@ -1,0 +1,4 @@
+#!/bin/bash
+sudo systemctl enable {{ mnl_service_name }}
+sudo systemctl restart {{ mnl_service_name }}
+sudo journalctl -u {{ mnl_service_name }} -a -n 100
