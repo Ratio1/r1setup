@@ -24,7 +24,8 @@ mnl_docker_cr_accept_insecure: false
 
 # Runtime configuration
 mnl_device: "cuda:0"
-mnl_docker_gpus: "--gpus all"
+#mnl_docker_gpus: "--gpus all"
+mnl_docker_gpus: ""
 mnl_port_forward: "{{ '-p 1883:1883' if mnl_dev_mode else '' }}"
 mnl_container_memory_limit: 30GB
 

@@ -41,6 +41,16 @@
     force: true
   notify: reload systemd
 
+- name: Stop the service
+  ansible.builtin.systemd:
+    name: "{{ mnl_service_name }}"
+    state: stopped
+
+- name: Start the service
+  ansible.builtin.systemd:
+    name: "{{ mnl_service_name }}"
+    state: started
+
 ############################### SCRIPTS ########################################
 ## Additional file creating tasks: create show and restart scripts
 - name: Create get_logs.sh script
