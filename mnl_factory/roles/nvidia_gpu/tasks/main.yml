@@ -51,7 +51,7 @@
   assert:
     that: "'SecureBoot enabled' not in sb_state.stdout"
     msg: "Secure Boot is enabled. Please disable Secure Boot in the BIOS settings and reboot the system."    
-  when: |
+  when:
     - nvidia_gpu_check.rc == 0
     - nvidia_smi_check1.rc != 0
 
@@ -108,6 +108,10 @@
   when: 
     - nvidia_gpu_check.rc == 0
     - ansible_os_family == "Debian"
+  register: apt_update
+  retries: 5
+  delay: 10
+  until: apt_update is success
 
 - name: List GPGPU drivers
   when: 
@@ -135,6 +139,10 @@
   when: 
     - nvidia_gpu_check.rc == 0
     - ansible_os_family == "Debian"
+  register: apt_extra_update
+  retries: 5
+  delay: 10
+  until: apt_extra_update is success
 
 - name: "Install NVIDIA driver: {{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
   become: true
@@ -235,6 +243,14 @@
   when: nvidia_gpu_check.rc == 0
   # Installs nvtop, a tool for monitoring NVIDIA GPUs, which can be useful for diagnostics and performance monitoring.
 
+- name: Get nvtop version info
+  ansible.builtin.command:
+    cmd: snap info nvtop
+  register: nvtop_info
+  become: true
+  when: nvidia_gpu_check.rc == 0
+
 - name: Debug nvtop version
   ansible.builtin.debug:
-    msg: "{{ nvtop_info.stdout }}" 
+    msg: "{{ nvtop_info.stdout }}"
+  when: nvidia_gpu_check.rc == 0 
