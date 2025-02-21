@@ -1,0 +1,21 @@
+---
+galaxy_info:
+  role_name: gpu_setup
+  author:
+    - Andrei Damian
+    - Vitalii Toderian
+  description: Sets up GPU nodes with NVIDIA drivers and required dependencies
+  company: ratio1
+  license: MIT
+  min_ansible_version: 2.9
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+  galaxy_tags:
+    - gpu
+    - nvidia
+    - docker
+    - system
+
+dependencies: []

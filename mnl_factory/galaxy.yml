@@ -1,0 +1,19 @@
+namespace: "vitalii_t12"
+name: "multi_node_launcher"
+version: "1.0.1"
+readme: "README.md"
+authors:
+  - Andrei Damian <andrei.damian@me.com>
+  - Vitalii Toderian <vitalii.tdev@gmail.com>
+description: "Multi Node Launcher application"
+license:
+  - "MIT"
+tags:
+  - application
+  - deployment
+  - launcher
+  - ratio1
+repository: "https://github.com/yourusername/multi_node_launcher"
+documentation: "http://docs.example.com"
+homepage: "http://example.com"
+issues: "https://github.com/yourusername/multi_node_launcher/issues"
