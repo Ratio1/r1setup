@@ -12,5 +12,6 @@
     - prerequisites
     - nvidia_gpu
     - docker
+    - nvidia_drivers
     - setup
 

@@ -1,6 +1,0 @@
----
-nvidia_driver_version: "525"  # Default driver version
-nvidia_cleanup_on_failure: true
-nvidia_max_install_attempts: 3
-nvidia_reboot_timeout: 300
-nvidia_install_nvtop: true 

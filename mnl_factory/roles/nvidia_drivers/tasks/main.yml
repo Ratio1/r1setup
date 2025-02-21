@@ -60,36 +60,37 @@
         update_cache: yes
       when: is_ubuntu or is_debian
 
-    # Install nvtop for monitoring NVIDIA GPUs
-    - name: Ubuntu/Debian - Install nvtop
-      apt:
-        name: nvtop
-        state: present
-        update_cache: yes
-      when: is_ubuntu or is_debian
-
-    # RHEL specific tasks
-    - name: RHEL - Enable EPEL repository
-      yum:
-        name: epel-release
-        state: present
-      when: is_rhel
-
-    - name: RHEL - Install nvtop
-      yum:
-        name: nvtop
-        state: present
-      when: is_rhel
-
-    - name: RHEL - Add NVIDIA repository
-      yum_repository:
-        name: nvidia-driver
-        description: NVIDIA Driver Repository
-        baseurl: https://download.nvidia.com/linux/{{ ansible_distribution | lower }}/$releasever/$basearch
-        gpgkey: https://download.nvidia.com/linux/{{ ansible_distribution | lower }}/nvidia-driver-local-repo-{{ ansible_distribution | lower }}-{{ ansible_distribution_version }}.pub
-        gpgcheck: yes
-        enabled: yes
-      when: is_rhel
+# Running this in nvidia_gpu role
+#    # Install nvtop for monitoring NVIDIA GPUs
+#    - name: Ubuntu/Debian - Install nvtop
+#      apt:
+#        name: nvtop
+#        state: present
+#        update_cache: yes
+#      when: is_ubuntu or is_debian
+#
+#    # RHEL specific tasks
+#    - name: RHEL - Enable EPEL repository
+#      yum:
+#        name: epel-release
+#        state: present
+#      when: is_rhel
+#
+#    - name: RHEL - Install nvtop
+#      yum:
+#        name: nvtop
+#        state: present
+#      when: is_rhel
+#
+#    - name: RHEL - Add NVIDIA repository
+#      yum_repository:
+#        name: nvidia-driver
+#        description: NVIDIA Driver Repository
+#        baseurl: https://download.nvidia.com/linux/{{ ansible_distribution | lower }}/$releasever/$basearch
+#        gpgkey: https://download.nvidia.com/linux/{{ ansible_distribution | lower }}/nvidia-driver-local-repo-{{ ansible_distribution | lower }}-{{ ansible_distribution_version }}.pub
+#        gpgcheck: yes
+#        enabled: yes
+#      when: is_rhel
 
   # Only run this block if NVIDIA GPU is detected
   when: nvidia_check.rc == 0 
