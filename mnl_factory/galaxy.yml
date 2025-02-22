@@ -13,7 +13,7 @@ tags:
   - deployment
   - launcher
   - ratio1
-repository: "https://github.com/yourusername/multi_node_launcher"
+repository: "https://github.com/Ratio1/multi-node-launcher"
 documentation: "http://docs.example.com"
 homepage: "http://example.com"
 issues: "https://github.com/yourusername/multi_node_launcher/issues"
