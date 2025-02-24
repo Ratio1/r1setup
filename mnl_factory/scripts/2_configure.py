@@ -18,7 +18,16 @@ class ConfigManager:
             'cyan': '\033[96m',
             'end': '\033[0m'
         }
-        self.config_dir = Path.home() / '.ansible/collections/ansible_collections/vitalii_t12/multi_node_launcher'
+        
+        # Get the real user's home directory when running with sudo
+        if 'SUDO_USER' in os.environ:
+            import pwd
+            real_user = os.environ['SUDO_USER']
+            self.real_home = Path(pwd.getpwnam(real_user).pw_dir)
+        else:
+            self.real_home = Path.home()
+            
+        self.config_dir = self.real_home / '.ansible/collections/ansible_collections/vitalii_t12/multi_node_launcher'
         self.config_file = self.config_dir / 'hosts.yml'
         
         # Ensure the configuration directory exists
@@ -247,6 +256,8 @@ class ConfigManager:
             host_name = self.get_input(f"Enter name for GPU node #{i+1}", f"gpu-node-{i+1}")
             hosts[host_name] = self.configure_host(i+1)
             self.print_colored(f"\nGPU node '{host_name}' configured successfully!", 'green')
+            self.print_colored("=" * 30, 'cyan')  # Divider
+            print()  # Newline for spacing
 
         # Allow editing after all hosts are configured
         while True:
@@ -276,10 +287,31 @@ class ConfigManager:
     def save_configuration(self) -> None:
         """Save the configuration to file"""
         try:
+            # Create directory with proper ownership if it doesn't exist
             self.config_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Write the configuration
             with open(self.config_file, 'w') as f:
                 yaml.safe_dump(self.inventory, f, default_flow_style=False)
+            
+            # Set proper permissions
             os.chmod(self.config_file, 0o600)
+            
+            # Set proper ownership if running with sudo
+            if 'SUDO_USER' in os.environ:
+                import pwd
+                import grp
+                real_user = os.environ['SUDO_USER']
+                uid = pwd.getpwnam(real_user).pw_uid
+                gid = pwd.getpwnam(real_user).pw_gid
+                os.chown(self.config_file, uid, gid)
+                # Also set ownership of the config directory
+                for root, dirs, files in os.walk(str(self.config_dir)):
+                    os.chown(root, uid, gid)
+                    for d in dirs:
+                        os.chown(os.path.join(root, d), uid, gid)
+                    for f in files:
+                        os.chown(os.path.join(root, f), uid, gid)
 
             self.print_colored("\nConfiguration completed successfully!", 'green')
             self.print_colored(f"Configuration saved to: {self.config_file}", 'blue')

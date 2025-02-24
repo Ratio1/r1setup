@@ -20,7 +20,7 @@ print_message() {
 }
 
 # Create temporary directory
-TEMP_DIR=$(mktemp -d)
+TEMP_DIR=$(mkdir mnl_setup)
 cd "$TEMP_DIR"
 
 # Download setup scripts
