@@ -1,0 +1,21 @@
+# mnl_factory/roles/nvidia_gpu/meta/main.yml
+---
+galaxy_info:
+  role_name: nvidia_drivers
+  author:
+    - Andrei Damian
+    - Vitalii Toderian
+  description: Role for installing and configuring NVIDIA drivers
+  license: MIT
+  min_ansible_version: 2.9
+  platforms:
+    - name: Ubuntu
+      versions:
+        - focal
+        - jammy
+  galaxy_tags:
+    - nvidia
+    - gpu
+    - driver
+
+dependencies: []
