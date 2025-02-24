@@ -173,7 +173,7 @@ run_playbook() {
         exit 1
     fi
 
-    local ansible_cmd="ansible-playbook -i $COLLECTION_PATH/hosts.yml $COLLECTION_PATH/playbooks/$playbook"
+    local ansible_cmd="ANSIBLE_ROLES_PATH=$COLLECTION_PATH/roles ansible-playbook -i $COLLECTION_PATH/hosts.yml $COLLECTION_PATH/playbooks/$playbook"
     if [ -n "$extra_vars" ]; then
         ansible_cmd="$ansible_cmd --extra-vars \"$extra_vars\""
     fi

@@ -3,15 +3,15 @@
   hosts: gpu_nodes
   become: true
   vars:
-    ansible_roles_path: ../roles
+    ansible_roles_path: "{{ playbook_dir }}/../roles"
   vars_files:
     - ../group_vars/all.yml
     - ../group_vars/vault.yml
     - ../group_vars/mnl.yml
   roles:
-    - prerequisites
-    - nvidia_gpu
-    - docker
-    - nvidia_drivers
-    - setup
+    - role: "{{ playbook_dir }}/../roles/prerequisites"
+    - role: "{{ playbook_dir }}/../roles/nvidia_gpu"
+    - role: "{{ playbook_dir }}/../roles/docker"
+    - role: "{{ playbook_dir }}/../roles/nvidia_drivers"
+    - role: "{{ playbook_dir }}/../roles/setup"
 
