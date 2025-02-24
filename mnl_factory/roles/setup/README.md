@@ -43,7 +43,7 @@ print_message "\n3. Running setup..." "$YELLOW"
 sudo ./3_run_setup.sh
 ```
 
-Save this script as `setup.sh`, make it executable with `chmod +x setup.sh`, and run it with `./setup.sh`.
+Save this script as `setup.sh`, make it executable with `chmod +x setup.sh`, and run it with `sudo ./setup.sh`.
 
 ## What the Setup Does
 
