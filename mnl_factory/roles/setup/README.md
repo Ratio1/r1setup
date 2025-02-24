@@ -2,57 +2,84 @@
 
 This role orchestrates the complete setup of GPU nodes by coordinating the execution of other roles and performing final configuration tasks.
 
+## Quick Start
+
+Copy and run this script to set up your GPU nodes:
+
+```bash
+#!/bin/bash
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+print_message() {
+    echo -e "${2}${1}${NC}"
+}
+
+# Create temporary directory
+TEMP_DIR=$(mktemp -d)
+cd "$TEMP_DIR"
+
+# Download setup scripts
+print_message "Downloading setup scripts..." "$YELLOW"
+curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/1_prerequisites.sh
+curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/2_configure.py
+curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/3_run_setup.sh
+
+# Make scripts executable
+chmod +x 1_prerequisites.sh 2_configure.py 3_run_setup.sh
+
+print_message "\nSetup process:" "$GREEN"
+print_message "1. Installing prerequisites..." "$YELLOW"
+sudo ./1_prerequisites.sh
+
+print_message "\n2. Configuring nodes..." "$YELLOW"
+python3 2_configure.py
+
+print_message "\n3. Running setup..." "$YELLOW"
+sudo ./3_run_setup.sh
+```
+
+Save this script as `setup.sh`, make it executable with `chmod +x setup.sh`, and run it with `./setup.sh`.
+
+## What the Setup Does
+
+1. **Prerequisites** (`1_prerequisites.sh`):
+   - Installs required packages (Python, Ansible, sshpass)
+   - Sets up virtual environment
+   - Installs Ansible collection
+
+2. **Configuration** (`2_configure.py`):
+   - Interactive node configuration
+   - SSH authentication setup
+   - Configuration validation
+
+3. **Deployment** (`3_run_setup.sh`):
+   - Full deployment (Docker + NVIDIA drivers + GPU setup)
+   - Docker-only deployment option
+   - Connection testing
+   - Node information retrieval
+   - Configuration management
+
 ## Requirements
 
 - Ubuntu-based system
-- All requirements from dependent roles (prerequisites, nvidia_drivers, docker)
+- Internet connection
+- Sudo privileges
 
-## Role Variables
+## Available Options
 
-```yaml
-# defaults/main.yml
-setup_monitoring: true           # Enable monitoring tools
-setup_docker: true              # Enable Docker setup
-setup_nvidia_drivers: true      # Enable NVIDIA driver setup
-enable_automatic_updates: false # Enable automatic system updates
-```
+After setup, you can use the following options through the deployment menu:
 
-## Dependencies
-
-- prerequisites
-- nvidia_drivers
-- docker
-
-## Example Playbook
-
-```yaml
-- hosts: gpu_nodes
-  roles:
-    - role: setup
-      vars:
-        setup_monitoring: true
-        setup_docker: true
-        setup_nvidia_drivers: true
-```
-
-## Role Tasks
-
-The role performs the following tasks:
-
-1. Initial Setup
-   - Validates system requirements
-   - Configures basic system settings
-   - Sets up monitoring tools (if enabled)
-
-2. Role Coordination
-   - Manages role execution order
-   - Handles role dependencies
-   - Ensures proper configuration across roles
-
-3. Final Configuration
-   - Validates complete setup
-   - Configures automatic updates (if enabled)
-   - Performs final system checks
+1. Full deployment (Docker + NVIDIA drivers + GPU setup)
+2. Docker-only deployment
+3. Test connection to hosts
+4. Get nodes information
+5. View current configuration
+6. Exit
 
 ## License
 
