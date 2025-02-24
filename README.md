@@ -13,6 +13,7 @@ A comprehensive solution for setting up and managing GPU nodes with automated de
 - [Troubleshooting](#troubleshooting)
 - [Post-Installation](#post-installation)
 - [Notes](#notes)
+- [Deployment Instructions](#deployment-instructions)
 
 ## Prerequisites
 
@@ -176,6 +177,77 @@ nvidia-smi --query-gpu=driver_version --format=csv,noheader
 - Keep your vault.yml file secure and never commit it to version control
 - Ensure adequate cooling and power for GPU operations
 - Consider using NVIDIA container toolkit for Docker GPU support
+
+## Deployment Instructions
+
+### Building the Collection
+
+1. **Prepare the Collection**
+   Ensure you have the correct directory structure and all required files:
+   ```
+   mnl_factory/
+   ├── galaxy.yml          # Collection metadata
+   ├── README.md
+   ├── plugins/
+   ├── playbooks/
+   └── roles/
+   ```
+
+2. **Build the Collection**
+   From the root directory of the collection, run:
+   ```bash
+   ansible-galaxy collection build
+   ```
+   This will create a tarball like `vitalii_t12-multi_node_launcher-1.0.0.tar.gz`
+
+3. **Install the Collection**
+   You can install the collection locally using:
+   ```bash
+   ansible-galaxy collection install vitalii_t12-multi_node_launcher-1.0.0.tar.gz -p ./collections
+   ```
+
+### Using the Collection
+
+1. **Install Dependencies**
+   ```bash
+   ansible-galaxy collection install -r requirements.yml
+   ```
+
+2. **Configure Your Environment**
+   - Copy and edit the inventory file:
+     ```bash
+     cp inventory/hosts.yml.example inventory/hosts.yml
+     ```
+   - Update the hosts file with your target nodes
+   - Copy and edit the vault file:
+     ```bash
+     cp group_vars/vault.yml.example group_vars/vault.yml
+     ```
+
+3. **Run the Deployment**
+   ```bash
+   ansible-playbook -i inventory/hosts.yml playbooks/site.yml
+   ```
+
+   If using vault encryption:
+   ```bash
+   ansible-playbook -i inventory/hosts.yml playbooks/site.yml --ask-vault-pass
+   ```
+
+### Publishing the Collection (Optional)
+
+To publish the collection to Ansible Galaxy:
+
+1. **Create an Account**
+   Sign up at [galaxy.ansible.com](https://galaxy.ansible.com)
+
+2. **Get API Token**
+   Generate an API token from your Galaxy profile
+
+3. **Publish**
+   ```bash
+   ansible-galaxy collection publish ./vitalii_t12-multi_node_launcher-1.0.0.tar.gz --api-key=your_api_token
+   ```
 
 ## License
 

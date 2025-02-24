@@ -60,9 +60,25 @@
     mode: '0755'
   become: true
 
-- name: Create restart_service.sh script  # Using template
+- name: Create restart_service script  # Using template
   ansible.builtin.template:  # Changed from copy to template
-    src: restart_service.sh.j2  # New template file
+    src: restart_service.command.j2  # New template file
     dest: "/usr/local/bin/restart_service"  # Updated destination
     mode: '0755'
   become: true
+
+- name: Create get_node_info script  # Using template
+  ansible.builtin.template:  # Changed from copy to template
+    src: get_node_info.command.j2  # New template file
+    dest: "/usr/local/bin/get_node_info"  # Updated destination
+    mode: '0755'
+  become: true
+
+- name: Run get_node_info command
+  ansible.builtin.command:
+    cmd: get_node_info
+  register: node_info
+
+- name: Display node information
+  debug:
+    msg: "{{ node_info.stdout_lines }}"

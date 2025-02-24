@@ -18,6 +18,12 @@ class ConfigManager:
             'cyan': '\033[96m',
             'end': '\033[0m'
         }
+        self.config_dir = Path.home() / '.ansible/collections/ansible_collections/vitalii_t12/multi_node_launcher'
+        self.config_file = self.config_dir / 'hosts.yml'
+        
+        # Ensure the configuration directory exists
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+
         self.inventory = {
             'all': {
                 'children': {
@@ -27,8 +33,6 @@ class ConfigManager:
                 }
             }
         }
-        self.config_dir = Path.home() / '.ansible/collections/ansible_collections/vitalii_t12/multi_node_launcher'
-        self.config_file = self.config_dir / 'hosts.yml'
 
     def print_colored(self, text: str, color: str = 'white') -> None:
         print(f"{self.colors.get(color, '')}{text}{self.colors['end']}")
@@ -282,12 +286,18 @@ class ConfigManager:
             self.print_colored("\nNext steps:", 'yellow')
             self.print_colored("1. Review your configuration:", 'yellow')
             self.print_colored(f"   cat {self.config_file}", 'blue')
-            self.print_colored("2. Run the deployment:", 'yellow')
-            self.print_colored("   ./3_deploy.sh", 'blue')
+            self.print_colored("2. Run the setup script:", 'yellow')
+            self.print_colored("   ./3_run_setup.sh", 'blue')
 
         except Exception as e:
             self.print_colored(f"Error saving configuration: {str(e)}", 'red')
             exit(1)
+
+    def save_hosts(self) -> None:
+        """Save the hosts configuration to the YAML file."""
+        with open(self.config_file, 'w') as f:
+            yaml.safe_dump(self.inventory, f, default_flow_style=False)
+        print(f"{self.colors['green']}Configuration saved to: {self.config_file}{self.colors['end']}")
 
 def main():
     config_manager = ConfigManager()

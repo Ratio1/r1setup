@@ -52,6 +52,21 @@ error() {
     log "ERROR" "$1" "$RED"
 }
 
+# Function to print status messages
+print_status() {
+    echo -e "${YELLOW}[*] $1${NC}"
+}
+
+# Function to print success messages
+print_success() {
+    echo -e "${GREEN}[+] $1${NC}"
+}
+
+# Function to print error messages
+print_error() {
+    echo -e "${RED}[-] $1${NC}"
+}
+
 # Get the actual user's home directory
 if [ -n "$SUDO_USER" ]; then
     REAL_USER=$SUDO_USER
@@ -68,6 +83,9 @@ debug "Real home: $REAL_HOME"
 COLLECTION_PATH="$REAL_HOME/.ansible/collections/ansible_collections/vitalii_t12/multi_node_launcher"
 debug "Collection path: $COLLECTION_PATH"
 
+# Add this near the top of the script, after the color definitions
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
 # Function to check if hosts.yml exists and is not empty
 check_hosts_config() {
     local hosts_file="$COLLECTION_PATH/hosts.yml"
@@ -75,17 +93,17 @@ check_hosts_config() {
     
     if [ ! -f "$hosts_file" ]; then
         debug "Hosts file not found"
-        error "No hosts configuration found!"
-        warning "Please run the configuration script first:"
-        info "python3 2_configure.py"
+        print_error "No hosts configuration found!"
+        print_status "Please run the configuration script first:"
+        echo "python3 2_configure.py"
         exit 1
     fi
 
     if [ ! -s "$hosts_file" ]; then
         debug "Hosts file is empty"
-        error "Hosts configuration is empty!"
-        warning "Please run the configuration script to set up your hosts:"
-        info "python3 2_configure.py"
+        print_error "Hosts configuration is empty!"
+        print_status "Please run the configuration script to set up your hosts:"
+        echo "python3 2_configure.py"
         exit 1
     fi
     
@@ -115,12 +133,9 @@ show_deployment_menu() {
     echo "1) Full deployment (Docker + NVIDIA drivers + GPU setup)"
     echo "2) Docker-only deployment"
     echo "3) Test connection to hosts"
-    echo "4) View current configuration"
-    echo "5) Exit"
-    
-    read -p "Select an option [1-5]: " choice
-    echo
-    return $choice
+    echo "4) Get nodes information"
+    echo "5) View current configuration"
+    echo "6) Exit"
 }
 
 # Function to view current configuration
@@ -231,39 +246,46 @@ check_hosts_config
 
 # Main loop
 while true; do
-    info "\nDeployment Options:"
-    echo "1) Full deployment (Docker + NVIDIA drivers + GPU setup)"
-    echo "2) Docker-only deployment"
-    echo "3) Test connection to hosts"
-    echo "4) View current configuration"
-    echo "5) Exit"
-    
-    read -p "Select an option [1-5]: " choice
-    echo
-    debug "User selected option: $choice"
+    show_deployment_menu
+    read -p "Select an option [1-6]: " choice
     
     case $choice in
         1)
-            info "Starting full deployment..."
+            print_status "Starting full deployment..."
             run_playbook "site.yml"
             ;;
         2)
-            info "Starting Docker-only deployment..."
+            print_status "Starting Docker-only deployment..."
             run_playbook "site.yml" "skip_gpu=true"
             ;;
         3)
-            info "Testing connection to hosts..."
-            run_playbook "deploy-config.yml"
+            print_status "Testing connection to hosts..."
+            if ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/test_connection.yml"; then
+                print_success "Connection test completed successfully."
+            else
+                print_error "Connection test failed. Please check your inventory and playbook."
+                exit 1
+            fi
             ;;
         4)
-            view_configuration
+            print_status "Getting nodes information..."
+            if ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml"; then
+                print_success "Node information retrieved successfully."
+            else
+                print_error "Failed to retrieve node information."
+                exit 1
+            fi
             ;;
         5)
-            info "Exiting deployment script."
+            print_status "Viewing current configuration..."
+            view_configuration
+            ;;
+        6)
+            print_success "Exiting deployment script."
             exit 0
             ;;
         *)
-            error "Invalid option. Please try again."
+            print_error "Invalid option. Please try again."
             ;;
     esac
 done 

@@ -1,0 +1,40 @@
+---
+all:
+  children:
+    gpu_nodes:
+      hosts:
+        # Example GPU node 1
+        gpu-node-1:
+          ansible_host: 192.168.1.100
+          ansible_user: ubuntu
+          ansible_become_password: your_sudo_password  # For sudo privileges
+          ansible_connection: ssh
+          ansible_ssh_private_key_file: ~/.ssh/id_rsa
+          # Optional: Password authentication
+          # ansible_ssh_pass: "your_ssh_password"
+          
+        # Example GPU node 2
+        gpu-node-2:
+          ansible_host: 192.168.1.101
+          ansible_user: ubuntu
+          ansible_become_password: your_sudo_password  # For sudo privileges
+          ansible_connection: ssh
+          ansible_ssh_private_key_file: ~/.ssh/id_rsa
+          # Optional: Disable host key checking for testing
+          # ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+
+        # Example local VM
+        local-vm:
+          ansible_host: 192.168.122.100
+          ansible_user: your_username
+          ansible_become_password: your_sudo_password
+          ansible_connection: ssh
+          ansible_ssh_private_key_file: ~/.ssh/id_rsa
+          ansible_ssh_pass: "your_password"  # For password authentication
+          ansible_ssh_common_args: '-o StrictHostKeyChecking=no'  # For local testing
+
+# Notes:
+# 1. Replace values with your actual configuration
+# 2. Remove ansible_ssh_pass if using key-based authentication
+# 3. ansible_become_password is required for sudo operations
+# 4. Use ansible_ssh_common_args with caution in production 

@@ -1,0 +1,24 @@
+---
+- name: Test connection to GPU nodes
+  hosts: gpu_nodes
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Ping hosts
+      ping:
+
+    - name: Get OS information
+      command: cat /etc/os-release
+      register: os_info
+
+    - name: Display OS information
+      debug:
+        var: os_info.stdout_lines
+
+    - name: Display Ansible facts
+      debug:
+        msg: |
+          Ansible User: {{ ansible_user | default('NOT DEFINED') }}
+          Inventory Directory: {{ inventory_dir | default('NOT DEFINED') }}
+          Playbook Directory: {{ playbook_dir | default('NOT DEFINED') }}
+          Current Working Directory: {{ lookup('pipe', 'pwd') }} 
