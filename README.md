@@ -52,3 +52,7 @@ To set up your environment and deploy the necessary configurations, follow these
    If you encounter any issues, refer to the troubleshooting section in the README for common problems and their solutions.
 
 By following these steps, you should be able to successfully set up your environment and deploy the necessary configurations for your GPU nodes.
+
+
+
+curl -sSL https://raw.githubusercontent.com/YourUsername/multi-node-launcher/main/install.sh | sudo bash
