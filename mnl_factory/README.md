@@ -46,7 +46,38 @@ This Ansible playbook automates the setup of GPU nodes with Docker, NVIDIA drive
 ansible-galaxy collection install -r requirements.yml
 ```
 
-2. Set up secrets:
+2. Configure your hosts:
+   - Create or edit `inventory/hosts.yml`:
+     ```yaml
+     all:
+       children:
+         gpu_nodes:
+           hosts:
+             node1:
+               ansible_host: 192.168.1.101
+               ansible_user: your_username
+               ansible_ssh_private_key_file: ~/.ssh/id_rsa
+             node2:
+               ansible_host: 192.168.1.102
+               ansible_user: your_username
+               ansible_ssh_private_key_file: ~/.ssh/id_rsa
+     ```
+   - Ensure SSH access to your nodes:
+     ```bash
+     # Generate SSH key if you haven't already
+     ssh-keygen -t rsa -b 4096
+     
+     # Copy your SSH key to each node
+     ssh-copy-id your_username@192.168.1.101
+     ssh-copy-id your_username@192.168.1.102
+     ```
+   - Test SSH connectivity:
+     ```bash
+     ssh your_username@192.168.1.101
+     ssh your_username@192.168.1.102
+     ```
+
+3. Set up secrets:
    - Copy `group_vars/vault.yml.example` to `group_vars/vault.yml`
    - Edit `vault.yml` with your actual credentials
    - (Optional) Encrypt the vault file:
