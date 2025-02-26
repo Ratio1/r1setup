@@ -38,6 +38,7 @@
       - curl
       - software-properties-common
       - python3-pip
+      - python3-yaml
       - build-essential
       - git
     state: present
@@ -54,6 +55,7 @@
       - curl
       - dnf-plugins-core
       - python3-pip
+      - python3-pyyaml
       - gcc
       - gcc-c++
       - make
