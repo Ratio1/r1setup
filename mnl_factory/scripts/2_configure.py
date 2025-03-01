@@ -27,7 +27,7 @@ class ConfigManager:
         else:
             self.real_home = Path.home()
             
-        self.config_dir = self.real_home / '.ansible/collections/ansible_collections/vitalii_t12/multi_node_launcher'
+        self.config_dir = self.real_home / '.ansible/collections/ansible_collections/ratio1/multi_node_launcher'
         self.config_file = self.config_dir / 'hosts.yml'
         
         # Ensure the configuration directory exists

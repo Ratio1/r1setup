@@ -114,10 +114,10 @@ cd "$INSTALL_DIR"
 
 # Install Ansible collection for the real user
 print_message "Installing Multi Node Launcher collection..." "$YELLOW"
-sudo -u "$REAL_USER" ansible-galaxy collection install vitalii_t12.multi_node_launcher --force
+sudo -u "$REAL_USER" ansible-galaxy collection install ratio1.multi_node_launcher --force
 
 # Verify collection installation with improved path detection
-COLLECTION_PATH=$(sudo -u "$REAL_USER" bash -c 'ansible-galaxy collection list 2>/dev/null | grep "vitalii_t12.multi_node_launcher" || true')
+COLLECTION_PATH=$(sudo -u "$REAL_USER" bash -c 'ansible-galaxy collection list 2>/dev/null | grep "ratio1.multi_node_launcher" || true')
 if [ -z "$COLLECTION_PATH" ]; then
     print_message "Failed to detect installed collection" "$RED"
     exit 1
@@ -125,14 +125,14 @@ fi
 
 # Extract version and path from collection info
 COLLECTION_VER=$(echo "$COLLECTION_PATH" | awk '{print $2}')
-COLLECTION_INSTALL_PATH="$REAL_HOME/.ansible/collections/ansible_collections/vitalii_t12/multi_node_launcher"
+COLLECTION_INSTALL_PATH="$REAL_HOME/.ansible/collections/ansible_collections/ratio1/multi_node_launcher"
 
 if [ ! -d "$COLLECTION_INSTALL_PATH" ]; then
     print_message "Collection directory not found at: $COLLECTION_INSTALL_PATH" "$RED"
     exit 1
 fi
 
-print_message "Collection vitalii_t12.multi_node_launcher v$COLLECTION_VER installed successfully" "$GREEN"
+print_message "Collection ratio1.multi_node_launcher v$COLLECTION_VER installed successfully" "$GREEN"
 print_message "Collection path: $COLLECTION_INSTALL_PATH" "$GREEN"
 
 # Create factory directory
@@ -170,16 +170,16 @@ cat > deploy.yml << 'EOF'
   tasks:
     - name: Include prerequisites role
       include_role:
-        name: vitalii_t12.multi_node_launcher.prerequisites
+        name: ratio1.multi_node_launcher.prerequisites
 
     - name: Include NVIDIA GPU role
       include_role:
-        name: vitalii_t12.multi_node_launcher.nvidia_gpu
+        name: ratio1.multi_node_launcher.nvidia_gpu
       when: not skip_gpu | default(false)
 
     - name: Include Docker role
       include_role:
-        name: vitalii_t12.multi_node_launcher.docker
+        name: ratio1.multi_node_launcher.docker
 EOF
 
 cat > deploy-gpu.yml << 'EOF'
@@ -191,7 +191,7 @@ cat > deploy-gpu.yml << 'EOF'
   tasks:
     - name: Include NVIDIA GPU role
       include_role:
-        name: vitalii_t12.multi_node_launcher.nvidia_gpu
+        name: ratio1.multi_node_launcher.nvidia_gpu
 EOF
 
 cat > deploy-config.yml << 'EOF'

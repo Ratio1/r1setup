@@ -204,16 +204,16 @@ if [ "$SKIP_INSTALLATIONS" = false ]; then
 fi
 
 # Install Ansible Collection
-log_with_color "Installing Ansible Collection: vitalii_t12.multi_node_launcher" light
-ansible-galaxy collection install vitalii_t12.multi_node_launcher --force
+log_with_color "Installing Ansible Collection: ratio1.multi_node_launcher" light
+ansible-galaxy collection install ratio1.multi_node_launcher --force
 
 if [ $? -eq 0 ]; then
-  COLLECTION_VER=$(ansible-galaxy collection list | grep vitalii_t12.multi_node_launcher | awk '{print $2}')
+  COLLECTION_VER=$(ansible-galaxy collection list | grep ratio1.multi_node_launcher | awk '{print $2}')
   log_with_color " " 
-  log_with_color "Ansible Collection: vitalii_t12.multi_node_launcher v$COLLECTION_VER is successfully installed." green
+  log_with_color "Ansible Collection: ratio1.multi_node_launcher v$COLLECTION_VER is successfully installed." green
   log_with_color "___________________________________________________________________________" green
 else
-  log_with_color "Ansible Collection: vitalii_t12.multi_node_launcher is not installed." red
+  log_with_color "Ansible Collection: ratio1.multi_node_launcher is not installed." red
   exit 1
 fi
 

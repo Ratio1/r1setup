@@ -26,6 +26,7 @@ ExecStart=/bin/sh -c '/usr/bin/docker run \
     --name {{ mnl_docker_image_name }} \
     -v /dev/shm:/dev/shm \
     -v /etc/timezone:/etc/timezone \
+    -v {{ mnl_docker_persistent_folder }} \
     {{ mnl_docker_image_url }}; \
     echo $? > /tmp/ee-node.exit'
 
