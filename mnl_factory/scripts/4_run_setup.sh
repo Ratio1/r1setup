@@ -79,8 +79,13 @@ fi
 debug "Real user: $REAL_USER"
 debug "Real home: $REAL_HOME"
 
+# Set Ansible environment variables to use the real user's home directory
+export ANSIBLE_CONFIG="$REAL_HOME/.ansible.cfg"
+export ANSIBLE_COLLECTIONS_PATH="$REAL_HOME/.ansible/collections"
+export ANSIBLE_HOME="$REAL_HOME/.ansible"
+
 # Get the collection path using the real user's home
-COLLECTION_PATH="$REAL_HOME/.ansible/collections/ansible_collections/vitalii_t12/multi_node_launcher"
+COLLECTION_PATH="$REAL_HOME/.ansible/collections/ansible_collections/ratio1/multi_node_launcher"
 debug "Collection path: $COLLECTION_PATH"
 
 # Add this near the top of the script, after the color definitions
@@ -90,12 +95,12 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 check_hosts_config() {
     local hosts_file="$COLLECTION_PATH/hosts.yml"
     debug "Checking hosts file: $hosts_file"
-    
+
     if [ ! -f "$hosts_file" ]; then
         debug "Hosts file not found"
         print_error "No hosts configuration found!"
         print_status "Please run the configuration script first:"
-        echo "python3 2_configure.py"
+        echo "python3 3_configure.py"
         exit 1
     fi
 
@@ -103,10 +108,10 @@ check_hosts_config() {
         debug "Hosts file is empty"
         print_error "Hosts configuration is empty!"
         print_status "Please run the configuration script to set up your hosts:"
-        echo "python3 2_configure.py"
+        echo "python3 3_configure.py"
         exit 1
     fi
-    
+
     debug "Hosts file exists and is not empty"
 }
 
@@ -120,7 +125,7 @@ verify_ansible() {
     debug "Ansible is installed"
 
     debug "Verifying Ansible collection"
-    if ! ansible-galaxy collection list | grep -q "vitalii_t12.multi_node_launcher"; then
+    if ! ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-galaxy collection list | grep -q "ratio1.multi_node_launcher"; then
         error "Required Ansible collection is not installed!"
         exit 1
     fi
@@ -131,23 +136,23 @@ verify_ansible() {
 parse_node_info() {
     local output_file="/tmp/node_info_output.txt"
     local show_only=${1:-"true"}
-    
+
     # Run the playbook and capture output
-    ANSIBLE_STDOUT_CALLBACK=yaml ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml" > "$output_file" 2>&1
-    
+    ANSIBLE_STDOUT_CALLBACK=yaml ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml" > "$output_file" 2>&1
+
     debug "Parsing node info from: $output_file"
-    
+
     # Parse the output using awk
     awk -v show="$show_only" -v collection_path="$COLLECTION_PATH" '
-    BEGIN { 
-        host=""; 
+    BEGIN {
+        host="";
         in_stdout_lines=0;
         if (show == "true") {
             printf "\n%-20s %-15s %-45s %-42s\n", "HOST", "IP", "ADDRESS", "ETH ADDRESS"
             printf "%-20s %-15s %-45s %-42s\n", "--------------------", "---------------", "---------------------------------------------", "------------------------------------------"
         }
     }
-    /^ok: \[.*\] =>/ { 
+    /^ok: \[.*\] =>/ {
         match($0, /\[(.*)\]/)
         host=substr($0, RSTART+1, RLENGTH-2)
         # Extract IP if the host is an IP address
@@ -161,14 +166,14 @@ parse_node_info() {
             gsub(/[[:space:]]/, "", ip)
         }
     }
-    /"address": / { 
+    /"address": / {
         if (in_stdout_lines) {
             match($0, /"address": "([^"]*)"/)
             address=substr($0, RSTART+11, RLENGTH-12)
             gsub(/"/, "", address)  # Remove any remaining quotes
         }
     }
-    /"eth_address": / { 
+    /"eth_address": / {
         if (in_stdout_lines) {
             match($0, /"eth_address": "([^"]*)"/)
             eth_address=substr($0, RSTART+15, RLENGTH-16)
@@ -183,10 +188,10 @@ parse_node_info() {
     /node_info.stdout_lines:/ { in_stdout_lines=1 }
     /skipping: \[.*\]/ { in_stdout_lines=0 }
     ' "$output_file"
-    
+
     # Clean up
     rm -f "$output_file"
-    
+
     if [ "$show_only" = "true" ]; then
         echo
         read -p "Press Enter to continue..."
@@ -196,15 +201,15 @@ parse_node_info() {
 # Function to save node info to CSV
 save_node_info_csv() {
     local csv_file="node_info_$(date +%Y%m%d_%H%M%S).csv"
-    
+
     print_status "Saving node information to CSV..."
-    
+
     # Add header to CSV file
     echo "Host,IP,Address,ETH_Address" > "$csv_file"
-    
+
     # Call parse_node_info with show_only=false to get CSV format
     parse_node_info "false" >> "$csv_file"
-    
+
     if [ $? -eq 0 ]; then
         print_success "Node information saved to: $csv_file"
         echo
@@ -236,7 +241,7 @@ view_configuration() {
     echo "================================"
     print_success "Configuration file: $hosts_file"
     echo "--------------------------------"
-    
+
     # Use Python to read and display YAML without sensitive information
     python3 -c '
 import yaml
@@ -254,7 +259,7 @@ with open(sys.argv[1]) as f:
             for key, value in host_config.items():
                 print(f"  {key}: {mask_sensitive(value)}")
     ' "$hosts_file"
-    
+
     echo
     read -p "Press Enter to continue..."
 }
@@ -263,14 +268,15 @@ with open(sys.argv[1]) as f:
 run_playbook() {
     local playbook=$1
     local extra_vars=$2
-    
+
     info "Running deployment..."
     info "================================"
-    
+
     debug "Running playbook: $playbook"
     debug "Inventory file: $COLLECTION_PATH/hosts.yml"
     debug "Extra vars: $extra_vars"
-    
+    debug "Using Ansible home: $ANSIBLE_HOME"
+
     # Check if playbook exists
     if [ ! -f "$COLLECTION_PATH/playbooks/$playbook" ]; then
         error "Playbook not found: $COLLECTION_PATH/playbooks/$playbook"
@@ -279,11 +285,11 @@ run_playbook() {
         exit 1
     fi
 
-    local ansible_cmd="ANSIBLE_ROLES_PATH=$COLLECTION_PATH/roles ansible-playbook -i $COLLECTION_PATH/hosts.yml $COLLECTION_PATH/playbooks/$playbook"
+    local ansible_cmd="ANSIBLE_ROLES_PATH=$COLLECTION_PATH/roles ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i $COLLECTION_PATH/hosts.yml $COLLECTION_PATH/playbooks/$playbook"
     if [ -n "$extra_vars" ]; then
         ansible_cmd="$ansible_cmd --extra-vars \"$extra_vars\""
     fi
-    
+
     # Add verbose flags based on log level
     case $LOG_LEVEL in
         "DEBUG")
@@ -293,9 +299,9 @@ run_playbook() {
             ansible_cmd="$ansible_cmd -v"
             ;;
     esac
-    
+
     debug "Running command: $ansible_cmd"
-    
+
     if eval "$ansible_cmd"; then
         info "Deployment completed successfully!"
     else
@@ -339,7 +345,7 @@ check_hosts_config
 while true; do
     show_deployment_menu
     read -p "Select an option [1-8]: " choice
-    
+
     case $choice in
         1)
             print_status "Starting full deployment..."
@@ -351,7 +357,7 @@ while true; do
             ;;
         3)
             print_status "Testing connection to hosts..."
-            if ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/test_connection.yml"; then
+            if ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/test_connection.yml"; then
                 print_success "Connection test completed successfully."
             else
                 print_error "Connection test failed. Please check your inventory and playbook."
@@ -360,7 +366,7 @@ while true; do
             ;;
         4)
             print_status "Getting nodes information..."
-            if ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml"; then
+            if ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml"; then
                 print_success "Node information retrieved successfully."
             else
                 print_error "Failed to retrieve node information."
