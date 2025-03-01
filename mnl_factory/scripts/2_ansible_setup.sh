@@ -44,10 +44,10 @@ cd "$INSTALL_DIR"
 
 # Install Ansible collection for the real user
 print_message "Installing Multi Node Launcher collection..." "$YELLOW"
-sudo -u "$REAL_USER" ansible-galaxy collection install ratio1.multi_node_launcher --force
+sudo -u "$REAL_USER" env HOME="$REAL_HOME" ansible-galaxy collection install ratio1.multi_node_launcher --force
 
 # Verify collection installation with improved path detection
-COLLECTION_PATH=$(sudo -u "$REAL_USER" bash -c 'ansible-galaxy collection list 2>/dev/null | grep "ratio1.multi_node_launcher" || true')
+COLLECTION_PATH=$(sudo -u "$REAL_USER" env HOME="$REAL_HOME" bash -c 'ansible-galaxy collection list 2>/dev/null | grep "ratio1.multi_node_launcher" || true')
 if [ -z "$COLLECTION_PATH" ]; then
     print_message "Failed to detect installed collection" "$RED"
     exit 1
