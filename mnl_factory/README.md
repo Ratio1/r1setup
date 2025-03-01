@@ -48,7 +48,7 @@ curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/
 curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/4_run_setup.sh
 
 # Make scripts executable
-chmod +x 1_prerequisites.sh 2_configure.py 3_run_setup.sh 4_run_setup.sh
+chmod +x 1_prerequisites.sh 2_ansible_setup.sh 3_configure.py 4_run_setup.sh
 
 print_message "\nSetup process:" "$GREEN"
 print_message "1. Installing prerequisites..." "$YELLOW"
