@@ -80,7 +80,7 @@ debug "Real user: $REAL_USER"
 debug "Real home: $REAL_HOME"
 
 # Get the collection path using the real user's home
-COLLECTION_PATH="$REAL_HOME/.ansible/collections/ansible_collections/vitalii_t12/multi_node_launcher"
+COLLECTION_PATH="$REAL_HOME/.ansible/collections/ansible_collections/ratio1/multi_node_launcher"
 debug "Collection path: $COLLECTION_PATH"
 
 # Add this near the top of the script, after the color definitions
@@ -120,7 +120,7 @@ verify_ansible() {
     debug "Ansible is installed"
 
     debug "Verifying Ansible collection"
-    if ! ansible-galaxy collection list | grep -q "vitalii_t12.multi_node_launcher"; then
+    if ! ansible-galaxy collection list | grep -q "ratio1.multi_node_launcher"; then
         error "Required Ansible collection is not installed!"
         exit 1
     fi
