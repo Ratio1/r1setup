@@ -4,8 +4,8 @@ requires_ansible: ">=2.9"
 #plugin_routing:
 #  modules:
 #    gpu_setup:
-#      redirect: vitalii_t12.multi_node_launcher.gpu_setup
+#      redirect: ratio1.multi_node_launcher.gpu_setup
 #    nvidia_drivers:
-#      redirect: vitalii_t12.multi_node_launcher.nvidia_drivers
+#      redirect: ratio1.multi_node_launcher.nvidia_drivers
 #    docker:
-#      redirect: vitalii_t12.multi_node_launcher.docker
+#      redirect: ratio1.multi_node_launcher.docker

@@ -1,6 +1,6 @@
-namespace: "vitalii_t12"
+namespace: "ratio1"
 name: "multi_node_launcher"
-version: "1.0.5"
+version: "1.0.8"
 readme: "README.md"
 authors:
   - Andrei Damian <andrei.damian@me.com>

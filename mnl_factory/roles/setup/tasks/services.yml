@@ -74,10 +74,15 @@
     mode: '0755'
   become: true
 
+- name: Wait for 5 seconds
+  ansible.builtin.pause:
+    seconds: 5
+
 - name: Run get_node_info command
   ansible.builtin.command:
     cmd: get_node_info
   register: node_info
+  ignore_errors: true
 
 - name: Display node information
   debug:

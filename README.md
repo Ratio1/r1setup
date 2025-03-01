@@ -198,12 +198,12 @@ nvidia-smi --query-gpu=driver_version --format=csv,noheader
    ```bash
    ansible-galaxy collection build
    ```
-   This will create a tarball like `vitalii_t12-multi_node_launcher-1.0.0.tar.gz`
+   This will create a tarball like `ratio1-multi_node_launcher-1.0.0.tar.gz`
 
 3. **Install the Collection**
    You can install the collection locally using:
    ```bash
-   ansible-galaxy collection install vitalii_t12-multi_node_launcher-1.0.0.tar.gz -p ./collections
+   ansible-galaxy collection install ratio1-multi_node_launcher-1.0.0.tar.gz -p ./collections
    ```
 
 ### Using the Collection
@@ -246,7 +246,7 @@ To publish the collection to Ansible Galaxy:
 
 3. **Publish**
    ```bash
-   ansible-galaxy collection publish ./vitalii_t12-multi_node_launcher-1.0.0.tar.gz --api-key=your_api_token
+   ansible-galaxy collection publish ./ratio1-multi_node_launcher-1.0.0.tar.gz --api-key=your_api_token
    ```
 
 ## License
