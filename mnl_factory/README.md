@@ -54,11 +54,15 @@ print_message "\nSetup process:" "$GREEN"
 print_message "1. Installing prerequisites..." "$YELLOW"
 sudo ./1_prerequisites.sh
 
-print_message "\n2. Configuring nodes..." "$YELLOW"
-python3 2_configure.py
+print_message "2. Ansible setup..." "$YELLOW"
+./2_ansible_setup.sh
 
-print_message "\n3. Running setup..." "$YELLOW"
-sudo ./3_run_setup.sh
+print_message "\n3. Configuring nodes..." "$YELLOW"
+python3 3_configure.py
+
+print_message "\n4. Running setup..." "$YELLOW"
+./4_run_setup.sh
+
 ```
 
 
