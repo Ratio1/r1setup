@@ -1,5 +1,7 @@
 # Multi Node Launcher
 
+**Quick Setup**: For an easy setup script and quick start instructions, please refer to the [README in mnl_factory](mnl_factory/README.md).
+
 A comprehensive solution for setting up and managing GPU nodes with automated deployment using Ansible.
 
 ## Table of Contents

@@ -1,16 +1,24 @@
-# Multi Node Launcher
+# Multi-Node Launcher
 
-A solution for setting up and managing GPU nodes using Ansible.
+Multi-Node Launcher is a solution for easily setting up and managing GPU nodes using Ansible. This guide provides step-by-step instructions to quickly configure your system and manage your GPU nodes.
 
 ## Table of Contents
 
+- [Overview](#overview)
 - [Prerequisites](#prerequisites)
 - [Quick Setup](#quick-setup)
 - [Initial Setup](#initial-setup)
 - [Usage](#usage)
+- [Troubleshooting](#troubleshooting)
 - [Notes](#notes)
 
+## Overview
+
+Multi-Node Launcher automates the setup process for GPU nodes with Ansible. It ensures that required dependencies are installed and configuration is performed in a reliable, idempotent manner.
+
 ## Prerequisites
+
+Before you start, ensure that you have met the following requirements:
 
 1. Ansible installed on your control node
 2. SSH access to target nodes
@@ -20,77 +28,50 @@ A solution for setting up and managing GPU nodes using Ansible.
 
 ## Quick Setup
 
-Run the following script to set up your GPU nodes:
-
+You can quickly set up your GPU nodes by running the following one-liner:
 
 ```bash
-#!/bin/bash
-
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-print_message() {
-    echo -e "${2}${1}${NC}"
-}
-
-# Create temporary directory
-TEMP_DIR=$(mkdir mnl_setup)
-cd "$TEMP_DIR"
-
-# Download setup scripts
-print_message "Downloading setup scripts..." "$YELLOW"
-curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/1_prerequisites.sh
-curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/2_ansible_setup.sh
-curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/3_configure.py
-curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/4_run_setup.sh
-
-# Make scripts executable
-chmod +x 1_prerequisites.sh 2_ansible_setup.sh 3_configure.py 4_run_setup.sh
-
-print_message "\nSetup process:" "$GREEN"
-print_message "1. Installing prerequisites..." "$YELLOW"
-sudo ./1_prerequisites.sh
-
-print_message "2. Ansible setup..." "$YELLOW"
-./2_ansible_setup.sh
-
-print_message "\n3. Configuring nodes..." "$YELLOW"
-python3 3_configure.py
-
-print_message "\n4. Running setup..." "$YELLOW"
-./4_run_setup.sh
+bash <(curl -sL https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/install-factory.sh)
 ```
 
-
-
-Save this script as `setup.sh`, make it executable with `chmod +x setup.sh`, and run it with `sudo ./setup.sh`.
+This command will:
+- Create a temporary setup directory
+- Download necessary scripts
+- Execute prerequisite checks
+- Perform Ansible setup and configuration
 
 ## Initial Setup
+
+Before running the playbook, follow these steps:
 
 1. Install required Ansible collections:
    ```bash
    ansible-galaxy collection install -r requirements.yml
    ```
-
-2. Configure your hosts in `inventory/hosts.yml`.
+2. Configure your hosts by editing the `inventory/hosts.yml` file.
 
 ## Usage
 
-1. Test connection to your nodes:
+1. Test connectivity to your nodes:
    ```bash
    ansible all -i inventory/hosts.yml -m ping
    ```
-
-2. Run the playbook:
+2. Execute the playbook:
    ```bash
    ansible-playbook -i inventory/hosts.yml playbooks/site.yml
    ```
+
+## Troubleshooting
+
+If you encounter issues during setup or execution, consider the following:
+
+- Verify that all prerequisites are met.
+- Ensure that SSH keys and permissions are correctly configured.
+- Consult the Ansible logs for detailed error messages.
+- Search for known issues on the project's GitHub repository or open a new issue.
 
 ## Notes
 
 - The playbook is idempotent and can be run multiple times safely.
 - Ensure adequate cooling and power for GPU operations.
-- For macOS users: This setup uses Homebrew for package management, so make sure Homebrew is installed first.
+- For macOS users: This setup uses Homebrew for package management. Ensure Homebrew is installed prior to running the setup.
