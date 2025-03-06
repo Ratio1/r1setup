@@ -10,6 +10,20 @@ CYAN='\033[0;36m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Detect OS
+detect_os() {
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        OS_TYPE="macos"
+        log "INFO" "Detected macOS system" "$GREEN"
+    elif [[ "$OSTYPE" == "linux"* ]]; then
+        OS_TYPE="linux"
+        log "INFO" "Detected Linux system" "$GREEN"
+    else
+        log "ERROR" "Unsupported OS: $OSTYPE" "$RED"
+        exit 1
+    fi
+}
+
 # Logging levels
 declare -A LOG_LEVELS=( ["DEBUG"]=0 ["INFO"]=1 ["WARNING"]=2 ["ERROR"]=3 )
 LOG_LEVEL=${LOG_LEVEL:-"INFO"} # Default to INFO if not set
@@ -68,28 +82,53 @@ print_error() {
 }
 
 # Get the actual user's home directory
-if [ -n "$SUDO_USER" ]; then
-    REAL_USER=$SUDO_USER
-    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-else
-    REAL_USER=$USER
-    REAL_HOME=$HOME
-fi
+get_user_info() {
+    if [ -n "$SUDO_USER" ]; then
+        REAL_USER=$SUDO_USER
+        if [[ "$OS_TYPE" == "macos" ]]; then
+            REAL_HOME=$(dscl . -read /Users/"$SUDO_USER" NFSHomeDirectory | awk '{print $2}')
+        else
+            REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+        fi
+    else
+        REAL_USER=$USER
+        REAL_HOME=$HOME
+    fi
 
-debug "Real user: $REAL_USER"
-debug "Real home: $REAL_HOME"
+    debug "Real user: $REAL_USER"
+    debug "Real home: $REAL_HOME"
+}
 
-# Set Ansible environment variables to use the real user's home directory
-export ANSIBLE_CONFIG="$REAL_HOME/.ansible.cfg"
-export ANSIBLE_COLLECTIONS_PATH="$REAL_HOME/.ansible/collections"
-export ANSIBLE_HOME="$REAL_HOME/.ansible"
+# Set installation directories based on OS
+set_install_dirs() {
+    if [[ "$OS_TYPE" == "macos" ]]; then
+        INSTALL_DIR="$REAL_HOME/multi-node-launcher"
+    else
+        INSTALL_DIR="/opt/multi-node-launcher"
+    fi
+    
+    # Set Ansible paths based on OS
+    ANSIBLE_DIR="$REAL_HOME/.ansible"
+    
+    # Collection path will be the same regardless of OS but path may differ
+    COLLECTION_PATH="$ANSIBLE_DIR/collections/ansible_collections/ratio1/multi_node_launcher"
+    debug "Installation directory: $INSTALL_DIR"
+    debug "Ansible directory: $ANSIBLE_DIR"
+    debug "Collection path: $COLLECTION_PATH"
+}
 
-# Get the collection path using the real user's home
-COLLECTION_PATH="$REAL_HOME/.ansible/collections/ansible_collections/ratio1/multi_node_launcher"
-debug "Collection path: $COLLECTION_PATH"
+# Set Ansible environment variables
+set_ansible_env() {
+    # Set Ansible environment variables to use the real user's home directory
+    export ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg"
+    export ANSIBLE_COLLECTIONS_PATH="$ANSIBLE_DIR/collections"
+    export ANSIBLE_HOME="$ANSIBLE_DIR"
 
-# Add this near the top of the script, after the color definitions
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+    debug "Ansible environment variables set"
+    debug "ANSIBLE_CONFIG: $ANSIBLE_CONFIG"
+    debug "ANSIBLE_COLLECTIONS_PATH: $ANSIBLE_COLLECTIONS_PATH"
+    debug "ANSIBLE_HOME: $ANSIBLE_HOME"
+}
 
 # Function to check if hosts.yml exists and is not empty
 check_hosts_config() {
@@ -313,84 +352,96 @@ run_playbook() {
     fi
 }
 
-# Main script
-info "Multi Node Launcher Deployment"
-info "============================="
+# Main function
+main() {
+    # Initialize environment
+    detect_os
+    get_user_info
+    set_install_dirs
+    set_ansible_env
 
-debug "Checking virtual environment"
-# Check if we're in the correct environment
-if [ -z "$VIRTUAL_ENV" ]; then
-    debug "No virtual environment active"
-    if [ -f "/opt/multi-node-launcher/activate_env.sh" ]; then
-        info "Activating virtual environment..."
-        debug "Activating from: /opt/multi-node-launcher/activate_env.sh"
-        source /opt/multi-node-launcher/activate_env.sh
-    else
-        debug "Virtual environment activation script not found"
-        error "Virtual environment not found!"
-        warning "Please run the prerequisites script first."
-        exit 1
+    info "Multi Node Launcher Deployment"
+    info "============================="
+
+    debug "Checking virtual environment"
+    # Check if we're in the correct environment
+    if [ -z "$VIRTUAL_ENV" ]; then
+        debug "No virtual environment active"
+        VENV_ACTIVATE="$INSTALL_DIR/activate_env.sh"
+        if [ -f "$VENV_ACTIVATE" ]; then
+            info "Activating virtual environment..."
+            debug "Activating from: $VENV_ACTIVATE"
+            source "$VENV_ACTIVATE"
+        else
+            debug "Virtual environment activation script not found at $VENV_ACTIVATE"
+            error "Virtual environment not found!"
+            warning "Please run the prerequisites script first."
+            exit 1
+        fi
     fi
-fi
 
-debug "Virtual environment active: $VIRTUAL_ENV"
+    debug "Virtual environment active: $VIRTUAL_ENV"
 
-# Verify ansible installation
-verify_ansible
+    # Verify ansible installation
+    verify_ansible
 
-# Check hosts configuration
-check_hosts_config
+    # Check hosts configuration
+    check_hosts_config
 
-# Main loop
-while true; do
-    show_deployment_menu
-    read -p "Select an option [1-8]: " choice
+    # Main loop
+    while true; do
+        show_deployment_menu
+        read -p "Select an option [1-8]: " choice
 
-    case $choice in
-        1)
-            print_status "Starting full deployment..."
-            run_playbook "site.yml"
-            ;;
-        2)
-            print_status "Starting Docker-only deployment..."
-            run_playbook "site.yml" "skip_gpu=true"
-            ;;
-        3)
-            print_status "Testing connection to hosts..."
-            if ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/test_connection.yml"; then
-                print_success "Connection test completed successfully."
-            else
-                print_error "Connection test failed. Please check your inventory and playbook."
-                exit 1
-            fi
-            ;;
-        4)
-            print_status "Getting nodes information..."
-            if ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml"; then
-                print_success "Node information retrieved successfully."
-            else
-                print_error "Failed to retrieve node information."
-                exit 1
-            fi
-            ;;
-        5)
-            print_status "Getting node addresses..."
-            parse_node_info "true"
-            ;;
-        6)
-            print_status "Saving node addresses to CSV..."
-            save_node_info_csv
-            ;;
-        7)
-            print_status "Viewing current configuration..."
-            view_configuration
-            ;;
-        8)
-            print_success "Exiting deployment script."
-            exit 0
-            ;;
-        *)
-            print_error "Invalid option. Please try again."
-            ;;
-    esac
-done 
+        case $choice in
+            1)
+                print_status "Starting full deployment..."
+                run_playbook "site.yml"
+                ;;
+            2)
+                print_status "Starting Docker-only deployment..."
+                run_playbook "site.yml" "skip_gpu=true"
+                ;;
+            3)
+                print_status "Testing connection to hosts..."
+                if ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/test_connection.yml"; then
+                    print_success "Connection test completed successfully."
+                else
+                    print_error "Connection test failed. Please check your inventory and playbook."
+                    exit 1
+                fi
+                ;;
+            4)
+                print_status "Getting nodes information..."
+                if ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml"; then
+                    print_success "Node information retrieved successfully."
+                else
+                    print_error "Failed to retrieve node information."
+                    exit 1
+                fi
+                ;;
+            5)
+                print_status "Getting node addresses..."
+                parse_node_info "true"
+                ;;
+            6)
+                print_status "Saving node addresses to CSV..."
+                save_node_info_csv
+                ;;
+            7)
+                print_status "Viewing current configuration..."
+                view_configuration
+                ;;
+            8)
+                print_success "Exiting deployment script."
+                exit 0
+                ;;
+            *)
+                print_error "Invalid option. Please try again."
+                ;;
+        esac
+    done
+}
+
+# Run the main function
+main 
