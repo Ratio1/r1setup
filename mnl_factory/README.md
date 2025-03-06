@@ -36,35 +36,61 @@ print_message() {
     echo -e "${2}${1}${NC}"
 }
 
-# Create temporary directory
-TEMP_DIR=$(mkdir mnl_setup)
+# Get the actual user's home directory and username when running with sudo
+if [ -n "$SUDO_USER" ]; then
+    REAL_USER=$SUDO_USER
+    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+else
+    REAL_USER=$USER
+    REAL_HOME=$HOME
+fi
+
+print_message "Setting up Multi Node Launcher as user: $REAL_USER" "$GREEN"
+
+# Create temporary directory with correct ownership
+TEMP_DIR="mnl_setup"
+mkdir -p "$TEMP_DIR"
+chown "$REAL_USER":"$(id -gn "$REAL_USER")" "$TEMP_DIR"
 cd "$TEMP_DIR"
 
-# Download setup scripts
+# Download setup scripts as the real user
 print_message "Downloading setup scripts..." "$YELLOW"
-curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/1_prerequisites.sh
-curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/2_ansible_setup.sh
-curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/3_configure.py
-curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/4_run_setup.sh
+sudo -u "$REAL_USER" curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/1_prerequisites.sh
+sudo -u "$REAL_USER" curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/2_ansible_setup.sh
+sudo -u "$REAL_USER" curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/3_configure.py
+sudo -u "$REAL_USER" curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/4_run_setup.sh
 
-# Make scripts executable
-chmod +x 1_prerequisites.sh 2_ansible_setup.sh 3_configure.py 4_run_setup.sh
+# Make scripts executable but maintain user ownership
+chmod +x 1_prerequisites.sh 2_ansible_setup.sh 4_run_setup.sh
+chown "$REAL_USER":"$(id -gn "$REAL_USER")" 1_prerequisites.sh 2_ansible_setup.sh 3_configure.py 4_run_setup.sh
+
+# Add an entry to sudoers to avoid password prompts for this user temporarily
+echo "$REAL_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/temp_nopasswd
+chmod 440 /etc/sudoers.d/temp_nopasswd
 
 print_message "\nSetup process:" "$GREEN"
 print_message "1. Installing prerequisites..." "$YELLOW"
-sudo ./1_prerequisites.sh
+# Pass REAL_USER as an environment variable to the prerequisites script
+export REAL_USER REAL_HOME
+./1_prerequisites.sh
 
 print_message "2. Ansible setup..." "$YELLOW"
-./2_ansible_setup.sh
+# Run as real user, who now has NOPASSWD sudo privileges
+sudo -E -u "$REAL_USER" ./2_ansible_setup.sh
 
 print_message "\n3. Configuring nodes..." "$YELLOW"
-python3 3_configure.py
+# Run as real user
+sudo -E -u "$REAL_USER" python3 3_configure.py
 
 print_message "\n4. Running setup..." "$YELLOW"
-./4_run_setup.sh
+# Run as real user
+sudo -E -u "$REAL_USER" ./4_run_setup.sh
 
+# Clean up the temporary sudoers entry
+rm -f /etc/sudoers.d/temp_nopasswd
+
+print_message "\nSetup completed!" "$GREEN"
 ```
-
 
 Save this script as `setup.sh`, make it executable with `chmod +x setup.sh`, and run it with `sudo ./setup.sh`.
 
