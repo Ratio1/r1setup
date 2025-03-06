@@ -30,10 +30,16 @@ Run the following script to set up your GPU nodes:
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
 print_message() {
     echo -e "${2}${1}${NC}"
+}
+
+# Debug message function
+debug() {
+    echo -e "${BLUE}[DEBUG] $1${NC}"
 }
 
 # Detect OS
@@ -98,11 +104,43 @@ cleanup_sudoers() {
     rm -f /etc/sudoers.d/temp_nopasswd
 }
 
+# Set installation directories based on OS
+set_install_dirs() {
+    # Use user's home directory for everything
+    INSTALL_DIR="$REAL_HOME/multi-node-launcher"
+    FACTORY_DIR="$REAL_HOME/factory"
+    
+    # Use a simpler path for the Ansible collection
+    ANSIBLE_COLLECTION_DIR="$REAL_HOME/ratio1"
+    
+    # Create these directories
+    mkdir -p "$INSTALL_DIR"
+    mkdir -p "$FACTORY_DIR"
+    mkdir -p "$ANSIBLE_COLLECTION_DIR"
+    
+    # Set ownership
+    chown -R "$REAL_USER:$REAL_GROUP" "$INSTALL_DIR"
+    chown -R "$REAL_USER:$REAL_GROUP" "$FACTORY_DIR"
+    chown -R "$REAL_USER:$REAL_GROUP" "$ANSIBLE_COLLECTION_DIR"
+    
+    # Collection path (where hosts.yml will be stored by the collection)
+    COLLECTION_PATH="$ANSIBLE_COLLECTION_DIR/multi_node_launcher"
+    
+    debug "Installation directory: $INSTALL_DIR"
+    debug "Factory directory: $FACTORY_DIR"
+    debug "Ansible collection directory: $ANSIBLE_COLLECTION_DIR"
+    debug "Collection path: $COLLECTION_PATH"
+    
+    # Export these for other scripts
+    export INSTALL_DIR FACTORY_DIR ANSIBLE_COLLECTION_DIR COLLECTION_PATH
+}
+
 # Main setup function
 main() {
     detect_os
     get_real_user
     get_real_group
+    set_install_dirs
     
     # Create temporary directory with correct ownership
     TEMP_DIR="mnl_setup"
@@ -130,6 +168,85 @@ main() {
         sed -i.bak 's/dnf install/brew install/g' 1_prerequisites.sh
     fi
     
+    # Modify the Python configuration script to support custom paths
+    print_message "Patching Python configuration script..." "$YELLOW"
+    cat > modify_configure.py << 'EOF'
+#!/usr/bin/env python3
+import sys
+import re
+
+# Read the original file
+with open('3_configure.py', 'r') as f:
+    content = f.read()
+
+# Add command line argument parsing
+argparse_import = "import argparse"
+if argparse_import not in content:
+    content = content.replace("import os", "import os\nimport argparse")
+
+# Add argument parsing function near the main function
+parser_setup = """
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='Configure Multi Node Launcher')
+    parser.add_argument('--collection-path', required=False, 
+                        help='Path to the Ansible collection directory')
+    parser.add_argument('--factory-dir', required=False,
+                        help='Path to the factory directory')
+    return parser.parse_args()
+"""
+
+# Find the right place to add the function
+if "def parse_arguments():" not in content:
+    content = content.replace("def main():", parser_setup + "\ndef main():")
+
+# Modify the main function to use arguments
+if "args = parse_arguments()" not in content:
+    main_modification = """def main():
+    args = parse_arguments()
+    config_manager = ConfigManager()
+    
+    # Apply command line arguments if provided
+    if args.collection_path:
+        config_manager.collection_path = args.collection_path
+    if args.factory_dir:
+        config_manager.factory_dir = args.factory_dir"""
+    
+    content = content.replace("def main():\n    config_manager = ConfigManager()", main_modification)
+
+# Make sure the ConfigManager init can handle custom paths
+if "self.factory_dir = args.factory_dir" not in content:
+    constructor_mod = """    def __init__(self):
+        self.colors = {
+            'red': '\033[91m',
+            'green': '\033[92m',
+            'yellow': '\033[93m',
+            'blue': '\033[94m',
+            'purple': '\033[95m',
+            'cyan': '\033[96m',
+            'white': '\033[97m',
+            'end': '\033[0m'
+        }
+        
+        # Default paths - will be overridden by command line args if provided
+        self.os_type = platform.system().lower()
+        self.base_dir = os.path.expanduser("~/multi-node-launcher")
+        self.factory_dir = os.path.expanduser("~/factory")
+        self.collection_path = None  # Will be set via command line"""
+        
+    content = re.sub(r"    def __init__\(\):\s+self\.colors = \{.*?'end': '\\033\[0m'\s+\}", 
+                     constructor_mod, content, flags=re.DOTALL)
+
+# Write the modified file
+with open('3_configure.py', 'w') as f:
+    f.write(content)
+
+print("Configuration script patched successfully!")
+EOF
+
+    # Make the patch script executable and run it
+    chmod +x modify_configure.py
+    sudo -u "$REAL_USER" python3 modify_configure.py
+    
     # Configure sudoers to avoid password prompts
     setup_sudoers
     
@@ -142,53 +259,34 @@ main() {
     print_message "2. Ansible setup..." "$YELLOW"
     # Run as regular user without sudo - ansible setup should be done by a regular user
     print_message "Dropping to regular user for Ansible setup..." "$YELLOW"
-    su - "$REAL_USER" -c "cd $(pwd) && ./2_ansible_setup.sh"
+    # Pass the custom collection path to use ~/ratio1 instead of ~/.ansible and factory in home directory
+    su - "$REAL_USER" -c "cd $(pwd) && ANSIBLE_COLLECTIONS_PATH=$REAL_HOME ./2_ansible_setup.sh --collection-path=$ANSIBLE_COLLECTION_DIR --factory-dir=$FACTORY_DIR"
     
     print_message "\n3. Configuring nodes..." "$YELLOW"
     # Drop privileges completely - this script should run as normal user
     print_message "Dropping to regular user for configuration..." "$YELLOW"
-    su - "$REAL_USER" -c "cd $(pwd) && python3 3_configure.py"
+    # Use the collection path for configuration without trying to override the hosts file location
+    su - "$REAL_USER" -c "cd $(pwd) && python3 3_configure.py --collection-path=$COLLECTION_PATH --factory-dir=$FACTORY_DIR"
     
     print_message "\n4. Running setup..." "$YELLOW"
     # Run as regular user without sudo - this script should also run without elevated privileges
     print_message "Dropping to regular user for setup..." "$YELLOW"
-    su - "$REAL_USER" -c "cd $(pwd) && ./4_run_setup.sh"
+    # Run from the factory directory with environment variables pointing to the collection
+    su - "$REAL_USER" -c "cd $(pwd) && ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTION_DIR ./4_run_setup.sh --factory-dir=$FACTORY_DIR"
     
     # Clean up the temporary sudoers entry
     cleanup_sudoers
     
     print_message "\nSetup completed!" "$GREEN"
+    print_message "\nYour directory structure:" "$GREEN"
+    print_message "Main installation: $INSTALL_DIR" "$GREEN"
+    print_message "Factory directory: $FACTORY_DIR" "$GREEN"
+    print_message "Ansible collection: $COLLECTION_PATH" "$GREEN"
+    print_message "Hosts file will be in: $COLLECTION_PATH/hosts.yml" "$GREEN"
+    print_message "\nTo use the Multi Node Launcher, run:" "$YELLOW"
+    print_message "cd $FACTORY_DIR && ansible-playbook -i $COLLECTION_PATH/hosts.yml playbooks/site.yml" "$NC"
 }
 
 # Run the main function
 main
 ```
-
-Save this script as `setup.sh`, make it executable with `chmod +x setup.sh`, and run it with `sudo ./setup.sh`.
-
-## Initial Setup
-
-1. Install required Ansible collections:
-   ```bash
-   ansible-galaxy collection install -r requirements.yml
-   ```
-
-2. Configure your hosts in `inventory/hosts.yml`.
-
-## Usage
-
-1. Test connection to your nodes:
-   ```bash
-   ansible all -i inventory/hosts.yml -m ping
-   ```
-
-2. Run the playbook:
-   ```bash
-   ansible-playbook -i inventory/hosts.yml playbooks/site.yml
-   ```
-
-## Notes
-
-- The playbook is idempotent and can be run multiple times safely.
-- Ensure adequate cooling and power for GPU operations.
-- For macOS users: This setup uses Homebrew for package management, so make sure Homebrew is installed first.

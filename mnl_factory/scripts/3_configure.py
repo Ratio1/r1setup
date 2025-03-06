@@ -25,16 +25,18 @@ class ConfigManager:
         # Detect OS
         self.os_type = platform.system().lower()
         print(f"{self.colors['green']}Detected OS: {self.os_type.capitalize()}{self.colors['end']}")
-        
-        # Set base directories based on OS
-        if self.os_type == 'darwin':  # macOS
-            # Use user's home directory for macOS
-            self.base_dir = os.path.expanduser("~/multi-node-launcher")
-            self.ansible_dir = os.path.expanduser("~/.ansible")
-        else:  # Linux and others
-            # Use /opt for Linux
-            self.base_dir = "/opt/multi-node-launcher"
-            self.ansible_dir = os.path.expanduser("~/.ansible")
+
+        self.base_dir = os.path.expanduser("~/.ratio1/multi-node-launcher")
+        self.ansible_dir = os.path.expanduser("~/.ansible")
+        # # Set base directories based on OS
+        # if self.os_type == 'darwin':  # macOS
+        #     # Use user's home directory for macOS
+        #     self.base_dir = os.path.expanduser("~/multi-node-launcher")
+        #     self.ansible_dir = os.path.expanduser("~/.ansible")
+        # else:  # Linux and others
+        #     # Use /opt for Linux
+        #     self.base_dir = "/opt/multi-node-launcher"
+        #     self.ansible_dir = os.path.expanduser("~/.ansible")
         
         # Derived paths
         self.collection_path = os.path.join(self.ansible_dir, "collections/ansible_collections/ratio1/multi_node_launcher")
@@ -140,14 +142,8 @@ class ConfigManager:
                 become_pass = self.get_secure_input("Sudo password")
                 host_data['ansible_become_pass'] = become_pass
         
-        # Additional configuration
-        if self.get_input("Configure GPUs? (y/n)", "y").lower() == 'y':
-            gpu_count = self.get_input("Number of GPUs", "1")
-            host_data['gpu_count'] = gpu_count
-        
-        if self.get_input("Configure custom Docker settings? (y/n)", "n").lower() == 'y':
-            docker_version = self.get_input("Docker version", "latest")
-            host_data['docker_version'] = docker_version
+        # Automatically configure all GPUs without asking
+        host_data['gpu_count'] = 'all'  # This will tell Ansible to use all available GPUs
         
         return {host_name: host_data}
     
@@ -197,14 +193,8 @@ class ConfigManager:
                 become_pass = self.get_secure_input("Sudo password")
                 host_data['ansible_become_pass'] = become_pass
         
-        # Additional configuration
-        if self.get_input("Edit GPU count? (y/n)", "n").lower() == 'y':
-            gpu_count = self.get_input("Number of GPUs", host_data.get('gpu_count', '1'))
-            host_data['gpu_count'] = gpu_count
-        
-        if self.get_input("Edit Docker settings? (y/n)", "n").lower() == 'y':
-            docker_version = self.get_input("Docker version", host_data.get('docker_version', 'latest'))
-            host_data['docker_version'] = docker_version
+        # Ensure GPU configuration is set to use all GPUs
+        host_data['gpu_count'] = 'all'
         
         return {host_name: host_data}
     
