@@ -87,16 +87,6 @@ elif [[ "$OS_TYPE" == "linux" ]]; then
     fi
 fi
 
-# Install directory
-INSTALL_DIR="/opt/multi-node-launcher"
-if [[ "$OS_TYPE" == "macos" ]]; then
-    # On macOS, use a user-accessible directory instead of /opt
-    INSTALL_DIR="$REAL_HOME/multi-node-launcher"
-fi
-
-# Create install directory if it doesn't exist
-mkdir -p "$INSTALL_DIR"
-
 # Update package repositories
 print_message "Updating package repositories..." "$YELLOW"
 if [[ "$OS_TYPE" == "linux" ]]; then
@@ -177,54 +167,4 @@ if ! verify_command sshpass; then
     exit 1
 fi
 
-# Create a virtual environment for Python
-VENV_DIR="$INSTALL_DIR/venv"
-if [[ "$OS_TYPE" == "linux" ]]; then
-    python3 -m venv "$VENV_DIR"
-    chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$VENV_DIR"
-else
-    sudo -u "$REAL_USER" python3 -m venv "$VENV_DIR"
-fi
-
-# Verify virtual environment creation
-if [ ! -f "$VENV_DIR/bin/activate" ]; then
-    print_message "Failed to create virtual environment" "$RED"
-    exit 1
-fi
-
-# Install Python requirements in the virtual environment
-if [[ "$OS_TYPE" == "linux" ]]; then
-    sudo -u "$REAL_USER" bash << EOF
-source "$VENV_DIR/bin/activate"
-pip install --upgrade pip
-pip install pyyaml typing_extensions
-EOF
-else
-    sudo -u "$REAL_USER" bash << EOF
-source "$VENV_DIR/bin/activate"
-pip install --upgrade pip
-pip install pyyaml typing_extensions
-EOF
-fi
-
-# Create activation script with OS-specific paths
-cat > "$INSTALL_DIR/activate_env.sh" << EOF
-#!/bin/bash
-source "$VENV_DIR/bin/activate"
-export PATH="$INSTALL_DIR/factory:\$PATH"
-export ANSIBLE_CONFIG="$INSTALL_DIR/factory/ansible.cfg"
-EOF
-
-chmod +x "$INSTALL_DIR/activate_env.sh"
-
-# Set proper ownership for all files
-if [[ "$OS_TYPE" == "linux" ]]; then
-    chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$INSTALL_DIR"
-else
-    chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$INSTALL_DIR"
-fi
-
 print_message "\nPrerequisites installed successfully!" "$GREEN"
-
-# Activate the environment for immediate use for the real user
-sudo -u "$REAL_USER" bash -c "source $INSTALL_DIR/activate_env.sh"

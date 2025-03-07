@@ -193,45 +193,6 @@ EOF
     chmod 644 ansible.cfg deploy.yml deploy-gpu.yml deploy-config.yml
 }
 
-# Set up Python environment
-setup_python_env() {
-    # Create a virtual environment for Python
-    VENV_DIR="$INSTALL_DIR/venv"
-    
-    # Skip if venv already exists
-    if [ ! -d "$VENV_DIR" ]; then
-        if [[ "$OS_TYPE" == "linux" ]]; then
-            python3 -m venv "$VENV_DIR"
-            chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$VENV_DIR"
-        else
-            sudo -u "$REAL_USER" python3 -m venv "$VENV_DIR"
-        fi
-    
-        # Verify virtual environment creation
-        if [ ! -f "$VENV_DIR/bin/activate" ]; then
-            print_message "Failed to create virtual environment" "$RED"
-            exit 1
-        fi
-    
-        # Install Python requirements in the virtual environment
-        sudo -u "$REAL_USER" bash << EOF
-source "$VENV_DIR/bin/activate"
-pip install --upgrade pip
-pip install pyyaml typing_extensions
-EOF
-    fi
-    
-    # Create activation script
-    cat > "$INSTALL_DIR/activate_env.sh" << EOF
-#!/bin/bash
-source "$VENV_DIR/bin/activate"
-export PATH="$INSTALL_DIR/factory:\$PATH"
-export ANSIBLE_CONFIG="$INSTALL_DIR/factory/ansible.cfg"
-EOF
-    
-    chmod +x "$INSTALL_DIR/activate_env.sh"
-}
-
 # Set ownership and permissions
 set_ownership() {
     # Set proper ownership for all files
@@ -315,7 +276,6 @@ main() {
     create_dirs
     install_collection
     create_factory
-    setup_python_env
     set_ownership
     verify_setup
     print_next_steps
