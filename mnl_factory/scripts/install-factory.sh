@@ -29,7 +29,7 @@ print_message "1. Installing prerequisites..." "$YELLOW"
 sudo ./1_prerequisites.sh
 
 print_message "2. Ansible setup..." "$YELLOW"
-sudo ./2_ansible_setup.sh
+./2_ansible_setup.sh
 
 print_message "\n3. Configuring nodes..." "$YELLOW"
 python3 3_configure.py
