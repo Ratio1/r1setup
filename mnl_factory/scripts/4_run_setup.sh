@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 set -e  # Exit on any error
 
@@ -12,39 +12,68 @@ NC='\033[0m' # No Color
 
 # Detect OS
 detect_os() {
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        OS_TYPE="macos"
-        log "INFO" "Detected macOS system" "$GREEN"
-    elif [[ "$OSTYPE" == "linux"* ]]; then
-        OS_TYPE="linux"
-        log "INFO" "Detected Linux system" "$GREEN"
-    else
-        log "ERROR" "Unsupported OS: $OSTYPE" "$RED"
-        exit 1
-    fi
+    # Use uname instead of OSTYPE which is bash-specific
+    OS_NAME=$(uname -s)
+    case "$OS_NAME" in
+        Darwin*)
+            OS_TYPE="macos"
+            log "INFO" "Detected macOS system" "$GREEN"
+            ;;
+        Linux*)
+            OS_TYPE="linux"
+            log "INFO" "Detected Linux system" "$GREEN"
+            ;;
+        *)
+            log "ERROR" "Unsupported OS: $OS_NAME" "$RED"
+            exit 1
+            ;;
+    esac
 }
 
-# Logging levels
-declare -A LOG_LEVELS=( ["DEBUG"]=0 ["INFO"]=1 ["WARNING"]=2 ["ERROR"]=3 )
-LOG_LEVEL=${LOG_LEVEL:-"INFO"} # Default to INFO if not set
+# Define log levels as numeric constants instead of associative array
+DEBUG_LEVEL=0
+INFO_LEVEL=1
+WARNING_LEVEL=2
+ERROR_LEVEL=3
 
-# Convert LOG_LEVEL to uppercase
-LOG_LEVEL=${LOG_LEVEL^^}
+# Default to INFO if not set
+LOG_LEVEL=${LOG_LEVEL:-"INFO"}
 
-# Validate LOG_LEVEL
-if [[ ! "${LOG_LEVELS[$LOG_LEVEL]+exists}" ]]; then
-    echo "Invalid LOG_LEVEL: $LOG_LEVEL. Using INFO."
-    LOG_LEVEL="INFO"
-fi
+# Convert LOG_LEVEL to numeric value
+get_log_level_value() {
+    case "$1" in
+        "DEBUG"|"debug") echo $DEBUG_LEVEL ;;
+        "INFO"|"info") echo $INFO_LEVEL ;;
+        "WARNING"|"warning") echo $WARNING_LEVEL ;;
+        "ERROR"|"error") echo $ERROR_LEVEL ;;
+        *) echo $INFO_LEVEL ;;  # Default to INFO for unknown values
+    esac
+}
+
+# Normalize log level to uppercase
+normalize_log_level() {
+    case "$(echo "$1" | tr '[:lower:]' '[:upper:]')" in
+        "DEBUG") echo "DEBUG" ;;
+        "INFO") echo "INFO" ;;
+        "WARNING") echo "WARNING" ;;
+        "ERROR") echo "ERROR" ;;
+        *) echo "INFO" ;;  # Default to INFO for unknown values
+    esac
+}
+
+# Initialize log level
+LOG_LEVEL=$(normalize_log_level "$LOG_LEVEL")
+LOG_LEVEL_VALUE=$(get_log_level_value "$LOG_LEVEL")
 
 # Logging functions
 log() {
     local level=$1
     local message=$2
     local color=$3
+    local level_value=$(get_log_level_value "$level")
     
     # Check if we should log this message based on level
-    if [ "${LOG_LEVELS[$level]}" -ge "${LOG_LEVELS[$LOG_LEVEL]}" ]; then
+    if [ "$level_value" -ge "$LOG_LEVEL_VALUE" ]; then
         local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
         echo -e "${color}[${timestamp}] [${level}] ${message}${NC}"
     fi
@@ -85,7 +114,7 @@ print_error() {
 get_user_info() {
     if [ -n "$SUDO_USER" ]; then
         REAL_USER=$SUDO_USER
-        if [[ "$OS_TYPE" == "macos" ]]; then
+        if [ "$OS_TYPE" = "macos" ]; then
             REAL_HOME=$(dscl . -read /Users/"$SUDO_USER" NFSHomeDirectory | awk '{print $2}')
         else
             REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
@@ -101,7 +130,7 @@ get_user_info() {
 
 # Set installation directories based on OS
 set_install_dirs() {
-    if [[ "$OS_TYPE" == "macos" ]]; then
+    if [ "$OS_TYPE" = "macos" ]; then
         INSTALL_DIR="$REAL_HOME/multi-node-launcher"
     else
         INSTALL_DIR="/opt/multi-node-launcher"
@@ -157,7 +186,7 @@ check_hosts_config() {
 # Function to verify ansible installation and collection
 verify_ansible() {
     debug "Verifying Ansible installation"
-    if ! command -v ansible &> /dev/null; then
+    if ! command -v ansible > /dev/null 2>&1; then
         error "Ansible is not installed!"
         exit 1
     fi
@@ -371,7 +400,7 @@ main() {
         if [ -f "$VENV_ACTIVATE" ]; then
             info "Activating virtual environment..."
             debug "Activating from: $VENV_ACTIVATE"
-            source "$VENV_ACTIVATE"
+            . "$VENV_ACTIVATE"
         else
             debug "Virtual environment activation script not found at $VENV_ACTIVATE"
             error "Virtual environment not found!"
