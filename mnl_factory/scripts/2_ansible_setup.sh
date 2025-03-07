@@ -134,7 +134,6 @@ main() {
     create_dirs
     install_collection
     set_ownership
-    verify_setup
     print_next_steps
 }
 
