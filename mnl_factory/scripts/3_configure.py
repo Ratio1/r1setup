@@ -364,6 +364,11 @@ class ConfigManager:
           self.setup_hosts_initial()
       elif choice == "6":
         self.print_colored("Configuration saved. Exiting...", 'green')
+        self.print_colored("\nNext steps:", 'yellow')
+        self.print_colored("1. Return to the setup menu", 'yellow')
+        self.print_colored("2. Run deployment:", 'yellow')
+        self.print_colored("   - Choose option 1 for full deployment (Docker + NVIDIA drivers + GPU setup)", 'cyan')
+        self.print_colored("   - Choose option 2 for Docker-only deployment (without GPU setup)", 'cyan')
         break
       else:
         self.print_colored("Invalid choice. Please try again.", 'red')
@@ -493,10 +498,10 @@ class ConfigManager:
       self.print_colored("\nConfiguration completed successfully!", 'green')
       self.print_colored(f"Configuration saved to: {self.config_file}", 'blue')
       self.print_colored("\nNext steps:", 'yellow')
-      self.print_colored("1. Review your configuration:", 'yellow')
-      self.print_colored(f"   cat {self.config_file}", 'blue')
-      self.print_colored("2. Run the setup script:", 'yellow')
-      self.print_colored("   ./3_run_setup.sh", 'blue')
+      self.print_colored("1. Return to the setup menu", 'yellow')
+      self.print_colored("2. Run deployment:", 'yellow')
+      self.print_colored("   - Choose option 1 for full deployment (Docker + NVIDIA drivers + GPU setup)", 'cyan')
+      self.print_colored("   - Choose option 2 for Docker-only deployment (without GPU setup)", 'cyan')
 
     except Exception as e:
       self.print_colored(f"Error saving configuration: {str(e)}", 'red')

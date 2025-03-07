@@ -299,8 +299,8 @@ show_deployment_menu() {
     echo "5) Get nodes addresses - Extracts and displays the IP addresses of the nodes."
     echo "6) Save nodes addresses to CSV - Saves the extracted node addresses into a CSV file for easy access."
     echo "7) View current configuration - Displays the current configuration settings without sensitive information."
-    echo "8) Exit - Terminates the deployment script."
-    echo "9) Configure nodes - Run the configuration script to add/delete/update node settings."
+    echo "8) Configure nodes - Run the configuration script to add/delete/update node settings."
+    echo "9) Exit - Terminates the deployment script."
 }
 
 # Function to view current configuration
@@ -463,20 +463,29 @@ main() {
                 view_configuration
                 ;;
             8)
-                print_success "Exiting deployment script."
-                exit 0
-                ;;
-            9)
                 print_status "Running node configuration script..."
                 # Get the path to the script relative to the current script
                 CONFIG_SCRIPT_PATH="$(dirname "$0")/3_configure.py"
                 
                 if [ -f "$CONFIG_SCRIPT_PATH" ]; then
                     python3 "$CONFIG_SCRIPT_PATH"
+                    
+                    # Add a message prompting for deployment after configuration
+                    print_status "Node configuration complete!"
+                    print_status "=============================================================="
+                    print_status "To deploy to your configured nodes, please select option:"
+                    print_status "1) For full deployment (Docker + NVIDIA drivers + GPU setup)"
+                    print_status "2) For Docker-only deployment (without GPU setup)"
+                    print_status "=============================================================="
+                    echo
                 else
                     print_error "Configuration script not found at: $CONFIG_SCRIPT_PATH"
                     exit 1
                 fi
+                ;;
+            9)
+                print_success "Exiting deployment script."
+                exit 0
                 ;;
             *)
                 print_error "Invalid option. Please try again."
