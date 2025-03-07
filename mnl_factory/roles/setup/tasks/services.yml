@@ -10,13 +10,28 @@
 
 
 ############### DOCKER ############################
+- name: Check if Docker is installed and /etc/docker exists
+  stat:
+    path: /etc/docker
+  register: docker_config_dir
+  ignore_errors: yes
+
+- name: Create /etc/docker directory if it doesn't exist
+  file:
+    path: /etc/docker
+    state: directory
+    mode: '0755'
+  when: not docker_config_dir.stat.exists | default(false)
+  ignore_errors: yes
+
 - name: Create /etc/docker/daemon.json
   ansible.builtin.template:
     src: docker_daemon.json.j2
     dest: /etc/docker/daemon.json
     mode: '0644'
   notify: reload docker
-
+  when: docker_config_dir.stat.exists | default(false) or not docker_config_dir.failed | default(false)
+  ignore_errors: yes
 
 - name: Reload systemd for docker
   ansible.builtin.command:
@@ -24,13 +39,19 @@
   become: yes
   when:
     - (mnl_debug_deploy is not defined) or (not mnl_debug_deploy | bool)
+  ignore_errors: yes
+
+- name: Check if Docker service exists
+  command: systemctl status docker
+  register: docker_service_status
+  changed_when: false
+  failed_when: false
 
 - name: Restart docker
   ansible.builtin.command:
     cmd: systemctl restart docker
-  become: yes
-  when:
-    - (mnl_debug_deploy is not defined) or (not mnl_debug_deploy | bool)
+  ignore_errors: yes
+  when: docker_service_status.rc == 0
 
 
 - name: "Create service for {{ mnl_app_name }}"

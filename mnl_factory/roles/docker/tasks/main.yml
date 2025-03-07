@@ -39,31 +39,9 @@
     state: directory
     mode: '0755'
 
-- name: Download Docker installation script
-  get_url:
-    url: https://get.docker.com
-    dest: /tmp/get-docker.sh
-    mode: '0755'
-
-- name: Execute Docker installation script
-  command: /tmp/get-docker.sh
-  register: docker_install
-  changed_when: docker_install.rc == 0
-  failed_when: false  # Don't fail if Docker is already installed
-
-- name: Debug Docker installation script output
-  debug:
-    msg: "{{ docker_install.stdout_lines | default([]) }}"
-  when: docker_install.stdout is defined and docker_install.stdout != ""
-
-- name: Debug Docker installation script errors
-  debug:
-    msg: "{{ docker_install.stderr_lines | default([]) }}"
-  when: docker_install.stderr is defined and docker_install.stderr != ""
-
-- name: Install Docker directly (Ubuntu/Debian fallback)
+- name: Direct installation method for Ubuntu
   block:
-    - name: Add Docker GPG key
+    - name: Add Docker GPG apt key
       apt_key:
         url: https://download.docker.com/linux/ubuntu/gpg
         state: present
@@ -82,10 +60,35 @@
           - docker-ce
           - docker-ce-cli
           - containerd.io
+          - docker-compose-plugin
         state: present
         update_cache: yes
-  when: ansible_os_family == "Debian" and docker_binary.rc != 0
-  ignore_errors: yes
+  when: ansible_distribution == "Ubuntu"
+
+- name: Fallback to script method for non-Ubuntu
+  block:
+    - name: Download Docker installation script
+      get_url:
+        url: https://get.docker.com
+        dest: /tmp/get-docker.sh
+        mode: '0755'
+
+    - name: Execute Docker installation script
+      command: /tmp/get-docker.sh
+      register: docker_install
+      changed_when: docker_install.rc == 0
+      failed_when: false  # Don't fail if Docker is already installed
+
+    - name: Debug Docker installation script output
+      debug:
+        msg: "{{ docker_install.stdout_lines | default([]) }}"
+      when: docker_install.stdout is defined and docker_install.stdout != ""
+
+    - name: Debug Docker installation script errors
+      debug:
+        msg: "{{ docker_install.stderr_lines | default([]) }}"
+      when: docker_install.stderr is defined and docker_install.stderr != ""
+  when: ansible_distribution != "Ubuntu"
 
 - name: Install Docker Compose
   get_url:
@@ -227,6 +230,38 @@
   debug:
     msg: "Docker service file {{ 'exists' if docker_service_file.stat.exists | default(false) else 'does not exist' }}"
   when: ansible_service_mgr == "systemd"
+
+- name: Verify Docker service is actually running
+  command: systemctl is-active docker
+  register: docker_active_check
+  changed_when: false
+  failed_when: false
+  when: ansible_service_mgr == "systemd"
+
+- name: Debug Docker service active status
+  debug:
+    msg: "Docker service is {{ docker_active_check.stdout }}"
+  when: ansible_service_mgr == "systemd"
+
+- name: Test Docker functionality
+  command: docker info
+  register: docker_info
+  changed_when: false
+  failed_when: false
+  when: docker_binary.rc == 0
+
+- name: Debug Docker functionality test
+  debug: 
+    msg: "Docker test {{ 'passed' if docker_info.rc == 0 else 'failed' }}. If failed but binary exists, service might need restart."
+  when: docker_binary.rc == 0
+
+- name: Force Docker restart if it's installed but not working
+  systemd:
+    name: docker
+    state: restarted
+    daemon_reload: yes
+  when: docker_binary.rc == 0 and docker_info.rc != 0
+  ignore_errors: yes
 
 - name: Force Docker reinstallation if service file is missing
   block:
