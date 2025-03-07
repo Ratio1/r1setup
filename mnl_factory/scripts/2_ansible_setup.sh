@@ -72,7 +72,7 @@ install_collection() {
     print_message "Installing Multi Node Launcher collection..." "$YELLOW"
     
     # Install the collection
-    sudo -u "$REAL_USER" env HOME="$REAL_HOME" ansible-galaxy collection install ratio1.multi_node_launcher --force
+    sudo -u "$REAL_USER" env HOME="$REAL_HOME" ansible-galaxy collection install ratio1.multi_node_launcher --force --upgrade
     
     # Verify collection installation
     COLLECTION_INFO=$(sudo -u "$REAL_USER" env HOME="$REAL_HOME" ansible-galaxy collection list 2>/dev/null | grep "ratio1.multi_node_launcher" || true)
