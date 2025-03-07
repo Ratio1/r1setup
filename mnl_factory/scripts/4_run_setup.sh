@@ -392,24 +392,24 @@ main() {
     info "Multi Node Launcher Deployment"
     info "============================="
 
-    debug "Checking virtual environment"
-    # Check if we're in the correct environment
-    if [ -z "$VIRTUAL_ENV" ]; then
-        debug "No virtual environment active"
-        VENV_ACTIVATE="$INSTALL_DIR/activate_env.sh"
-        if [ -f "$VENV_ACTIVATE" ]; then
-            info "Activating virtual environment..."
-            debug "Activating from: $VENV_ACTIVATE"
-            . "$VENV_ACTIVATE"
-        else
-            debug "Virtual environment activation script not found at $VENV_ACTIVATE"
-            error "Virtual environment not found!"
-            warning "Please run the prerequisites script first."
-            exit 1
-        fi
-    fi
-
-    debug "Virtual environment active: $VIRTUAL_ENV"
+#    debug "Checking virtual environment"
+#    # Check if we're in the correct environment
+#    if [ -z "$VIRTUAL_ENV" ]; then
+#        debug "No virtual environment active"
+#        VENV_ACTIVATE="$INSTALL_DIR/activate_env.sh"
+#        if [ -f "$VENV_ACTIVATE" ]; then
+#            info "Activating virtual environment..."
+#            debug "Activating from: $VENV_ACTIVATE"
+#            . "$VENV_ACTIVATE"
+#        else
+#            debug "Virtual environment activation script not found at $VENV_ACTIVATE"
+#            error "Virtual environment not found!"
+#            warning "Please run the prerequisites script first."
+#            exit 1
+#        fi
+#    fi
+#
+#    debug "Virtual environment active: $VIRTUAL_ENV"
 
     # Verify ansible installation
     verify_ansible
