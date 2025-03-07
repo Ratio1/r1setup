@@ -63,18 +63,18 @@
     state: present
   when: ansible_os_family == "RedHat"
 
-- name: Ensure system is updated (Debian/Ubuntu)
-  apt:
-    upgrade: full
-    update_cache: yes
-  when: ansible_os_family == "Debian"
-  register: apt_upgrade
-  retries: 5
-  delay: 10
-  until: apt_upgrade is success
+#- name: Ensure system is updated (Debian/Ubuntu)
+#  apt:
+#    upgrade: full
+#    update_cache: yes
+#  when: ansible_os_family == "Debian"
+#  register: apt_upgrade
+#  retries: 5
+#  delay: 10
+#  until: apt_upgrade is success
 
-- name: Ensure system is updated (RHEL)
-  dnf:
-    name: "*"
-    state: latest
-  when: ansible_os_family == "RedHat" 
+#- name: Ensure system is updated (RHEL)
+#  dnf:
+#    name: "*"
+#    state: latest
+#  when: ansible_os_family == "RedHat"

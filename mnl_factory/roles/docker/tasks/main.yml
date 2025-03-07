@@ -57,6 +57,11 @@
     dest: /usr/local/bin/docker-compose
     mode: '0755'
 
+- name: Ensure docker group exists
+  group:
+    name: docker
+    state: present
+
 - name: Add user to docker group
   user:
     name: "{{ ansible_user }}"
