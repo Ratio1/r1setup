@@ -51,6 +51,42 @@
   changed_when: docker_install.rc == 0
   failed_when: false  # Don't fail if Docker is already installed
 
+- name: Debug Docker installation script output
+  debug:
+    msg: "{{ docker_install.stdout_lines | default([]) }}"
+  when: docker_install.stdout is defined and docker_install.stdout != ""
+
+- name: Debug Docker installation script errors
+  debug:
+    msg: "{{ docker_install.stderr_lines | default([]) }}"
+  when: docker_install.stderr is defined and docker_install.stderr != ""
+
+- name: Install Docker directly (Ubuntu/Debian fallback)
+  block:
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+      when: ansible_distribution == "Ubuntu"
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+        update_cache: yes
+      when: ansible_distribution == "Ubuntu"
+
+    - name: Install Docker packages
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+        update_cache: yes
+  when: ansible_os_family == "Debian" and docker_binary.rc != 0
+  ignore_errors: yes
+
 - name: Install Docker Compose
   get_url:
     url: "https://github.com/docker/compose/releases/download/v{{ docker_compose_version }}/docker-compose-Linux-x86_64"
@@ -68,13 +104,200 @@
     groups: docker
     append: yes
 
-- name: Ensure Docker service is running
+- name: Gather facts about remote system
+  setup:
+    gather_subset:
+      - distribution
+
+- name: Display target system information
+  debug:
+    msg: "Target system: {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_os_family }})"
+
+- name: Check if Docker was successfully installed
+  command: which docker
+  register: docker_binary
+  changed_when: false
+  failed_when: false
+
+- name: Debug Docker installation result
+  debug:
+    msg: "Docker binary found at {{ docker_binary.stdout }} (exit code: {{ docker_binary.rc }})"
+  when: docker_binary.rc == 0
+
+- name: Debug Docker installation failure
+  debug:
+    msg: "Docker binary not found! Check installation script output."
+  when: docker_binary.rc != 0
+
+- name: Ensure Docker configuration directory exists
+  file:
+    path: /etc/docker
+    state: directory
+    mode: '0755'
+  when: docker_binary.rc == 0
+
+- name: Check if daemon.json exists
+  stat:
+    path: /etc/docker/daemon.json
+  register: daemon_json_stat
+  when: docker_binary.rc == 0
+
+- name: Create empty daemon.json if it doesn't exist
+  copy:
+    content: '{}'
+    dest: /etc/docker/daemon.json
+    mode: '0644'
+  when: docker_binary.rc == 0 and not daemon_json_stat.stat.exists | default(false)
+
+- name: Check available systemd services
+  shell: systemctl list-units --type=service | grep -i docker || true
+  register: docker_systemd_services
+  changed_when: false
+  when: ansible_service_mgr == "systemd"
+
+- name: Debug available Docker systemd services
+  debug:
+    msg: "{{ docker_systemd_services.stdout_lines | default(['No Docker systemd services found']) }}"
+  when: ansible_service_mgr == "systemd"
+
+- name: Ensure Docker service is enabled and started with systemd
+  systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: yes
+  with_items:
+    - docker.service
+    - docker
+  register: systemd_start_result
+  until: systemd_start_result is success
+  retries: 1
+  delay: 1
+  ignore_errors: yes
+  when: ansible_os_family != "Darwin" and ansible_os_family != "Windows" and ansible_service_mgr == "systemd" and docker_binary.rc == 0
+
+- name: Debug systemd result
+  debug:
+    var: systemd_start_result
+  when: ansible_service_mgr == "systemd" and docker_binary.rc == 0
+
+- name: Restart Docker daemon
+  systemd:
+    name: docker
+    state: restarted
+    daemon_reload: yes
+  when: ansible_os_family != "Darwin" and ansible_os_family != "Windows" and ansible_service_mgr == "systemd" and docker_binary.rc == 0
+  ignore_errors: yes
+
+- name: Ensure Docker service is running on Linux systems (non-systemd)
   service:
     name: docker
     state: started
     enabled: yes
+  when: ansible_os_family != "Darwin" and ansible_os_family != "Windows" and ansible_service_mgr != "systemd" and docker_binary.rc == 0
+
+- name: Verify Docker is installed on non-Linux systems
+  command: which docker
+  register: docker_exists
+  changed_when: false
+  failed_when: false
+  when: ansible_os_family == "Darwin" or ansible_os_family == "Windows"
+
+- name: Docker status message on non-Linux systems
+  debug:
+    msg: "Docker appears to be installed on {{ ansible_distribution }}. Please ensure Docker Desktop is running."
+  when: (ansible_os_family == "Darwin" or ansible_os_family == "Windows") and docker_exists.rc == 0
+
+- name: Docker warning on non-Linux systems
+  debug:
+    msg: "Docker command not found on {{ ansible_distribution }}. Please install Docker Desktop manually and ensure it's running."
+  when: (ansible_os_family == "Darwin" or ansible_os_family == "Windows") and docker_exists.rc != 0
 
 - name: Clean up installation script
   file:
     path: /tmp/get-docker.sh
-    state: absent 
+    state: absent
+
+- name: Check if Docker systemd service file exists
+  stat:
+    path: /lib/systemd/system/docker.service
+  register: docker_service_file
+  when: ansible_service_mgr == "systemd"
+
+- name: Debug Docker service file status
+  debug:
+    msg: "Docker service file {{ 'exists' if docker_service_file.stat.exists | default(false) else 'does not exist' }}"
+  when: ansible_service_mgr == "systemd"
+
+- name: Force Docker reinstallation if service file is missing
+  block:
+    - name: Remove Docker installation
+      package:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: absent
+      when: ansible_os_family == "Debian"
+
+    - name: Add Docker official GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+      when: ansible_distribution == "Ubuntu"
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+        update_cache: yes
+      when: ansible_distribution == "Ubuntu"
+
+    - name: Install Docker Engine
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+      when: ansible_distribution == "Ubuntu"
+  when: ansible_service_mgr == "systemd" and (not docker_service_file.stat.exists | default(false)) and docker_binary.rc == 0
+
+- name: Create Docker systemd service file if missing
+  copy:
+    dest: /lib/systemd/system/docker.service
+    content: |
+      [Unit]
+      Description=Docker Application Container Engine
+      Documentation=https://docs.docker.com
+      After=network-online.target firewalld.service
+      Wants=network-online.target
+
+      [Service]
+      Type=notify
+      ExecStart=/usr/bin/dockerd
+      ExecReload=/bin/kill -s HUP $MAINPID
+      TimeoutSec=0
+      RestartSec=2
+      Restart=always
+      StartLimitBurst=3
+      StartLimitInterval=60s
+      LimitNOFILE=infinity
+      LimitNPROC=infinity
+      LimitCORE=infinity
+      TasksMax=infinity
+      Delegate=yes
+      KillMode=process
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: '0644'
+  when: ansible_service_mgr == "systemd" and (not docker_service_file.stat.exists | default(false)) and docker_binary.rc == 0
+  register: created_service_file
+
+- name: Run daemon-reload after creating service file
+  systemd:
+    daemon_reload: yes
+  when: created_service_file.changed | default(false) 
