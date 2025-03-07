@@ -201,6 +201,7 @@ class ConfigManager:
         with open(self.config_file) as f:
           current_config = yaml.safe_load(f)
           if current_config and "all" in current_config and "children" in current_config["all"]:
+            self.inventory = current_config
             hosts = current_config["all"]["children"]["gpu_nodes"]["hosts"]
             for host_name, host_config in hosts.items():
               self.print_colored(f"\nHost: {host_name}", 'yellow')
@@ -212,9 +213,15 @@ class ConfigManager:
       except Exception as e:
         self.print_colored(f"Error reading current configuration: {str(e)}", 'red')
 
-      overwrite = self.get_input("\nDo you want to create a new configuration? (y/n)", "n")
-
-      if overwrite.lower() == 'y':
+      # Instead of asking to overwrite, offer options to modify
+      self.print_colored("\nWhat would you like to do with the existing configuration?", 'cyan')
+      self.print_colored("1) Use and modify existing configuration")
+      self.print_colored("2) Create a new configuration (backup existing)")
+      self.print_colored("3) Exit without changes")
+      
+      choice = self.get_input("Enter your choice (1/2/3)", "1")
+      
+      if choice == "2":
         # Create history directory if it doesn't exist
         history_dir = self.config_dir / 'hosts-history'
         history_dir.mkdir(exist_ok=True)
@@ -226,20 +233,196 @@ class ConfigManager:
         # Backup existing configuration
         self.config_file.rename(backup_file)
         self.print_colored(f"Existing configuration backed up to: {backup_file}", 'green')
+        
+        # Reset inventory to empty
+        self.inventory = {
+          'all': {
+            'children': {
+              'gpu_nodes': {
+                'hosts': {}
+              }
+            }
+          }
+        }
         return True
-      else:
+      elif choice == "3":
         self.print_colored("Exiting configuration script.", 'yellow')
         return False
+      else:
+        # Use existing configuration
+        return True
+    else:
+      # No existing config, create a new one
+      return True
+
+  def add_host(self) -> None:
+    """Add a new host to the configuration"""
+    hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
+    host_count = len(hosts) + 1
+    
+    self.print_colored(f"\nAdding new GPU node #{host_count}", 'green')
+    host_name = self.get_input(f"Enter name for new GPU node", f"gpu-node-{host_count}")
+    
+    # Check if host already exists
+    if host_name in hosts:
+      self.print_colored(f"A host with name '{host_name}' already exists!", 'red')
+      overwrite = self.get_input("Do you want to overwrite it? (y/n)", "n")
+      if overwrite.lower() != 'y':
+        self.print_colored("Host addition cancelled.", 'yellow')
+        return
+    
+    hosts[host_name] = self.configure_host(host_count)
+    self.print_colored(f"\nGPU node '{host_name}' added successfully!", 'green')
+    self.save_hosts()
+
+  def delete_host(self) -> None:
+    """Delete a host from the configuration"""
+    hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
+    
+    if not hosts:
+      self.print_colored("No hosts configured yet!", 'red')
+      return
+    
+    self.print_colored("\nSelect a host to delete:", 'cyan')
+    for idx, name in enumerate(hosts.keys(), 1):
+      self.print_colored(f"{idx}) {name}")
+    
+    choice = self.get_input("Enter host number to delete (or 'c' to cancel)", "c")
+    if choice.lower() == 'c':
+      self.print_colored("Host deletion cancelled.", 'yellow')
+      return
+    
+    try:
+      choice_idx = int(choice)
+      if 1 <= choice_idx <= len(hosts):
+        host_name = list(hosts.keys())[choice_idx - 1]
+        confirm = self.get_input(f"Are you sure you want to delete host '{host_name}'? (y/n)", "n")
+        if confirm.lower() == 'y':
+          del hosts[host_name]
+          self.print_colored(f"Host '{host_name}' deleted successfully!", 'green')
+          self.save_hosts()
+        else:
+          self.print_colored("Host deletion cancelled.", 'yellow')
+      else:
+        self.print_colored("Invalid host number", 'red')
+    except ValueError:
+      self.print_colored("Invalid input", 'red')
+
+  def update_host(self) -> None:
+    """Update an existing host configuration"""
+    hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
+    
+    if not hosts:
+      self.print_colored("No hosts configured yet!", 'red')
+      return
+    
+    self.print_colored("\nSelect a host to update:", 'cyan')
+    for idx, name in enumerate(hosts.keys(), 1):
+      self.print_colored(f"{idx}) {name}")
+    
+    choice = self.get_input("Enter host number to update (or 'c' to cancel)", "c")
+    if choice.lower() == 'c':
+      self.print_colored("Host update cancelled.", 'yellow')
+      return
+    
+    try:
+      choice_idx = int(choice)
+      if 1 <= choice_idx <= len(hosts):
+        host_name = list(hosts.keys())[choice_idx - 1]
+        hosts[host_name] = self.edit_host(host_name, hosts[host_name])
+        self.print_colored(f"Host '{host_name}' updated successfully!", 'green')
+        self.save_hosts()
+      else:
+        self.print_colored("Invalid host number", 'red')
+    except ValueError:
+      self.print_colored("Invalid input", 'red')
+
+  def show_configuration_menu(self) -> None:
+    """Display the main configuration menu"""
+    while True:
+      self.print_colored("\nNode Configuration Menu", 'green')
+      self.print_colored("======================", 'green')
+      self.print_colored("1) View current configuration")
+      self.print_colored("2) Add a new node")
+      self.print_colored("3) Update an existing node")
+      self.print_colored("4) Delete a node")
+      self.print_colored("5) Create a completely new configuration")
+      self.print_colored("6) Save and exit")
+      
+      choice = self.get_input("Enter your choice (1-6)", "1")
+      
+      if choice == "1":
+        self.view_configuration()
+      elif choice == "2":
+        self.add_host()
+      elif choice == "3":
+        self.update_host()
+      elif choice == "4":
+        self.delete_host()
+      elif choice == "5":
+        if self.create_new_configuration():
+          self.setup_hosts_initial()
+      elif choice == "6":
+        self.print_colored("Configuration saved. Exiting...", 'green')
+        break
+      else:
+        self.print_colored("Invalid choice. Please try again.", 'red')
+
+  def view_configuration(self) -> None:
+    """View the current configuration"""
+    hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
+    
+    if not hosts:
+      self.print_colored("No hosts configured yet!", 'red')
+      return
+    
+    self.print_colored("\nCurrent configuration:", 'cyan')
+    for host_name, host_config in hosts.items():
+      self.print_colored(f"\nHost: {host_name}", 'yellow')
+      for key, value in host_config.items():
+        # Mask sensitive information
+        if any(k in key.lower() for k in ["password", "key"]):
+          value = "********"
+        self.print_colored(f"  {key}: {value}")
+    
+    input("\nPress Enter to continue...")
+
+  def create_new_configuration(self) -> bool:
+    """Create a completely new configuration, backing up any existing one"""
+    if self.config_file.exists():
+      confirm = self.get_input("This will overwrite your current configuration. Are you sure? (y/n)", "n")
+      if confirm.lower() != 'y':
+        self.print_colored("Operation cancelled.", 'yellow')
+        return False
+      
+      # Create history directory if it doesn't exist
+      history_dir = self.config_dir / 'hosts-history'
+      history_dir.mkdir(exist_ok=True)
+
+      # Generate timestamp and backup filename
+      timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+      backup_file = history_dir / f'hosts-{timestamp}.yml'
+
+      # Backup existing configuration
+      self.config_file.rename(backup_file)
+      self.print_colored(f"Existing configuration backed up to: {backup_file}", 'green')
+    
+    # Reset inventory to empty
+    self.inventory = {
+      'all': {
+        'children': {
+          'gpu_nodes': {
+            'hosts': {}
+          }
+        }
+      }
+    }
     return True
 
-  def setup_hosts(self) -> None:
-    """Main host setup process"""
+  def setup_hosts_initial(self) -> None:
+    """Initial host setup process for a new configuration"""
     self.print_colored("\nGPU Node Configuration", 'green')
     self.print_colored("===================", 'green')
-
-    # Check for existing configuration
-    if not self.check_existing_config():
-      exit(0)
 
     while True:
       try:
@@ -260,30 +443,23 @@ class ConfigManager:
       self.print_colored("=" * 30, 'cyan')  # Divider
       print()  # Newline for spacing
 
-    # Allow editing after all hosts are configured
-    while True:
-      self.print_colored("\nCurrent configuration:", 'cyan')
-      for idx, (name, config) in enumerate(hosts.items(), 1):
-        self.print_colored(f"\n{idx}) {name}:", 'yellow')
-        for key, value in config.items():
-          if 'password' not in key and 'key' not in key:
-            self.print_colored(f"   {key}: {value}")
-
-      edit = self.get_input("\nWould you like to edit any host? (Enter host number or 'n' to finish)", "n")
-      if edit.lower() == 'n':
-        break
-
-      try:
-        edit_idx = int(edit)
-        if 1 <= edit_idx <= len(hosts):
-          host_name = list(hosts.keys())[edit_idx - 1]
-          hosts[host_name] = self.edit_host(host_name, hosts[host_name])
-        else:
-          self.print_colored("Invalid host number", 'red')
-      except ValueError:
-        self.print_colored("Invalid input", 'red')
-
     self.save_configuration()
+
+  def setup_hosts(self) -> None:
+    """Main host setup process with flexible configuration options"""
+    self.print_colored("\nGPU Node Configuration", 'green')
+    self.print_colored("===================", 'green')
+
+    # Check for existing configuration
+    if not self.check_existing_config():
+      exit(0)
+
+    # If we have an empty configuration, run the initial setup
+    if not self.inventory['all']['children']['gpu_nodes']['hosts']:
+      self.setup_hosts_initial()
+    else:
+      # Otherwise, show the configuration menu
+      self.show_configuration_menu()
 
   def save_configuration(self) -> None:
     """Save the configuration to file"""

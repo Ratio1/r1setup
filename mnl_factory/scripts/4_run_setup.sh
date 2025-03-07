@@ -300,6 +300,7 @@ show_deployment_menu() {
     echo "6) Save nodes addresses to CSV - Saves the extracted node addresses into a CSV file for easy access."
     echo "7) View current configuration - Displays the current configuration settings without sensitive information."
     echo "8) Exit - Terminates the deployment script."
+    echo "9) Configure nodes - Run the configuration script to add/delete/update node settings."
 }
 
 # Function to view current configuration
@@ -420,7 +421,7 @@ main() {
     # Main loop
     while true; do
         show_deployment_menu
-        read -p "Select an option [1-8]: " choice
+        read -p "Select an option [1-9]: " choice
 
         case $choice in
             1)
@@ -464,6 +465,18 @@ main() {
             8)
                 print_success "Exiting deployment script."
                 exit 0
+                ;;
+            9)
+                print_status "Running node configuration script..."
+                # Get the path to the script relative to the current script
+                CONFIG_SCRIPT_PATH="$(dirname "$0")/3_configure.py"
+                
+                if [ -f "$CONFIG_SCRIPT_PATH" ]; then
+                    python3 "$CONFIG_SCRIPT_PATH"
+                else
+                    print_error "Configuration script not found at: $CONFIG_SCRIPT_PATH"
+                    exit 1
+                fi
                 ;;
             *)
                 print_error "Invalid option. Please try again."
