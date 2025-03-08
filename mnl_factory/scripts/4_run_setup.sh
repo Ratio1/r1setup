@@ -205,10 +205,33 @@ parse_node_info() {
     local output_file="/tmp/node_info_output.txt"
     local show_only=${1:-"true"}
 
+    # Create control path directory if it doesn't exist
+    ANSIBLE_CP_DIR="$ANSIBLE_HOME/cp"
+    mkdir -p "$ANSIBLE_CP_DIR" 2>/dev/null
+    debug "Created control path directory: $ANSIBLE_CP_DIR"
+    
+    # Set permissions on control path directory
+    chmod 700 "$ANSIBLE_CP_DIR" 2>/dev/null
+    
+    # Set ownership if running with sudo
+    if [ -n "$SUDO_USER" ]; then
+        chown "$SUDO_USER" "$ANSIBLE_CP_DIR" 2>/dev/null
+        debug "Set ownership of control path directory to $SUDO_USER"
+    fi
+    
+    # Add SSH control path options to avoid permission issues
+    SSH_OPTS="-o ControlMaster=auto -o ControlPersist=60s -o ControlPath=$ANSIBLE_CP_DIR/%h-%p-%r"
+
     # Run the playbook and capture output
-    ANSIBLE_STDOUT_CALLBACK=yaml ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml" > "$output_file" 2>&1
+    ANSIBLE_STDOUT_CALLBACK=yaml ANSIBLE_SSH_ARGS="$SSH_OPTS" ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml" > "$output_file" 2>&1
 
     debug "Parsing node info from: $output_file"
+
+    # If the playbook failed, show error message and exit
+    if [ $? -ne 0 ]; then
+        print_error "Failed to retrieve node information. Check your SSH connection and configuration."
+        return 1
+    fi
 
     # Parse the output using awk
     awk -v show="$show_only" -v collection_path="$COLLECTION_PATH" '
@@ -354,7 +377,24 @@ run_playbook() {
         exit 1
     fi
 
-    local ansible_cmd="ANSIBLE_ROLES_PATH=$COLLECTION_PATH/roles ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i $COLLECTION_PATH/hosts.yml $COLLECTION_PATH/playbooks/$playbook"
+    # Create control path directory if it doesn't exist
+    ANSIBLE_CP_DIR="$ANSIBLE_HOME/cp"
+    mkdir -p "$ANSIBLE_CP_DIR" 2>/dev/null
+    debug "Created control path directory: $ANSIBLE_CP_DIR"
+    
+    # Set permissions on control path directory
+    chmod 700 "$ANSIBLE_CP_DIR" 2>/dev/null
+    
+    # Set ownership if running with sudo
+    if [ -n "$SUDO_USER" ]; then
+        chown "$SUDO_USER" "$ANSIBLE_CP_DIR" 2>/dev/null
+        debug "Set ownership of control path directory to $SUDO_USER"
+    fi
+    
+    # Add SSH control path options to avoid permission issues
+    SSH_OPTS="-o ControlMaster=auto -o ControlPersist=60s -o ControlPath=$ANSIBLE_CP_DIR/%h-%p-%r"
+
+    local ansible_cmd="ANSIBLE_SSH_ARGS=\"$SSH_OPTS\" ANSIBLE_ROLES_PATH=$COLLECTION_PATH/roles ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i $COLLECTION_PATH/hosts.yml $COLLECTION_PATH/playbooks/$playbook"
     if [ -n "$extra_vars" ]; then
         ansible_cmd="$ansible_cmd --extra-vars \"$extra_vars\""
     fi
@@ -434,19 +474,63 @@ main() {
                 ;;
             3)
                 print_status "Testing connection to hosts..."
-                if ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/test_connection.yml"; then
+                
+                # Create control path directory if it doesn't exist
+                ANSIBLE_CP_DIR="$ANSIBLE_HOME/cp"
+                mkdir -p "$ANSIBLE_CP_DIR" 2>/dev/null
+                debug "Created control path directory: $ANSIBLE_CP_DIR"
+                
+                # Set permissions on control path directory
+                chmod 700 "$ANSIBLE_CP_DIR" 2>/dev/null
+                
+                # Set ownership if running with sudo
+                if [ -n "$SUDO_USER" ]; then
+                    chown "$SUDO_USER" "$ANSIBLE_CP_DIR" 2>/dev/null
+                    debug "Set ownership of control path directory to $SUDO_USER"
+                fi
+                
+                # Add SSH control path options to avoid permission issues
+                SSH_OPTS="-o ControlMaster=auto -o ControlPersist=60s -o ControlPath=$ANSIBLE_CP_DIR/%h-%p-%r"
+                
+                if ANSIBLE_SSH_ARGS="$SSH_OPTS" ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/test_connection.yml"; then
                     print_success "Connection test completed successfully."
                 else
                     print_error "Connection test failed. Please check your inventory and playbook."
+                    print_status "This might be due to SSH connection issues. Try the following:"
+                    print_status "1. Check your SSH credentials in your configuration"
+                    print_status "2. Ensure your SSH keys are properly set up"
+                    print_status "3. Verify that the hosts are reachable from your machine"
                     exit 1
                 fi
                 ;;
             4)
                 print_status "Getting nodes information..."
-                if ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml"; then
+                
+                # Create control path directory if it doesn't exist
+                ANSIBLE_CP_DIR="$ANSIBLE_HOME/cp"
+                mkdir -p "$ANSIBLE_CP_DIR" 2>/dev/null
+                debug "Created control path directory: $ANSIBLE_CP_DIR"
+                
+                # Set permissions on control path directory
+                chmod 700 "$ANSIBLE_CP_DIR" 2>/dev/null
+                
+                # Set ownership if running with sudo
+                if [ -n "$SUDO_USER" ]; then
+                    chown "$SUDO_USER" "$ANSIBLE_CP_DIR" 2>/dev/null
+                    debug "Set ownership of control path directory to $SUDO_USER"
+                fi
+                
+                # Add SSH control path options to avoid permission issues
+                SSH_OPTS="-o ControlMaster=auto -o ControlPersist=60s -o ControlPath=$ANSIBLE_CP_DIR/%h-%p-%r"
+                
+                if ANSIBLE_SSH_ARGS="$SSH_OPTS" ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml"; then
                     print_success "Node information retrieved successfully."
                 else
                     print_error "Failed to retrieve node information."
+                    print_status "This might be due to SSH connection issues. Try the following:"
+                    print_status "1. Check your SSH credentials in your configuration"
+                    print_status "2. Ensure your SSH keys are properly set up"
+                    print_status "3. Verify that the hosts are reachable from your machine"
                     exit 1
                 fi
                 ;;
