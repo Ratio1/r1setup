@@ -10,6 +10,12 @@ print_message() {
     echo -e "${2}${1}${NC}"
 }
 
+# Check for bash
+if ! command -v bash >/dev/null 2>&1; then
+    print_message "Bash is required for this script. Please install bash first." "$RED"
+    exit 1
+fi
+
 # Detect OS
 OS_TYPE=""
 if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -65,18 +71,30 @@ if [ "$OS_TYPE" = "macos" ]; then
     xattr -d com.apple.quarantine 4_run_setup.sh 2>/dev/null
 fi
 
+# Ensure bash shebang is correct
+print_message "Ensuring correct bash path in scripts..." "$YELLOW"
+for script in 1_prerequisites.sh 2_ansible_setup.sh 4_run_setup.sh; do
+    # Get first line of the script
+    first_line=$(head -n 1 "$script")
+    # Check if it's a shebang
+    if [[ $first_line == \#\!* ]]; then
+        # Replace with correct bash path
+        sed -i.bak "1s|.*|#!/bin/bash|" "$script"
+        rm -f "${script}.bak"
+    fi
+done
+
 print_message "\nSetup process:" "$GREEN"
 print_message "1. Installing prerequisites..." "$YELLOW"
-sudo sh ./1_prerequisites.sh
+sudo bash ./1_prerequisites.sh
 
 print_message "2. Ansible setup..." "$YELLOW"
-sh ./2_ansible_setup.sh
+bash ./2_ansible_setup.sh
 
 print_message "\n3. Configuring nodes..." "$YELLOW"
 python3 ./3_configure.py
 
 print_message "\n4. Running setup..." "$YELLOW"
-# Run with explicit interpreter to avoid potential shebang issues
 sh ./4_run_setup.sh
 
 # Clean up
