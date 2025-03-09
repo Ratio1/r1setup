@@ -42,10 +42,8 @@ else
     exit 1
 fi
 
-# Create temporary directory
-TEMP_DIR=$(mktemp -d)
-cd "$TEMP_DIR" || exit 1
-print_message "Using temporary directory: $TEMP_DIR" "$YELLOW"
+# Working directly in the current directory
+print_message "Working in the current directory: $(pwd)" "$YELLOW"
 
 # Download setup scripts
 print_message "Downloading setup scripts..." "$YELLOW"
@@ -56,6 +54,11 @@ curl -O https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/
 
 # Make scripts executable
 chmod +x 1_prerequisites.sh 2_ansible_setup.sh 3_configure.py 4_run_setup.sh
+
+# Fix ownership of all files if running as root
+if [ "$(id -u)" -eq 0 ] && [ -n "$SUDO_USER" ]; then
+    chown "$REAL_USER" 1_prerequisites.sh 2_ansible_setup.sh 3_configure.py 4_run_setup.sh
+fi
 
 # Fix line endings (in case of CRLF issues)
 if command -v dos2unix >/dev/null 2>&1; then
@@ -107,8 +110,10 @@ if [ "$OS_TYPE" = "macos" ]; then
         print_message "Running homebrew and pip installations as real user: $REAL_USER" "$YELLOW"
         # Modify the prerequisites script to avoid sudo usage
         sed -i.bak 's/sudo pip3/pip3/g' 1_prerequisites.sh
-        # Run as the real user
-        su - "$REAL_USER" -c "cd '$TEMP_DIR' && bash ./1_prerequisites.sh"
+        
+        # Run the command directly without using su
+        print_message "Setting up prerequisites..." "$YELLOW"
+        sudo -u "$REAL_USER" bash ./1_prerequisites.sh
     else
         bash ./1_prerequisites.sh
     fi
@@ -125,9 +130,10 @@ if [ "$OS_TYPE" = "macos" ] && [ "$(id -u)" -eq 0 ]; then
     echo "REAL_HOME='$REAL_HOME'" >> ansible_setup_env.sh
     cat 2_ansible_setup.sh >> ansible_setup_env.sh
     chmod +x ansible_setup_env.sh
+    chown "$REAL_USER" ansible_setup_env.sh
     
-    # Run as the real user
-    su - "$REAL_USER" -c "cd '$TEMP_DIR' && bash ./ansible_setup_env.sh"
+    # Run as the real user using sudo -u
+    sudo -u "$REAL_USER" bash ./ansible_setup_env.sh
 else
     bash ./2_ansible_setup.sh
 fi
@@ -135,7 +141,7 @@ fi
 print_message "\n3. Configuring nodes..." "$YELLOW"
 # Run python script as real user on macOS
 if [ "$OS_TYPE" = "macos" ] && [ "$(id -u)" -eq 0 ]; then
-    su - "$REAL_USER" -c "cd '$TEMP_DIR' && python3 ./3_configure.py"
+    sudo -u "$REAL_USER" python3 ./3_configure.py
 else
     python3 ./3_configure.py
 fi
@@ -143,13 +149,10 @@ fi
 print_message "\n4. Running setup..." "$YELLOW"
 # Run setup script as real user on macOS
 if [ "$OS_TYPE" = "macos" ] && [ "$(id -u)" -eq 0 ]; then
-    su - "$REAL_USER" -c "cd '$TEMP_DIR' && bash ./4_run_setup.sh"
+    sudo -u "$REAL_USER" bash ./4_run_setup.sh
 else
     bash ./4_run_setup.sh
 fi
 
-# Clean up
-print_message "\nCleaning up temporary files..." "$YELLOW"
-cd - >/dev/null || exit 1
-rm -rf "$TEMP_DIR"
-print_message "Installation complete!" "$GREEN"
+print_message "\nScript execution completed successfully!" "$GREEN"
+print_message "You may want to remove the setup scripts with: rm -f {1,2,3,4}_*.{sh,py} ansible_setup_env.sh" "$YELLOW"
