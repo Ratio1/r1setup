@@ -16,6 +16,19 @@ if ! command -v bash >/dev/null 2>&1; then
     exit 1
 fi
 
+# Get the actual user when running with sudo
+if [ -n "$SUDO_USER" ]; then
+    REAL_USER=$SUDO_USER
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        REAL_HOME=$(dscl . -read /Users/"$SUDO_USER" NFSHomeDirectory | awk '{print $2}')
+    else
+        REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    fi
+else
+    REAL_USER=$USER
+    REAL_HOME=$HOME
+fi
+
 # Detect OS
 OS_TYPE=""
 if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -85,17 +98,55 @@ for script in 1_prerequisites.sh 2_ansible_setup.sh 4_run_setup.sh; do
 done
 
 print_message "\nSetup process:" "$GREEN"
-print_message "1. Installing prerequisites..." "$YELLOW"
-sudo bash ./1_prerequisites.sh
+
+# On macOS, don't use sudo for Homebrew or pip installations
+if [ "$OS_TYPE" = "macos" ]; then
+    print_message "1. Installing prerequisites for macOS..." "$YELLOW"
+    # If running as root, run this as the real user
+    if [ "$(id -u)" -eq 0 ]; then
+        print_message "Running homebrew and pip installations as real user: $REAL_USER" "$YELLOW"
+        # Modify the prerequisites script to avoid sudo usage
+        sed -i.bak 's/sudo pip3/pip3/g' 1_prerequisites.sh
+        # Run as the real user
+        su - "$REAL_USER" -c "cd '$TEMP_DIR' && bash ./1_prerequisites.sh"
+    else
+        bash ./1_prerequisites.sh
+    fi
+else
+    print_message "1. Installing prerequisites for Linux..." "$YELLOW"
+    sudo bash ./1_prerequisites.sh
+fi
 
 print_message "2. Ansible setup..." "$YELLOW"
-bash ./2_ansible_setup.sh
+# Run ansible setup as real user on macOS
+if [ "$OS_TYPE" = "macos" ] && [ "$(id -u)" -eq 0 ]; then
+    # Add REAL_USER and REAL_HOME variables to the script
+    echo "REAL_USER='$REAL_USER'" > ansible_setup_env.sh
+    echo "REAL_HOME='$REAL_HOME'" >> ansible_setup_env.sh
+    cat 2_ansible_setup.sh >> ansible_setup_env.sh
+    chmod +x ansible_setup_env.sh
+    
+    # Run as the real user
+    su - "$REAL_USER" -c "cd '$TEMP_DIR' && bash ./ansible_setup_env.sh"
+else
+    bash ./2_ansible_setup.sh
+fi
 
 print_message "\n3. Configuring nodes..." "$YELLOW"
-python3 ./3_configure.py
+# Run python script as real user on macOS
+if [ "$OS_TYPE" = "macos" ] && [ "$(id -u)" -eq 0 ]; then
+    su - "$REAL_USER" -c "cd '$TEMP_DIR' && python3 ./3_configure.py"
+else
+    python3 ./3_configure.py
+fi
 
 print_message "\n4. Running setup..." "$YELLOW"
-sh ./4_run_setup.sh
+# Run setup script as real user on macOS
+if [ "$OS_TYPE" = "macos" ] && [ "$(id -u)" -eq 0 ]; then
+    su - "$REAL_USER" -c "cd '$TEMP_DIR' && bash ./4_run_setup.sh"
+else
+    bash ./4_run_setup.sh
+fi
 
 # Clean up
 print_message "\nCleaning up temporary files..." "$YELLOW"
