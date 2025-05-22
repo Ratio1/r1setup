@@ -95,9 +95,9 @@
     mode: '0755'
   become: true
 
-- name: Wait for 5 seconds
+- name: Wait for 20 seconds
   ansible.builtin.pause:
-    seconds: 5
+    seconds: 20
 
 - name: Run get_node_info command
   ansible.builtin.command:

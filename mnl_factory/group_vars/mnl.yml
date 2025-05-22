@@ -2,7 +2,7 @@
 # Basic application configuration
 mnl_app_name: "mnl_ee"
 mnl_app_version: "1.0.0"
-mnl_app_env: "develop"   # Options: "staging", "qa", "preprod", "prod", "develop"
+mnl_app_env: "devnet"   # Options: "staging", "qa", "preprod", "prod", "develop"
 mnl_dev_mode: false
 
 # Service configuration
@@ -15,6 +15,7 @@ mnl_local_cache_folder: "{{ mnl_base_folder }}/_local_cache"
 # Container configuration
 mnl_container_registry_url: "docker.io"
 mnl_docker_image_name: "edge_node_container"
+mnl_docker_volume_name: "r1_vol"
 mnl_docker_persistent_folder: "/edge_node/_local_cache"
 mnl_container_registry_user: "ratio1"
 mnl_container_image: "edge_node"
@@ -25,8 +26,8 @@ mnl_docker_cr_accept_insecure: false
 
 # Runtime configuration
 mnl_device: "cuda:0"
-#mnl_docker_gpus: "--gpus all"
-mnl_docker_gpus: ""
+mnl_docker_gpus: "--gpus all"
+#mnl_docker_gpus: ""
 mnl_port_forward: "{{ '-p 1883:1883' if mnl_dev_mode else '' }}"
 mnl_container_memory_limit: 30GB
 

@@ -40,18 +40,6 @@
         url: https://nvidia.github.io/nvidia-docker/gpgkey
         dest: /usr/share/keyrings/nvidia-docker-keyring.asc
 
-    - name: Ubuntu/Debian - Add NVIDIA Docker repository
-      block:
-        - name: Add NVIDIA Docker repository
-          apt_repository:
-            repo: "deb [signed-by=/usr/share/keyrings/nvidia-docker-keyring.asc] https://nvidia.github.io/nvidia-docker/{{ ansible_distribution | lower }}{{ ansible_distribution_version }}/{{ ansible_architecture }}"
-            state: present
-            filename: nvidia-docker
-        - name: Update apt cache
-          apt:
-            update_cache: yes
-      when: is_ubuntu or is_debian
-
     - name: Ubuntu/Debian - Install NVIDIA Docker packages
       apt:
         name:

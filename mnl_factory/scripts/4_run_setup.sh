@@ -347,14 +347,16 @@ run_playbook() {
     debug "Using Ansible home: $ANSIBLE_HOME"
 
     # Check if playbook exists
-    if [ ! -f "$COLLECTION_PATH/playbooks/$playbook" ]; then
-        error "Playbook not found: $COLLECTION_PATH/playbooks/$playbook"
+    HOME="../"
+    PLAYBOOK_PATH="../playbooks/$playbook"
+    if [ ! -f "$PLAYBOOK_PATH" ]; then
+        error "Playbook not found: $PLAYBOOK_PATH"
         debug "Available playbooks:"
-        ls -l "$COLLECTION_PATH/playbooks/" 2>/dev/null || echo "No playbooks directory found"
+        ls -l "$PLAYBOOK_PATH/.." 2>/dev/null || echo "No playbooks directory found"
         exit 1
     fi
 
-    local ansible_cmd="ANSIBLE_ROLES_PATH=$COLLECTION_PATH/roles ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i $COLLECTION_PATH/hosts.yml $COLLECTION_PATH/playbooks/$playbook"
+    local ansible_cmd="ANSIBLE_ROLES_PATH=$HOME/roles ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i $COLLECTION_PATH/hosts.yml $HOME/playbooks/$playbook"
     if [ -n "$extra_vars" ]; then
         ansible_cmd="$ansible_cmd --extra-vars \"$extra_vars\""
     fi
