@@ -16,7 +16,7 @@ ExecStartPre=-/usr/bin/docker pull {{ mnl_docker_image_url }}
 
 # Start the container
 ExecStart=/bin/sh -c '/usr/bin/docker run \
-    {% if nvidia_gpu_check.rc == 0 and nvidia_smi_check1.rc != 0 %}{{ mnl_docker_gpus }}{% else %}""{% endif %} \
+    {% if nvidia_gpu_check.rc == 0 and nvidia_smi_check1.rc != 0 %}{{ mnl_docker_gpus }}{% else %} {% endif %} \
     {{ mnl_port_forward | default('') }} \
     -m {{ mnl_container_memory_limit | default('30GB') }} \
     --rm \
