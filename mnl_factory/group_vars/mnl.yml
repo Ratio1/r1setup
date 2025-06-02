@@ -2,7 +2,7 @@
 # Basic application configuration
 mnl_app_name: "mnl_ee"
 mnl_app_version: "1.0.0"
-mnl_app_env: "devnet"   # Options: "staging", "qa", "preprod", "prod", "develop"
+mnl_app_env: "mainnet"   # Options: "mainnet", "devnet", "testnet"
 mnl_dev_mode: false
 
 # Service configuration
@@ -23,6 +23,7 @@ mnl_docker_image_url: "{{ mnl_container_registry_user }}/{{ mnl_container_image 
 mnl_docker_pull_limit: 5
 mnl_debug_deploy: false
 mnl_docker_cr_accept_insecure: false
+docker_image_name: "{{ mnl_container_registry_user }}/{{ mnl_container_image }}:{{ mnl_app_env }}"
 
 # Runtime configuration
 mnl_device: "cuda:0"
