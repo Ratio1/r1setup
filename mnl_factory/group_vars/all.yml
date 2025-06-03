@@ -1,7 +1,6 @@
 ---
 # Docker configuration
 docker_compose_version: "2.23.3"
-docker_container_name: "edge_node_container"  # Define the container name variable
 
 # NVIDIA configuration
 nvidia_driver: "nvidia-driver-550"  # Change this to match your needs

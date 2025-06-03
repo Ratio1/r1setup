@@ -14,16 +14,16 @@ mnl_local_cache_folder: "{{ mnl_base_folder }}/_local_cache"
 
 # Container configuration
 mnl_container_registry_url: "docker.io"
-mnl_docker_image_name: "edge_node_container"
+mnl_docker_container_name: "edge_node"
 mnl_docker_volume_name: "r1_vol"
 mnl_docker_persistent_folder: "/edge_node/_local_cache"
 mnl_container_registry_user: "ratio1"
-mnl_container_image: "edge_node"
-mnl_docker_image_url: "{{ mnl_container_registry_user }}/{{ mnl_container_image }}:{{ mnl_app_env }}"
+mnl_docker_image_name: "edge_node"
+mnl_docker_image_url: "{{ mnl_container_registry_user }}/{{ mnl_docker_image_name }}:{{ mnl_app_env }}"
 mnl_docker_pull_limit: 5
 mnl_debug_deploy: false
 mnl_docker_cr_accept_insecure: false
-docker_image_name: "{{ mnl_container_registry_user }}/{{ mnl_container_image }}:{{ mnl_app_env }}"
+docker_image_name: "{{ mnl_container_registry_user }}/{{ mnl_docker_image_name }}:{{ mnl_app_env }}"
 
 # Runtime configuration
 mnl_device: "cuda:0"
