@@ -306,13 +306,22 @@ show_deployment_menu() {
 # Function to view current configuration
 view_configuration() {
     local hosts_file="$COLLECTION_PATH/hosts.yml"
+    # Python from venv, assuming 4_run_setup.sh is run from $SETUP_DIR
+    local python_in_venv="./mnl_venv/bin/python3"
+
+    if [ ! -f "$python_in_venv" ]; then
+        print_error "Python interpreter not found in virtual environment: $python_in_venv"
+        print_status "Please ensure prerequisites (1_prerequisites.sh) ran successfully."
+        return 1 # Indicate error
+    fi
+
     print_status "Current Configuration"
     echo "================================"
     print_success "Configuration file: $hosts_file"
     echo "--------------------------------"
 
-    # Use Python to read and display YAML without sensitive information
-    python3 -c '
+    # Use Python from venv to read and display YAML without sensitive information
+    "$python_in_venv" -c '
 import yaml
 import sys
 
@@ -345,18 +354,20 @@ run_playbook() {
     debug "Inventory file: $COLLECTION_PATH/hosts.yml"
     debug "Extra vars: $extra_vars"
     debug "Using Ansible home: $ANSIBLE_HOME"
+    debug "Using Collection path for playbooks and roles: $COLLECTION_PATH"
 
     # Check if playbook exists
-    HOME="../"
-    PLAYBOOK_PATH="../playbooks/$playbook"
+    PLAYBOOK_PATH="$COLLECTION_PATH/playbooks/$playbook"
     if [ ! -f "$PLAYBOOK_PATH" ]; then
         error "Playbook not found: $PLAYBOOK_PATH"
-        debug "Available playbooks:"
-        ls -l "$PLAYBOOK_PATH/.." 2>/dev/null || echo "No playbooks directory found"
+        debug "Looking for playbooks in: $COLLECTION_PATH/playbooks/"
+        ls -l "$COLLECTION_PATH/playbooks/" 2>/dev/null || echo "Playbooks directory not found or empty."
         exit 1
     fi
 
-    local ansible_cmd="ANSIBLE_ROLES_PATH=$HOME/roles ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i $COLLECTION_PATH/hosts.yml $HOME/playbooks/$playbook"
+    ROLES_PATH="$COLLECTION_PATH/roles"
+
+    local ansible_cmd="ANSIBLE_ROLES_PATH=$ROLES_PATH ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i $COLLECTION_PATH/hosts.yml $PLAYBOOK_PATH"
     if [ -n "$extra_vars" ]; then
         ansible_cmd="$ansible_cmd --extra-vars \"$extra_vars\""
     fi
@@ -467,10 +478,16 @@ main() {
             8)
                 print_status "Running node configuration script..."
                 # Get the path to the script relative to the current script
-                CONFIG_SCRIPT_PATH="$(dirname "$0")/3_configure.py"
-                
-                if [ -f "$CONFIG_SCRIPT_PATH" ]; then
-                    python3 "$CONFIG_SCRIPT_PATH"
+                CONFIG_SCRIPT_PATH="./3_configure.py" # It's in the same dir ($SETUP_DIR)
+                # Python from venv
+                local python_in_venv_main="./mnl_venv/bin/python3"
+
+                if [ ! -f "$python_in_venv_main" ]; then
+                    print_error "Python interpreter not found in virtual environment: $python_in_venv_main"
+                    print_status "Please ensure prerequisites (1_prerequisites.sh) ran successfully."
+                    # Potentially exit or allow loop to continue
+                elif [ -f "$CONFIG_SCRIPT_PATH" ]; then
+                    "$python_in_venv_main" "$CONFIG_SCRIPT_PATH"
                     
                     # Add a message prompting for deployment after configuration
                     print_status "Node configuration complete!"

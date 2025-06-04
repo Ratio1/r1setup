@@ -479,22 +479,6 @@ class ConfigManager:
       # Set proper permissions
       os.chmod(self.config_file, 0o600)
 
-      # Set proper ownership if running with sudo
-      if 'SUDO_USER' in os.environ:
-        import pwd
-        import grp
-        real_user = os.environ['SUDO_USER']
-        uid = pwd.getpwnam(real_user).pw_uid
-        gid = pwd.getpwnam(real_user).pw_gid
-        os.chown(self.config_file, uid, gid)
-        # Also set ownership of the config directory
-        for root, dirs, files in os.walk(str(self.config_dir)):
-          os.chown(root, uid, gid)
-          for d in dirs:
-            os.chown(os.path.join(root, d), uid, gid)
-          for f in files:
-            os.chown(os.path.join(root, f), uid, gid)
-
       self.print_colored("\nConfiguration completed successfully!", 'green')
       self.print_colored(f"Configuration saved to: {self.config_file}", 'blue')
       self.print_colored("\nNext steps:", 'yellow')

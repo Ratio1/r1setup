@@ -62,9 +62,6 @@ set_install_dirs() {
 create_dirs() {
     # Create Ansible directory structure
     mkdir -p "$ANSIBLE_DIR/collections"
-    if [[ "$OS_TYPE" == "linux" ]]; then
-        chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$ANSIBLE_DIR"
-    fi
 }
 
 # Install Ansible collection
