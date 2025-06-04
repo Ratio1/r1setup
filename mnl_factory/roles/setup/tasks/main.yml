@@ -8,14 +8,14 @@
 
 - name: Pull Docker image
   docker_image:
-    name: "{{ docker_image_name }}"
+    name: "{{ mnl_docker_image_url }}"
     source: pull
     force_source: yes
 
 #- name: Start Docker container
 #  docker_container:
 #    name: "{{ docker_container_name }}"  # Use the variable for the container name
-#    image: "{{ docker_image_name }}"
+#    image: "{{ mnl_docker_image_url }}"
 #    state: started
 #    restart_policy: always  # Optional: ensures the container restarts on failure
 #    ports:

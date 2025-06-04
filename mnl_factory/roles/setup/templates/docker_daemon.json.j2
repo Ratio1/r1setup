@@ -1,6 +1,6 @@
 {
 {%- if mnl_docker_cr_accept_insecure is defined and mnl_docker_cr_accept_insecure -%}
-  "insecure-registries": [ "{{ mnl_container_registry_url }}" ],
+  "insecure-registries": [ "{{ mnl_cr_server }}" ],
 {%- endif -%}
   "max-concurrent-uploads": 1,
   "max-concurrent-downloads": {{ mnl_docker_pull_limit | default(5) }}

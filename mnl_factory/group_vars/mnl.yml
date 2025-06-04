@@ -1,29 +1,30 @@
 ---
 # Basic application configuration
-mnl_app_name: "mnl_ee"
+mnl_app_name: "edge_node_app"
 mnl_app_version: "1.0.0"
 mnl_app_env: "mainnet"   # Options: "mainnet", "devnet", "testnet"
 mnl_dev_mode: false
 
 # Service configuration
-mnl_service_name: "mnl_execution_engine"
+edge_node_service_name: "edge_node_service"
 
 # File system configuration
 mnl_base_folder: "/var/cache/{{ mnl_app_name }}"
 mnl_local_cache_folder: "{{ mnl_base_folder }}/_local_cache"
 
 # Container configuration
-mnl_container_registry_url: "docker.io"
 mnl_docker_container_name: "edge_node"
-mnl_docker_image_path: "/var/cache/edge_node/_local_cache"
+mnl_docker_volume_path: "/var/cache/edge_node/_local_cache"
 mnl_docker_persistent_folder: "/edge_node/_local_cache"
-mnl_container_registry_user: "ratio1"
+
+mnl_cr_server: "docker.io"
+mnl_cr_user: "ratio1"
 mnl_docker_image_name: "edge_node"
-mnl_docker_image_url: "{{ mnl_container_registry_user }}/{{ mnl_docker_image_name }}:{{ mnl_app_env }}"
+mnl_docker_image_url: "{{ mnl_cr_user }}/{{ mnl_docker_image_name }}:{{ mnl_app_env }}"
+
 mnl_docker_pull_limit: 5
 mnl_debug_deploy: false
 mnl_docker_cr_accept_insecure: false
-docker_image_name: "{{ mnl_container_registry_user }}/{{ mnl_docker_image_name }}:{{ mnl_app_env }}"
 
 # Runtime configuration
 mnl_device: "cuda:0"
