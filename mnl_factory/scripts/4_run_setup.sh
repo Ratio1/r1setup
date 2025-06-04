@@ -130,38 +130,44 @@ get_user_info() {
 
 # Set installation directories based on OS
 set_install_dirs() {
-    if [ "$OS_TYPE" = "macos" ]; then
-        INSTALL_DIR="$REAL_HOME/multi-node-launcher"
-    else
-        INSTALL_DIR="/opt/multi-node-launcher"
-    fi
+    # REAL_HOME is the actual user's home directory
+    local ratio1_base_dir_for_ansible_run="$REAL_HOME/.ratio1"
+    # ANSIBLE_DIR is the root for our Ansible specific configurations
+    ANSIBLE_DIR="$ratio1_base_dir_for_ansible_run/ansible_config"
     
-    # Set Ansible paths based on OS
-    ANSIBLE_DIR="$REAL_HOME/.ansible"
-    
-    # Collection path will be the same regardless of OS but path may differ
+    # Collection path within our new ANSIBLE_DIR structure
     COLLECTION_PATH="$ANSIBLE_DIR/collections/ansible_collections/ratio1/multi_node_launcher"
-    debug "Installation directory: $INSTALL_DIR"
-    debug "Ansible directory: $ANSIBLE_DIR"
-    debug "Collection path: $COLLECTION_PATH"
+
+    debug "Installation directory (not directly used by this script for ansible paths): $INSTALL_DIR" # INSTALL_DIR seems unused here for ansible paths
+    debug "Ansible root directory: $ANSIBLE_DIR"
+    debug "Effective Collection path: $COLLECTION_PATH"
 }
 
 # Set Ansible environment variables
 set_ansible_env() {
-    # Set Ansible environment variables to use the real user's home directory
-    export ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg"
-    export ANSIBLE_COLLECTIONS_PATH="$ANSIBLE_DIR/collections"
-    export ANSIBLE_HOME="$ANSIBLE_DIR"
+    # Ensure ANSIBLE_DIR is set (should be by set_install_dirs)
+    if [ -z "$ANSIBLE_DIR" ]; then
+        error "ANSIBLE_DIR is not set. Cannot configure Ansible environment."
+        exit 1
+    fi
 
-    debug "Ansible environment variables set"
-    debug "ANSIBLE_CONFIG: $ANSIBLE_CONFIG"
+    # Point Ansible to our custom collections path
+    export ANSIBLE_COLLECTIONS_PATH="$ANSIBLE_DIR/collections"
+    # Define ANSIBLE_HOME, which can influence where Ansible looks for certain things
+    export ANSIBLE_HOME="$ANSIBLE_DIR" # Might help ansible discover configs/plugins if any were placed here.
+    # ANSIBLE_CONFIG can be set if we have a specific ansible.cfg in $ANSIBLE_DIR
+    # For now, relying on default behavior or other env vars like ANSIBLE_COLLECTIONS_PATHS
+    # export ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg"
+
+    debug "Ansible environment variables set:"
     debug "ANSIBLE_COLLECTIONS_PATH: $ANSIBLE_COLLECTIONS_PATH"
     debug "ANSIBLE_HOME: $ANSIBLE_HOME"
+    # [ -n "$ANSIBLE_CONFIG" ] && debug "ANSIBLE_CONFIG: $ANSIBLE_CONFIG"
 }
 
 # Function to check if hosts.yml exists and is not empty
 check_hosts_config() {
-    local hosts_file="$COLLECTION_PATH/hosts.yml"
+    local hosts_file="$COLLECTION_PATH/hosts.yml" # Path is now relative to new COLLECTION_PATH
     debug "Checking hosts file: $hosts_file"
 
     if [ ! -f "$hosts_file" ]; then
@@ -357,7 +363,7 @@ run_playbook() {
     debug "Using Collection path for playbooks and roles: $COLLECTION_PATH"
 
     # Check if playbook exists
-    PLAYBOOK_PATH="$COLLECTION_PATH/playbooks/$playbook"
+    PLAYBOOK_PATH="$COLLECTION_PATH/playbooks/$playbook" # Path relative to new COLLECTION_PATH
     if [ ! -f "$PLAYBOOK_PATH" ]; then
         error "Playbook not found: $PLAYBOOK_PATH"
         debug "Looking for playbooks in: $COLLECTION_PATH/playbooks/"
@@ -365,9 +371,12 @@ run_playbook() {
         exit 1
     fi
 
-    ROLES_PATH="$COLLECTION_PATH/roles"
+    ROLES_PATH="$COLLECTION_PATH/roles" # Path relative to new COLLECTION_PATH
 
-    local ansible_cmd="ANSIBLE_ROLES_PATH=$ROLES_PATH ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i $COLLECTION_PATH/hosts.yml $PLAYBOOK_PATH"
+    # The ANSIBLE_ env vars are set by set_ansible_env and will be inherited by the eval call.
+    # ANSIBLE_CONFIG is not explicitly set unless an ansible.cfg is created and handled.
+    local ansible_cmd="ansible-playbook -i $COLLECTION_PATH/hosts.yml $PLAYBOOK_PATH"
+
     if [ -n "$extra_vars" ]; then
         ansible_cmd="$ansible_cmd --extra-vars \"$extra_vars\""
     fi
@@ -447,7 +456,8 @@ main() {
                 ;;
             3)
                 print_status "Testing connection to hosts..."
-                if ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/test_connection.yml"; then
+                # Env vars for ansible are set globally for the script by set_ansible_env
+                if ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/test_connection.yml"; then
                     print_success "Connection test completed successfully."
                 else
                     print_error "Connection test failed. Please check your inventory and playbook."
@@ -456,7 +466,8 @@ main() {
                 ;;
             4)
                 print_status "Getting nodes information..."
-                if ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml"; then
+                # Env vars for ansible are set globally
+                if ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml"; then
                     print_success "Node information retrieved successfully."
                 else
                     print_error "Failed to retrieve node information."

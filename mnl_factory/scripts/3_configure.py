@@ -28,10 +28,14 @@ class ConfigManager:
     else:
       self.real_home = Path.home()
 
-    self.config_dir = self.real_home / '.ansible/collections/ansible_collections/ratio1/multi_node_launcher'
+    self.ratio1_base_dir = self.real_home / '.ratio1'
+    self.ansible_config_root = self.ratio1_base_dir / 'ansible_config'
+    # self.config_dir is where the collection is, and thus where hosts.yml should reside within it.
+    self.config_dir = self.ansible_config_root / 'collections/ansible_collections/ratio1/multi_node_launcher'
     self.config_file = self.config_dir / 'hosts.yml'
 
-    # Ensure the configuration directory exists
+    # Ensure the configuration directory exists (it should be created by 2_ansible_setup.sh's collection install)
+    # Making sure it exists here is a fallback or for direct script use.
     self.config_dir.mkdir(parents=True, exist_ok=True)
 
     self.inventory = {
