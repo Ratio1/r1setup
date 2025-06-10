@@ -336,6 +336,13 @@ def mask_sensitive(value):
 
 with open(sys.argv[1]) as f:
     config = yaml.safe_load(f)
+
+    # Display the configured network environment (mnl_app_env) if present
+    if config and "all" in config:
+        network_env = config["all"].get("vars", {}).get("mnl_app_env")
+        if network_env:
+            print(f"\nNetwork environment: {network_env}")
+
     if config and "all" in config and "children" in config["all"]:
         hosts = config["all"]["children"]["gpu_nodes"]["hosts"]
         for host_name, host_config in hosts.items():
