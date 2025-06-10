@@ -62,6 +62,7 @@ class ConfigManager:
       if required and not value:
         self.print_colored("This field cannot be empty. Please try again.", 'red')
         continue
+      print()  # Add newline for spacing
       return value
 
   def get_secure_input(self, prompt: str) -> str:
@@ -116,6 +117,7 @@ class ConfigManager:
             self.print_colored("Invalid choice. Please enter 1, 2, or 3", 'red')
     
     self.print_colored(f"\n{network_env} network selected.", 'green')
+    print()  # Add newline for spacing
     return network_env
 
   def configure_host(self, host_num: int) -> Dict[str, Any]:
@@ -402,14 +404,14 @@ class ConfigManager:
     if 'vars' not in self.inventory['all']:
         self.inventory['all']['vars'] = {}
     self.inventory['all']['vars']['mnl_app_env'] = network_env
-    self.print_colored(f"Network environment set to: {network_env}", 'green')
     self.save_hosts()
 
   def show_configuration_menu(self) -> None:
     """Display the main configuration menu"""
     while True:
-      self.print_colored("\nNode Configuration Menu", 'green')
-      self.print_colored("======================", 'green')
+      self.print_colored("\n=======================", 'green')
+      self.print_colored("Node Configuration Menu", 'green')
+      self.print_colored("=======================", 'green')
       self.print_colored("1) View current configuration")
       self.print_colored("2) Add a new node")
       self.print_colored("3) Update an existing node")
@@ -531,8 +533,9 @@ class ConfigManager:
 
   def setup_hosts(self) -> None:
     """Main host setup process with flexible configuration options"""
-    self.print_colored("\nGPU Node Configuration", 'green')
-    self.print_colored("===================", 'green')
+    self.print_colored("\n======================", 'green')
+    self.print_colored("GPU Node Configuration", 'green')
+    self.print_colored("======================", 'green')
 
     # Check for existing configuration
     if not self.check_existing_config():
