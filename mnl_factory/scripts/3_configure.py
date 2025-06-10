@@ -185,11 +185,6 @@ class ConfigManager:
       # Ask for confirmation
       confirm = self.get_input("\nAre you happy with this configuration? (y/n)", "y")
       if confirm.lower() == 'y':
-        network_env = self.select_mnl_app_env()
-        if 'vars' not in self.inventory['all']:
-            self.inventory['all']['vars'] = {}
-        self.inventory['all']['vars']['mnl_app_env'] = network_env
-        self.save_hosts()
         return host
 
       self.print_colored("\nLet's configure this node again.", 'yellow')
