@@ -56,7 +56,7 @@
 
 - name: "Create service for {{ mnl_app_name }}"
   ansible.builtin.template:
-    src: mnl_execution_engine.service.j2
+    src: edge_node.service.j2
     dest: /etc/systemd/system/{{ edge_node_service_name }}.service
     mode: '0644'
     force: true

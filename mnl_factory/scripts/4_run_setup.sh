@@ -268,7 +268,7 @@ parse_node_info() {
 
     if [ "$show_only" = "true" ]; then
         echo
-        read -p "Press Enter to continue..."
+        read -p "Press Enter to continue..." _
     fi
 }
 
@@ -287,7 +287,7 @@ save_node_info_csv() {
     if [ $? -eq 0 ]; then
         print_success "Node information saved to: $csv_file"
         echo
-        read -p "Press Enter to continue..."
+        read -p "Press Enter to continue..." _
     else
         print_error "Failed to save node information"
         rm -f "$csv_file"
@@ -352,7 +352,7 @@ with open(sys.argv[1]) as f:
     ' "$hosts_file"
 
     echo
-    read -p "Press Enter to continue..."
+    read -p "Press Enter to continue..." _
 }
 
 # Function to run ansible playbook with debug info
