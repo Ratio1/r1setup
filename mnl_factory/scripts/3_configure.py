@@ -40,6 +40,9 @@ class ConfigManager:
 
     self.inventory = {
       'all': {
+        'vars': {
+          'mnl_app_env': 'mainnet'
+        },
         'children': {
           'gpu_nodes': {
             'hosts': {}
@@ -79,6 +82,34 @@ class ConfigManager:
       if self.validate_ip(ip):
         return ip
       self.print_colored("Invalid IP address format. Please use format: xxx.xxx.xxx.xxx", 'red')
+
+  def select_mnl_app_env(self) -> str:
+    """Select the network environment"""
+    self.print_colored("\nChoose the network environment:", 'cyan')
+    self.print_colored("1) mainnet")
+    self.print_colored("2) testnet")
+    self.print_colored("3) devnet")
+    
+    current_env = self.inventory.get('all', {}).get('vars', {}).get('mnl_app_env', 'mainnet')
+    
+    default_choice = '1'
+    if current_env == 'testnet':
+        default_choice = '2'
+    elif current_env == 'devnet':
+        default_choice = '3'
+    
+    self.print_colored(f"Current default is '{current_env}'.", 'yellow')
+
+    while True:
+        env_choice = self.get_input("Enter your choice (1-3)", default_choice)
+        if env_choice == '1':
+            return 'mainnet'
+        elif env_choice == '2':
+            return 'testnet'
+        elif env_choice == '3':
+            return 'devnet'
+        else:
+            self.print_colored("Invalid choice. Please enter 1, 2, or 3", 'red')
 
   def configure_host(self, host_num: int) -> Dict[str, Any]:
     """Configure a single host"""
@@ -204,9 +235,14 @@ class ConfigManager:
       try:
         with open(self.config_file) as f:
           current_config = yaml.safe_load(f)
-          if current_config and "all" in current_config and "children" in current_config["all"]:
+          if current_config and "all" in current_config:
+            if "children" not in current_config["all"]:
+              current_config["all"]["children"] = {'gpu_nodes': {'hosts': {}}}
+            if "vars" not in current_config["all"]:
+              current_config["all"]["vars"] = {}
+              
             self.inventory = current_config
-            hosts = current_config["all"]["children"]["gpu_nodes"]["hosts"]
+            hosts = current_config.get("all", {}).get("children", {}).get("gpu_nodes", {}).get("hosts", {})
             for host_name, host_config in hosts.items():
               self.print_colored(f"\nHost: {host_name}", 'yellow')
               for key, value in host_config.items():
@@ -214,6 +250,10 @@ class ConfigManager:
                 if any(k in key.lower() for k in ["password", "key"]):
                   value = "********"
                 self.print_colored(f"  {key}: {value}")
+
+            network = self.inventory.get('all', {}).get('vars', {}).get('mnl_app_env', 'Not set')
+            self.print_colored(f"\nNetwork Environment: {network}", 'yellow')
+
       except Exception as e:
         self.print_colored(f"Error reading current configuration: {str(e)}", 'red')
 
@@ -241,6 +281,9 @@ class ConfigManager:
         # Reset inventory to empty
         self.inventory = {
           'all': {
+            'vars': {
+              'mnl_app_env': 'mainnet'
+            },
             'children': {
               'gpu_nodes': {
                 'hosts': {}
@@ -341,6 +384,15 @@ class ConfigManager:
     except ValueError:
       self.print_colored("Invalid input", 'red')
 
+  def change_mnl_app_env(self) -> None:
+    """Change the configured network environment."""
+    network_env = self.select_mnl_app_env()
+    if 'vars' not in self.inventory['all']:
+        self.inventory['all']['vars'] = {}
+    self.inventory['all']['vars']['mnl_app_env'] = network_env
+    self.print_colored(f"Network environment set to: {network_env}", 'green')
+    self.save_hosts()
+
   def show_configuration_menu(self) -> None:
     """Display the main configuration menu"""
     while True:
@@ -350,10 +402,11 @@ class ConfigManager:
       self.print_colored("2) Add a new node")
       self.print_colored("3) Update an existing node")
       self.print_colored("4) Delete a node")
-      self.print_colored("5) Create a completely new configuration")
-      self.print_colored("6) Save and exit")
+      self.print_colored("5) Change network environment")
+      self.print_colored("6) Create a completely new configuration")
+      self.print_colored("7) Save and exit")
       
-      choice = self.get_input("Enter your choice (1-6)", "1")
+      choice = self.get_input("Enter your choice (1-7)", "1")
       
       if choice == "1":
         self.view_configuration()
@@ -364,9 +417,11 @@ class ConfigManager:
       elif choice == "4":
         self.delete_host()
       elif choice == "5":
+        self.change_mnl_app_env()
+      elif choice == "6":
         if self.create_new_configuration():
           self.setup_hosts_initial()
-      elif choice == "6":
+      elif choice == "7":
         self.print_colored("Configuration saved. Exiting...", 'green')
         self.print_colored("\nNext steps:", 'yellow')
         self.print_colored("1. Return to the setup menu", 'yellow')
@@ -379,6 +434,9 @@ class ConfigManager:
 
   def view_configuration(self) -> None:
     """View the current configuration"""
+    network_env = self.inventory.get('all', {}).get('vars', {}).get('mnl_app_env', 'Not set')
+    self.print_colored(f"\nNetwork Environment: {network_env}", 'cyan')
+
     hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
     
     if not hosts:
@@ -419,6 +477,9 @@ class ConfigManager:
     # Reset inventory to empty
     self.inventory = {
       'all': {
+        'vars': {
+          'mnl_app_env': 'mainnet'
+        },
         'children': {
           'gpu_nodes': {
             'hosts': {}
@@ -432,6 +493,11 @@ class ConfigManager:
     """Initial host setup process for a new configuration"""
     self.print_colored("\nGPU Node Configuration", 'green')
     self.print_colored("===================", 'green')
+
+    network_env = self.select_mnl_app_env()
+    if 'vars' not in self.inventory['all']:
+        self.inventory['all']['vars'] = {}
+    self.inventory['all']['vars']['mnl_app_env'] = network_env
 
     while True:
       try:
@@ -467,6 +533,10 @@ class ConfigManager:
     if not self.inventory['all']['children']['gpu_nodes']['hosts']:
       self.setup_hosts_initial()
     else:
+      # For existing configurations, ensure network is set
+      if 'mnl_app_env' not in self.inventory.get('all', {}).get('vars', {}):
+        self.print_colored("\nNetwork environment is not set in the current configuration.", "yellow")
+        self.change_mnl_app_env()
       # Otherwise, show the configuration menu
       self.show_configuration_menu()
 
