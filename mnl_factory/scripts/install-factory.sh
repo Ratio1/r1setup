@@ -38,20 +38,24 @@ curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads
 curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/2_ansible_setup.sh
 curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/3_configure.py
 curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/4_run_setup.sh
+print_message "Setup scripts downloaded." "$GREEN"
 
 # Make scripts executable
 chmod +x 1_prerequisites.sh 2_ansible_setup.sh 3_configure.py 4_run_setup.sh
+print_message "Scripts are now executable." "$GREEN"
 
 print_message "\nSetup process starting in $SETUP_SCRIPTS_DIR:" "$GREEN"
 print_message "1. Installing prerequisites (will request sudo if needed)..." "$YELLOW"
 sudo ./1_prerequisites.sh # This script handles sudo internally for package management.
+print_message "Prerequisites installed." "$GREEN"
 
 print_message "\n2. Ansible setup (running as $CURRENT_USER)..." "$YELLOW"
 ./2_ansible_setup.sh # Runs as the current user
+print_message "Ansible setup complete." "$GREEN"
 
 # Define Python executable from the venv created in 1_prerequisites.sh
 # $SETUP_SCRIPTS_DIR is the current working directory here.
-PYTHON_IN_VENV="./mnl_venv/bin/python3"
+PYTHON_IN_VENV="$SETUP_SCRIPTS_DIR/mnl_venv/bin/python3"
 
 print_message "\n3. Configuring nodes (running as $CURRENT_USER using $PYTHON_IN_VENV)..." "$YELLOW"
 if [ ! -f "$PYTHON_IN_VENV" ]; then
@@ -60,9 +64,11 @@ if [ ! -f "$PYTHON_IN_VENV" ]; then
     exit 1
 fi
 "$PYTHON_IN_VENV" 3_configure.py # Runs as the current user, using python from venv
+print_message "Node configuration is complete." "$GREEN"
 
 print_message "\n4. Running setup (running as $CURRENT_USER)..." "$YELLOW"
 ./4_run_setup.sh # Runs as the current user
+print_message "Final setup steps are complete." "$GREEN"
 
 print_message "\nInstallation factory setup complete." "$GREEN"
 print_message "All setup scripts are located in: $SETUP_SCRIPTS_DIR" "$GREEN"

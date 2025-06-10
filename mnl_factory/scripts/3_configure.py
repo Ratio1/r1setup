@@ -67,7 +67,9 @@ class ConfigManager:
 
   def get_secure_input(self, prompt: str) -> str:
     self.print_colored(prompt + ": ", 'blue')
-    return getpass.getpass("")
+    value = getpass.getpass("")
+    print()
+    return value
 
   def validate_ip(self, ip: str) -> bool:
     """Validate IP address format"""
@@ -519,6 +521,9 @@ class ConfigManager:
         break
       except ValueError:
         self.print_colored("Please enter a valid number", 'red')
+
+    self.print_colored(f"\nConfiguring {num_hosts} GPU node(s).", 'green')
+    print()
 
     hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
 
