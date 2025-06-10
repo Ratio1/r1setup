@@ -89,27 +89,34 @@ class ConfigManager:
     self.print_colored("1) mainnet")
     self.print_colored("2) testnet")
     self.print_colored("3) devnet")
-    
+
     current_env = self.inventory.get('all', {}).get('vars', {}).get('mnl_app_env', 'mainnet')
-    
+
     default_choice = '1'
     if current_env == 'testnet':
         default_choice = '2'
     elif current_env == 'devnet':
         default_choice = '3'
-    
+
     self.print_colored(f"Current default is '{current_env}'.", 'yellow')
 
+    network_env = ''
     while True:
         env_choice = self.get_input("Enter your choice (1-3)", default_choice)
         if env_choice == '1':
-            return 'mainnet'
+            network_env = 'mainnet'
+            break
         elif env_choice == '2':
-            return 'testnet'
+            network_env = 'testnet'
+            break
         elif env_choice == '3':
-            return 'devnet'
+            network_env = 'devnet'
+            break
         else:
             self.print_colored("Invalid choice. Please enter 1, 2, or 3", 'red')
+    
+    self.print_colored(f"\n{network_env} network selected.", 'green')
+    return network_env
 
   def configure_host(self, host_num: int) -> Dict[str, Any]:
     """Configure a single host"""
@@ -174,6 +181,11 @@ class ConfigManager:
       # Ask for confirmation
       confirm = self.get_input("\nAre you happy with this configuration? (y/n)", "y")
       if confirm.lower() == 'y':
+        network_env = self.select_mnl_app_env()
+        if 'vars' not in self.inventory['all']:
+            self.inventory['all']['vars'] = {}
+        self.inventory['all']['vars']['mnl_app_env'] = network_env
+        self.save_hosts()
         return host
 
       self.print_colored("\nLet's configure this node again.", 'yellow')
@@ -491,9 +503,6 @@ class ConfigManager:
 
   def setup_hosts_initial(self) -> None:
     """Initial host setup process for a new configuration"""
-    self.print_colored("\nGPU Node Configuration", 'green')
-    self.print_colored("===================", 'green')
-
     network_env = self.select_mnl_app_env()
     if 'vars' not in self.inventory['all']:
         self.inventory['all']['vars'] = {}
