@@ -31,7 +31,7 @@ Before you start, ensure that you have met the following requirements:
 You can quickly set up your GPU nodes by running the following one-liner:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/install-factory.sh -o install-factory.sh && sudo bash install-factory.sh
+curl -sL https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/macbook-fix/mnl_factory/scripts/install-factory.sh -o install-factory.sh && sudo bash install-factory.sh
 ```
 
 This command will:
