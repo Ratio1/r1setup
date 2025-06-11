@@ -62,9 +62,9 @@ set_install_dirs() {
 create_dirs() {
     # Create Ansible directory structure
     mkdir -p "$ANSIBLE_DIR/collections"
-    if [[ "$OS_TYPE" == "linux" ]]; then
-        chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$ANSIBLE_DIR"
-    fi
+    # Ensure the real user owns the directory structure so that subsequent commands executed as
+    # this user (e.g. `ansible-galaxy collection install`) have the correct permissions.
+    chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$ANSIBLE_DIR"
 }
 
 # Install Ansible collection
@@ -72,10 +72,10 @@ install_collection() {
     print_message "Installing Multi Node Launcher collection..." "$YELLOW"
     
     # Install the collection
-    sudo -u "$REAL_USER" env HOME="$REAL_HOME" ansible-galaxy collection install ratio1.multi_node_launcher --force --upgrade
+    sudo -u "$REAL_USER" env HOME="$REAL_HOME" ansible-galaxy collection install ratio1.multi_node_launcher --collections-path "$ANSIBLE_DIR/collections" --force --upgrade
     
     # Verify collection installation
-    COLLECTION_INFO=$(sudo -u "$REAL_USER" env HOME="$REAL_HOME" ansible-galaxy collection list 2>/dev/null | grep "ratio1.multi_node_launcher" || true)
+    COLLECTION_INFO=$(sudo -u "$REAL_USER" env HOME="$REAL_HOME" ansible-galaxy collection list --collections-path "$ANSIBLE_DIR/collections" 2>/dev/null | grep "ratio1.multi_node_launcher" || true)
     if [ -z "$COLLECTION_INFO" ]; then
         print_message "Failed to detect installed collection" "$RED"
         exit 1
