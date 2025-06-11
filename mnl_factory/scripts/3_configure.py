@@ -34,15 +34,19 @@ class ConfigManager:
     self.config_dir = self.ansible_config_root / 'collections/ansible_collections/ratio1/multi_node_launcher'
     self.config_file = self.config_dir / 'hosts.yml'
 
+    # Path to unified variables file where we will persist the selected network environment
+    self.vars_file = self.config_dir / 'variables.yml'
+
     # Ensure the configuration directory exists (it should be created by 2_ansible_setup.sh's collection install)
     # Making sure it exists here is a fallback or for direct script use.
     self.config_dir.mkdir(parents=True, exist_ok=True)
 
+    # Initialise an in-memory inventory. 'mnl_app_env' is now persisted in
+    # group_vars/mnl.yml rather than inside the inventory file, but we still
+    # keep a runtime copy so the rest of the script can read it easily.
     self.inventory = {
       'all': {
-        'vars': {
-          'mnl_app_env': 'mainnet'
-        },
+        'vars': {},
         'children': {
           'gpu_nodes': {
             'hosts': {}
@@ -50,6 +54,11 @@ class ConfigManager:
         }
       }
     }
+
+    # Load any existing environment value from group_vars so menu defaults are correct
+    env_from_file = self.get_mnl_app_env()
+    if env_from_file:
+      self.inventory['all'].setdefault('vars', {})['mnl_app_env'] = env_from_file
 
   def print_colored(self, text: str, color: str = 'white') -> None:
     print(f"{self.colors.get(color, '')}{text}{self.colors['end']}")
@@ -93,7 +102,7 @@ class ConfigManager:
     self.print_colored("2) testnet")
     self.print_colored("3) devnet")
 
-    current_env = self.inventory.get('all', {}).get('vars', {}).get('mnl_app_env', 'mainnet')
+    current_env = self.get_mnl_app_env()
 
     default_choice = '1'
     if current_env == 'testnet':
@@ -101,7 +110,7 @@ class ConfigManager:
     elif current_env == 'devnet':
         default_choice = '3'
 
-    self.print_colored(f"Current default is '{current_env}'.", 'yellow')
+    self.print_colored(f"Current default is '{current_env if current_env else 'not set'}'.", 'yellow')
 
     network_env = ''
     while True:
@@ -262,8 +271,8 @@ class ConfigManager:
                   value = "********"
                 self.print_colored(f"  {key}: {value}")
 
-            network = self.inventory.get('all', {}).get('vars', {}).get('mnl_app_env', 'Not set')
-            self.print_colored(f"\nNetwork Environment: {network}", 'yellow')
+            network = self.get_mnl_app_env()
+            self.print_colored(f"\nNetwork Environment: {network}", 'cyan')
 
       except Exception as e:
         self.print_colored(f"Error reading current configuration: {str(e)}", 'red')
@@ -289,12 +298,10 @@ class ConfigManager:
         self.config_file.rename(backup_file)
         self.print_colored(f"Existing configuration backed up to: {backup_file}", 'green')
         
-        # Reset inventory to empty
+        # Reset inventory to empty (environment variable handled in group_vars)
         self.inventory = {
           'all': {
-            'vars': {
-              'mnl_app_env': 'mainnet'
-            },
+            'vars': {},
             'children': {
               'gpu_nodes': {
                 'hosts': {}
@@ -398,9 +405,9 @@ class ConfigManager:
   def change_mnl_app_env(self) -> None:
     """Change the configured network environment."""
     network_env = self.select_mnl_app_env()
-    if 'vars' not in self.inventory['all']:
-        self.inventory['all']['vars'] = {}
-    self.inventory['all']['vars']['mnl_app_env'] = network_env
+    # Persist selection to group_vars file
+    self.set_mnl_app_env(network_env)
+    # Save hosts configuration (without env var)
     self.save_hosts()
 
   def show_configuration_menu(self) -> None:
@@ -445,7 +452,7 @@ class ConfigManager:
 
   def view_configuration(self) -> None:
     """View the current configuration"""
-    network_env = self.inventory.get('all', {}).get('vars', {}).get('mnl_app_env', 'Not set')
+    network_env = self.get_mnl_app_env() or 'Not set'
     self.print_colored(f"\nNetwork Environment: {network_env}", 'cyan')
 
     hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
@@ -485,12 +492,10 @@ class ConfigManager:
       self.config_file.rename(backup_file)
       self.print_colored(f"Existing configuration backed up to: {backup_file}", 'green')
     
-    # Reset inventory to empty
+    # Reset inventory to empty (environment variable handled in group_vars)
     self.inventory = {
       'all': {
-        'vars': {
-          'mnl_app_env': 'mainnet'
-        },
+        'vars': {},
         'children': {
           'gpu_nodes': {
             'hosts': {}
@@ -503,9 +508,8 @@ class ConfigManager:
   def setup_hosts_initial(self) -> None:
     """Initial host setup process for a new configuration"""
     network_env = self.select_mnl_app_env()
-    if 'vars' not in self.inventory['all']:
-        self.inventory['all']['vars'] = {}
-    self.inventory['all']['vars']['mnl_app_env'] = network_env
+    # Persist selection to group_vars file
+    self.set_mnl_app_env(network_env)
 
     while True:
       try:
@@ -546,8 +550,8 @@ class ConfigManager:
       self.setup_hosts_initial()
     else:
       # For existing configurations, ensure network is set
-      if 'mnl_app_env' not in self.inventory.get('all', {}).get('vars', {}):
-        self.print_colored("\nNetwork environment is not set in the current configuration.", "yellow")
+      if not self.get_mnl_app_env():
+        self.print_colored("\nNetwork environment is not set in the configuration.", "yellow")
         self.change_mnl_app_env()
       # Otherwise, show the configuration menu
       self.show_configuration_menu()
@@ -557,6 +561,12 @@ class ConfigManager:
     try:
       # Create directory with proper ownership if it doesn't exist
       self.config_dir.mkdir(parents=True, exist_ok=True)
+
+      # Ensure we don't store mnl_app_env inside hosts.yml before saving
+      if 'vars' in self.inventory['all']:
+        self.inventory['all']['vars'].pop('mnl_app_env', None)
+        if not self.inventory['all']['vars']:
+          self.inventory['all'].pop('vars', None)
 
       # Write the configuration
       with open(self.config_file, 'w') as f:
@@ -579,9 +589,64 @@ class ConfigManager:
 
   def save_hosts(self) -> None:
     """Save the hosts configuration to the YAML file."""
+    # Ensure we don't store the network environment in the inventory file
+    if 'vars' in self.inventory['all']:
+      self.inventory['all']['vars'].pop('mnl_app_env', None)
+      if not self.inventory['all']['vars']:
+        self.inventory['all'].pop('vars', None)
+
     with open(self.config_file, 'w') as f:
       yaml.safe_dump(self.inventory, f, default_flow_style=False)
     print(f"{self.colors['green']}Configuration saved to: {self.config_file}{self.colors['end']}")
+
+  def get_mnl_app_env(self) -> str:
+    """Return the currently configured environment or None if not configured."""
+    # 1) Preferred location: variables.yml next to hosts.yml
+    if self.vars_file.exists():
+      try:
+        with open(self.vars_file) as f:
+          data = yaml.safe_load(f) or {}
+          if 'mnl_app_env' in data:
+            return data['mnl_app_env']
+      except Exception:
+        pass
+
+    # 2) Legacy location: group_vars/mnl.yml (to support older setups)
+    legacy_file = self.config_dir / 'group_vars' / 'mnl.yml'
+    if legacy_file.exists():
+      try:
+        with open(legacy_file) as f:
+          data = yaml.safe_load(f) or {}
+          if 'mnl_app_env' in data:
+            return data['mnl_app_env']
+      except Exception:
+        pass
+
+    # 3) Fallback: value still present in in-memory inventory (hosts.yml legacy)
+    return self.inventory.get('all', {}).get('vars', {}).get('mnl_app_env')
+
+  def set_mnl_app_env(self, env_value: str) -> None:
+    """Persist the selected network environment to group_vars/mnl.yml"""
+    data = {}
+    if self.vars_file.exists():
+      try:
+        with open(self.vars_file) as f:
+          data = yaml.safe_load(f) or {}
+      except Exception:
+        data = {}
+
+    data['mnl_app_env'] = env_value
+
+    # Ensure directory exists
+    self.vars_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(self.vars_file, 'w') as f:
+      yaml.safe_dump(data, f, default_flow_style=False)
+
+    # Update runtime inventory copy so menus display the current value
+    self.inventory['all'].setdefault('vars', {})['mnl_app_env'] = env_value
+
+    self.print_colored(f"Network environment set to '{env_value}' in {self.vars_file}", 'green')
 
 
 def main():

@@ -1,0 +1,1 @@
+mnl_app_env: "mainnet"   # Options: "mainnet", "devnet", "testnet"

@@ -330,6 +330,7 @@ view_configuration() {
     "$python_in_venv" -c '
 import yaml
 import sys
+import os, pathlib
 
 def mask_sensitive(value):
     return "********" if any(k in str(value).lower() for k in ["password", "key"]) else value
@@ -337,11 +338,37 @@ def mask_sensitive(value):
 with open(sys.argv[1]) as f:
     config = yaml.safe_load(f)
 
-    # Display the configured network environment (mnl_app_env) if present
-    if config and "all" in config:
-        network_env = config["all"].get("vars", {}).get("mnl_app_env")
-        if network_env:
-            print(f"\nNetwork environment: {network_env}")
+    # Display the configured network environment.
+    # 1) Newer versions write it to group_vars/mnl.yml
+    # 2) Older inventories might still keep it under all.vars in hosts.yml
+
+    env_value = None
+
+    base_dir = pathlib.Path(sys.argv[1]).parent
+
+    # Preferred location: variables.yml next to hosts.yml
+    var_file = base_dir / 'variables.yml'
+    if var_file.exists():
+        try:
+            env_value = (yaml.safe_load(open(var_file)) or {}).get('mnl_app_env')
+        except Exception:
+            env_value = None
+
+    # Legacy location: group_vars/mnl.yml
+    if not env_value:
+        gv_file = base_dir / 'group_vars' / 'mnl.yml'
+        if gv_file.exists():
+            try:
+                env_value = (yaml.safe_load(open(gv_file)) or {}).get('mnl_app_env')
+            except Exception:
+                env_value = None
+
+    # Fall back to legacy location inside hosts.yml
+    if not env_value and config and 'all' in config:
+        env_value = config['all'].get('vars', {}).get('mnl_app_env')
+
+    if env_value:
+        print(f"\nNetwork environment: {env_value}")
 
     if config and "all" in config and "children" in config["all"]:
         hosts = config["all"]["children"]["gpu_nodes"]["hosts"]

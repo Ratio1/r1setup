@@ -2,7 +2,6 @@
 # Basic application configuration
 mnl_app_name: "edge_node_app"
 mnl_app_version: "1.0.0"
-mnl_app_env: "mainnet"   # Options: "mainnet", "devnet", "testnet"
 mnl_dev_mode: false
 
 # Service configuration
