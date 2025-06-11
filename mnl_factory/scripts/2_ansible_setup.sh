@@ -49,22 +49,45 @@ get_user_info() {
 
 # Set installation directories based on OS
 set_install_dirs() {
-    if [[ "$OS_TYPE" == "macos" ]]; then
-        ANSIBLE_DIR="$REAL_HOME/.ansible"
-    else
-        ANSIBLE_DIR="$REAL_HOME/.ansible"
-    fi
-    
+    # Use a unified config root so all scripts reference the same location
+    # This avoids permission clashes between ~/.ansible (default) and the
+    # location used by the configuration script ( ~/.ratio1/ansible_config )
+    ANSIBLE_DIR="$REAL_HOME/.ratio1/ansible_config"
+
+    # Collection path that matches what 3_configure.py and 4_run_setup.sh expect
     COLLECTION_PATH="$ANSIBLE_DIR/collections/ansible_collections/ratio1/multi_node_launcher"
 }
 
 # Create required directories
 create_dirs() {
-    # Create Ansible directory structure
-    mkdir -p "$ANSIBLE_DIR/collections"
+    # Create Ansible directory structure including a local tmp directory to prevent
+    # permission issues when Ansible needs to write temporary files.
+    mkdir -p "$ANSIBLE_DIR/collections" "$ANSIBLE_DIR/tmp"
     # Ensure the real user owns the directory structure so that subsequent commands executed as
     # this user (e.g. `ansible-galaxy collection install`) have the correct permissions.
     chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$ANSIBLE_DIR"
+}
+
+# Create a minimal ansible.cfg so that 4_run_setup.sh can point ANSIBLE_CONFIG here.
+create_ansible_cfg() {
+    local cfg_path="$ANSIBLE_DIR/ansible.cfg"
+
+    if [ ! -f "$cfg_path" ]; then
+        cat <<EOF > "$cfg_path"
+[defaults]
+inventory = $ANSIBLE_DIR/collections/ansible_collections/ratio1/multi_node_launcher/hosts.yml
+host_key_checking = False
+hash_behaviour = merge
+local_tmp = $ANSIBLE_DIR/tmp
+retry_files_enabled = False
+
+[privilege_escalation]
+become = True
+become_method = sudo
+become_ask_pass = False
+EOF
+        chown "$REAL_USER:$(id -gn "$REAL_USER")" "$cfg_path"
+    fi
 }
 
 # Install Ansible collection
@@ -132,6 +155,7 @@ main() {
     get_user_info
     set_install_dirs
     create_dirs
+    create_ansible_cfg
     install_collection
     set_ownership
     print_next_steps
