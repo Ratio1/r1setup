@@ -60,14 +60,14 @@ if [ "$#" -ge 1 ]; then
   if [ "$#" -eq 2 ]; then
     validate_date "$2"
     # Run journalctl with -S and -U options using the provided parameters
-    journalctl -a -n "$LINES" $FOLLOW -u {{ mnl_service_name }} -S "$1" -U "$2"
+    journalctl -a -n "$LINES" $FOLLOW -u {{ edge_node_service_name }} -S "$1" -U "$2"
   else
     # Run the normal journalctl command with the specified number of lines
-    journalctl -a -n "$LINES" $FOLLOW -u {{ mnl_service_name }}
+    journalctl -a -n "$LINES" $FOLLOW -u {{ edge_node_service_name }}
   fi
 else
   # Run the normal journalctl command with the default number of lines
-  journalctl -a -n "$LINES" $FOLLOW -u {{ mnl_service_name }}
+  journalctl -a -n "$LINES" $FOLLOW -u {{ edge_node_service_name }}
 fi
 
 # Log the execution

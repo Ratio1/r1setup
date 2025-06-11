@@ -24,7 +24,7 @@
           SSH Private Key: {{ ansible_ssh_private_key_file | default('NOT DEFINED') }}
           NVIDIA Driver Version: {{ nvidia_driver_version | default('NOT DEFINED') }}
           CUDA Version: {{ cuda_version | default('NOT DEFINED') }}
-          Docker Image Name: {{ docker_image_name | default('NOT DEFINED') }}
+          Docker Image Name: {{ mnl_docker_image_url | default('NOT DEFINED') }}
 
     - name: Display ansible facts
       debug:

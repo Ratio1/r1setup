@@ -115,14 +115,62 @@ if ! verify_command python3; then
     exit 1
 fi
 
-# Upgrade pip and install required packages
-print_message "Installing Python packages..." "$YELLOW"
+# Ensure python3-venv is installed (especially for Debian/Ubuntu)
 if [[ "$OS_TYPE" == "linux" ]]; then
-    python3 -m pip install --upgrade pip
-    python3 -m pip install pyyaml typing_extensions
+    if [[ "$OS_NAME" =~ "Ubuntu"|"Debian" ]]; then
+        print_message "Ensuring python3-venv is installed..." "$YELLOW"
+        $INSTALL_CMD python3-venv
+    fi
+fi
+
+# Define Venv Path (relative to $SETUP_DIR where this script runs)
+VENV_PATH_IN_SETUP_DIR="mnl_venv"
+
+print_message "Creating Python virtual environment at ./$VENV_PATH_IN_SETUP_DIR..." "$YELLOW"
+python3 -m venv "./$VENV_PATH_IN_SETUP_DIR"
+if [ $? -ne 0 ]; then
+    print_message "Failed to create virtual environment at ./$VENV_PATH_IN_SETUP_DIR." "$RED"
+    exit 1
+fi
+
+# Ensure the venv directory is owned by the original user if sudo was used
+# $REAL_USER is defined at the beginning of this script
+if [ -n "$SUDO_USER" ]; then
+    print_message "Setting ownership of ./$VENV_PATH_IN_SETUP_DIR to $REAL_USER..." "$YELLOW"
+    chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "./$VENV_PATH_IN_SETUP_DIR"
+    if [ $? -ne 0 ]; then
+        print_message "Failed to set ownership for ./$VENV_PATH_IN_SETUP_DIR. Please check permissions." "$RED"
+        # It might be non-fatal if REAL_USER already owns it (e.g. if script not run with sudo, though it usually is)
+    fi
+fi
+
+# Define Python and Pip executables from the venv
+PYTHON_IN_VENV="./$VENV_PATH_IN_SETUP_DIR/bin/python3"
+PIP_IN_VENV="./$VENV_PATH_IN_SETUP_DIR/bin/pip"
+
+# Upgrade pip and install required packages into the venv
+print_message "Installing Python packages into virtual environment (./$VENV_PATH_IN_SETUP_DIR)..." "$YELLOW"
+
+# Pip commands should run as $REAL_USER if sudo was used for 1_prerequisites.sh,
+# to ensure packages are installed correctly within the user-owned venv.
+if [ -n "$SUDO_USER" ]; then
+    sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PIP_IN_VENV" install --upgrade pip
+    sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PIP_IN_VENV" install pyyaml typing_extensions
 else
-    sudo -u "$REAL_USER" python3 -m pip install --upgrade pip
-    sudo -u "$REAL_USER" python3 -m pip install pyyaml typing_extensions
+    # If script somehow runs without sudo (not the typical path for this script)
+    "$PIP_IN_VENV" install --upgrade pip
+    "$PIP_IN_VENV" install pyyaml typing_extensions
+fi
+
+# Verify core packages installed in venv
+if ! sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PYTHON_IN_VENV" -m pip show pyyaml > /dev/null 2>&1 || \
+   ! sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PYTHON_IN_VENV" -m pip show typing_extensions > /dev/null 2>&1; then
+   if [ -n "$SUDO_USER" ]; then
+        print_message "Failed to install required Python packages (pyyaml, typing_extensions) into the virtual environment as $REAL_USER." "$RED"
+   else
+        print_message "Failed to install required Python packages (pyyaml, typing_extensions) into the virtual environment." "$RED"
+   fi
+   exit 1
 fi
 
 # Install Ansible if not present

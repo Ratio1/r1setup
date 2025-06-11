@@ -8,6 +8,7 @@
     - ../group_vars/all.yml
     - ../group_vars/vault.yml
     - ../group_vars/mnl.yml
+    - ../group_vars/variables.yml
   roles:
     - role: "{{ playbook_dir }}/../roles/prerequisites"
     - role: "{{ playbook_dir }}/../roles/nvidia_gpu"

@@ -130,38 +130,44 @@ get_user_info() {
 
 # Set installation directories based on OS
 set_install_dirs() {
-    if [ "$OS_TYPE" = "macos" ]; then
-        INSTALL_DIR="$REAL_HOME/multi-node-launcher"
-    else
-        INSTALL_DIR="/opt/multi-node-launcher"
-    fi
+    # REAL_HOME is the actual user's home directory
+    local ratio1_base_dir_for_ansible_run="$REAL_HOME/.ratio1"
+    # ANSIBLE_DIR is the root for our Ansible specific configurations
+    ANSIBLE_DIR="$ratio1_base_dir_for_ansible_run/ansible_config"
     
-    # Set Ansible paths based on OS
-    ANSIBLE_DIR="$REAL_HOME/.ansible"
-    
-    # Collection path will be the same regardless of OS but path may differ
+    # Collection path within our new ANSIBLE_DIR structure
     COLLECTION_PATH="$ANSIBLE_DIR/collections/ansible_collections/ratio1/multi_node_launcher"
-    debug "Installation directory: $INSTALL_DIR"
-    debug "Ansible directory: $ANSIBLE_DIR"
-    debug "Collection path: $COLLECTION_PATH"
+
+    debug "Installation directory (not directly used by this script for ansible paths): $INSTALL_DIR" # INSTALL_DIR seems unused here for ansible paths
+    debug "Ansible root directory: $ANSIBLE_DIR"
+    debug "Effective Collection path: $COLLECTION_PATH"
 }
 
 # Set Ansible environment variables
 set_ansible_env() {
-    # Set Ansible environment variables to use the real user's home directory
-    export ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg"
-    export ANSIBLE_COLLECTIONS_PATH="$ANSIBLE_DIR/collections"
-    export ANSIBLE_HOME="$ANSIBLE_DIR"
+    # Ensure ANSIBLE_DIR is set (should be by set_install_dirs)
+    if [ -z "$ANSIBLE_DIR" ]; then
+        error "ANSIBLE_DIR is not set. Cannot configure Ansible environment."
+        exit 1
+    fi
 
-    debug "Ansible environment variables set"
-    debug "ANSIBLE_CONFIG: $ANSIBLE_CONFIG"
+    # Point Ansible to our custom collections path
+    export ANSIBLE_COLLECTIONS_PATH="$ANSIBLE_DIR/collections"
+    # Define ANSIBLE_HOME, which can influence where Ansible looks for certain things
+    export ANSIBLE_HOME="$ANSIBLE_DIR" # Might help ansible discover configs/plugins if any were placed here.
+    # ANSIBLE_CONFIG can be set if we have a specific ansible.cfg in $ANSIBLE_DIR
+    # For now, relying on default behavior or other env vars like ANSIBLE_COLLECTIONS_PATHS
+    # export ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg"
+
+    debug "Ansible environment variables set:"
     debug "ANSIBLE_COLLECTIONS_PATH: $ANSIBLE_COLLECTIONS_PATH"
     debug "ANSIBLE_HOME: $ANSIBLE_HOME"
+    # [ -n "$ANSIBLE_CONFIG" ] && debug "ANSIBLE_CONFIG: $ANSIBLE_CONFIG"
 }
 
 # Function to check if hosts.yml exists and is not empty
 check_hosts_config() {
-    local hosts_file="$COLLECTION_PATH/hosts.yml"
+    local hosts_file="$COLLECTION_PATH/hosts.yml" # Path is now relative to new COLLECTION_PATH
     debug "Checking hosts file: $hosts_file"
 
     if [ ! -f "$hosts_file" ]; then
@@ -262,7 +268,7 @@ parse_node_info() {
 
     if [ "$show_only" = "true" ]; then
         echo
-        read -p "Press Enter to continue..."
+        read -p "Press Enter to continue..." _
     fi
 }
 
@@ -281,7 +287,7 @@ save_node_info_csv() {
     if [ $? -eq 0 ]; then
         print_success "Node information saved to: $csv_file"
         echo
-        read -p "Press Enter to continue..."
+        read -p "Press Enter to continue..." _
     else
         print_error "Failed to save node information"
         rm -f "$csv_file"
@@ -306,31 +312,65 @@ show_deployment_menu() {
 # Function to view current configuration
 view_configuration() {
     local hosts_file="$COLLECTION_PATH/hosts.yml"
+    # Python from venv, assuming 4_run_setup.sh is run from $SETUP_DIR
+    local python_in_venv="./mnl_venv/bin/python3"
+
+    if [ ! -f "$python_in_venv" ]; then
+        print_error "Python interpreter not found in virtual environment: $python_in_venv"
+        print_status "Please ensure prerequisites (1_prerequisites.sh) ran successfully."
+        return 1 # Indicate error
+    fi
+
     print_status "Current Configuration"
     echo "================================"
     print_success "Configuration file: $hosts_file"
     echo "--------------------------------"
 
-    # Use Python to read and display YAML without sensitive information
-    python3 -c '
-import yaml
-import sys
+    # Use Python from venv to read and display YAML without sensitive information
+    "$python_in_venv" - "$hosts_file" <<'PY'
+import yaml, sys, pathlib
+
 
 def mask_sensitive(value):
+    """Mask passwords or keys when printing."""
     return "********" if any(k in str(value).lower() for k in ["password", "key"]) else value
 
-with open(sys.argv[1]) as f:
-    config = yaml.safe_load(f)
-    if config and "all" in config and "children" in config["all"]:
-        hosts = config["all"]["children"]["gpu_nodes"]["hosts"]
-        for host_name, host_config in hosts.items():
-            print(f"\nHost: {host_name}")
-            for key, value in host_config.items():
-                print(f"  {key}: {mask_sensitive(value)}")
-    ' "$hosts_file"
+
+hosts_path = pathlib.Path(sys.argv[1])
+
+# Load the main hosts.yml inventory
+with hosts_path.open() as fp:
+    config = yaml.safe_load(fp)
+
+# Determine the base directory where group_vars may live
+base_dir = hosts_path.parent
+
+# Try to determine the configured network environment (mnl_app_env)
+env_value = None
+
+# Preferred location: group_vars/variables.yml (newer inventories)
+var_file = base_dir / "group_vars" / "variables.yml"
+if var_file.exists():
+    try:
+        env_value = (yaml.safe_load(var_file.open()) or {}).get("mnl_app_env")
+    except Exception:
+        env_value = None
+
+# Print network environment if discovered
+if env_value:
+    print(f"\nNetwork environment: {env_value}")
+
+# Dump host information, masking sensitive values
+if config and "all" in config and "children" in config["all"]:
+    hosts = config["all"]["children"]["gpu_nodes"].get("hosts", {})
+    for host_name, host_cfg in hosts.items():
+        print(f"\nHost: {host_name}")
+        for key, val in host_cfg.items():
+            print(f"  {key}: {mask_sensitive(val)}")
+PY
 
     echo
-    read -p "Press Enter to continue..."
+    read -p "Press Enter to continue..." _
 }
 
 # Function to run ansible playbook with debug info
@@ -345,18 +385,23 @@ run_playbook() {
     debug "Inventory file: $COLLECTION_PATH/hosts.yml"
     debug "Extra vars: $extra_vars"
     debug "Using Ansible home: $ANSIBLE_HOME"
+    debug "Using Collection path for playbooks and roles: $COLLECTION_PATH"
 
     # Check if playbook exists
-    HOME="../"
-    PLAYBOOK_PATH="../playbooks/$playbook"
+    PLAYBOOK_PATH="$COLLECTION_PATH/playbooks/$playbook" # Path relative to new COLLECTION_PATH
     if [ ! -f "$PLAYBOOK_PATH" ]; then
         error "Playbook not found: $PLAYBOOK_PATH"
-        debug "Available playbooks:"
-        ls -l "$PLAYBOOK_PATH/.." 2>/dev/null || echo "No playbooks directory found"
+        debug "Looking for playbooks in: $COLLECTION_PATH/playbooks/"
+        ls -l "$COLLECTION_PATH/playbooks/" 2>/dev/null || echo "Playbooks directory not found or empty."
         exit 1
     fi
 
-    local ansible_cmd="ANSIBLE_ROLES_PATH=$HOME/roles ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i $COLLECTION_PATH/hosts.yml $HOME/playbooks/$playbook"
+    ROLES_PATH="$COLLECTION_PATH/roles" # Path relative to new COLLECTION_PATH
+
+    # The ANSIBLE_ env vars are set by set_ansible_env and will be inherited by the eval call.
+    # ANSIBLE_CONFIG is not explicitly set unless an ansible.cfg is created and handled.
+    local ansible_cmd="ansible-playbook -i $COLLECTION_PATH/hosts.yml $PLAYBOOK_PATH"
+
     if [ -n "$extra_vars" ]; then
         ansible_cmd="$ansible_cmd --extra-vars \"$extra_vars\""
     fi
@@ -436,7 +481,8 @@ main() {
                 ;;
             3)
                 print_status "Testing connection to hosts..."
-                if ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/test_connection.yml"; then
+                # Env vars for ansible are set globally for the script by set_ansible_env
+                if ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/test_connection.yml"; then
                     print_success "Connection test completed successfully."
                 else
                     print_error "Connection test failed. Please check your inventory and playbook."
@@ -445,7 +491,8 @@ main() {
                 ;;
             4)
                 print_status "Getting nodes information..."
-                if ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml"; then
+                # Env vars for ansible are set globally
+                if ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml"; then
                     print_success "Node information retrieved successfully."
                 else
                     print_error "Failed to retrieve node information."
@@ -467,10 +514,16 @@ main() {
             8)
                 print_status "Running node configuration script..."
                 # Get the path to the script relative to the current script
-                CONFIG_SCRIPT_PATH="$(dirname "$0")/3_configure.py"
-                
-                if [ -f "$CONFIG_SCRIPT_PATH" ]; then
-                    python3 "$CONFIG_SCRIPT_PATH"
+                CONFIG_SCRIPT_PATH="./3_configure.py" # It's in the same dir ($SETUP_DIR)
+                # Python from venv
+                local python_in_venv_main="./mnl_venv/bin/python3"
+
+                if [ ! -f "$python_in_venv_main" ]; then
+                    print_error "Python interpreter not found in virtual environment: $python_in_venv_main"
+                    print_status "Please ensure prerequisites (1_prerequisites.sh) ran successfully."
+                    # Potentially exit or allow loop to continue
+                elif [ -f "$CONFIG_SCRIPT_PATH" ]; then
+                    "$python_in_venv_main" "$CONFIG_SCRIPT_PATH"
                     
                     # Add a message prompting for deployment after configuration
                     print_status "Node configuration complete!"
