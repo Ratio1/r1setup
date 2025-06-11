@@ -49,22 +49,58 @@ get_user_info() {
 
 # Set installation directories based on OS
 set_install_dirs() {
-    if [[ "$OS_TYPE" == "macos" ]]; then
-        ANSIBLE_DIR="$REAL_HOME/.ansible"
-    else
-        ANSIBLE_DIR="$REAL_HOME/.ansible"
-    fi
-    
+    # Use a unified config root so all scripts reference the same location
+    # This avoids permission clashes between ~/.ansible (default) and the
+    # location used by the configuration script ( ~/.ratio1/ansible_config )
+    ANSIBLE_DIR="$REAL_HOME/.ratio1/ansible_config"
+
+    # Collection path that matches what 3_configure.py and 4_run_setup.sh expect
     COLLECTION_PATH="$ANSIBLE_DIR/collections/ansible_collections/ratio1/multi_node_launcher"
 }
 
 # Create required directories
 create_dirs() {
-    # Create Ansible directory structure
-    mkdir -p "$ANSIBLE_DIR/collections"
-    # Ensure the real user owns the directory structure so that subsequent commands executed as
-    # this user (e.g. `ansible-galaxy collection install`) have the correct permissions.
-    chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$ANSIBLE_DIR"
+    # Determine whether we need sudo for filesystem operations
+    if [ "$(id -u)" -ne 0 ]; then
+        SUDO_CMD="sudo"
+    else
+        SUDO_CMD=""
+    fi
+
+    # Create directory tree (might require sudo when it already exists but is root-owned)
+    $SUDO_CMD mkdir -p "$ANSIBLE_DIR/collections" "$ANSIBLE_DIR/tmp"
+
+    # Ensure the real user owns the directory tree so future non-sudo runs work
+    $SUDO_CMD chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$ANSIBLE_DIR"
+}
+
+# Create a minimal ansible.cfg so that 4_run_setup.sh can point ANSIBLE_CONFIG here.
+create_ansible_cfg() {
+    local cfg_path="$ANSIBLE_DIR/ansible.cfg"
+
+    if [ ! -f "$cfg_path" ]; then
+        cfg_content="[defaults]
+inventory = $ANSIBLE_DIR/collections/ansible_collections/ratio1/multi_node_launcher/hosts.yml
+host_key_checking = False
+hash_behaviour = merge
+local_tmp = $ANSIBLE_DIR/tmp
+retry_files_enabled = False
+collections_paths = $ANSIBLE_DIR/collections
+
+[privilege_escalation]
+become = True
+become_method = sudo
+become_ask_pass = False
+"
+
+        if [ "$(id -u)" -ne 0 ]; then
+            echo "$cfg_content" | sudo tee "$cfg_path" > /dev/null
+            sudo chown "$REAL_USER:$(id -gn "$REAL_USER")" "$cfg_path"
+        else
+            echo "$cfg_content" > "$cfg_path"
+            chown "$REAL_USER:$(id -gn "$REAL_USER")" "$cfg_path"
+        fi
+    fi
 }
 
 # Install Ansible collection
@@ -132,6 +168,7 @@ main() {
     get_user_info
     set_install_dirs
     create_dirs
+    create_ansible_cfg
     install_collection
     set_ownership
     print_next_steps

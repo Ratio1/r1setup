@@ -136,8 +136,8 @@ set_install_dirs() {
         INSTALL_DIR="/opt/multi-node-launcher"
     fi
     
-    # Set Ansible paths based on OS
-    ANSIBLE_DIR="$REAL_HOME/.ansible"
+    # Use the unified configuration root (created in 2_ansible_setup.sh)
+    ANSIBLE_DIR="$REAL_HOME/.ratio1/ansible_config"
     
     # Collection path will be the same regardless of OS but path may differ
     COLLECTION_PATH="$ANSIBLE_DIR/collections/ansible_collections/ratio1/multi_node_launcher"
