@@ -49,43 +49,35 @@ get_user_info() {
 
 # Set installation directories based on OS
 set_install_dirs() {
-    # REAL_HOME is the actual user's home directory
-    local ratio1_base_dir_for_ansible="$REAL_HOME/.ratio1"
-    # ANSIBLE_DIR will be the root for our Ansible specific configurations
-    ANSIBLE_DIR="$ratio1_base_dir_for_ansible/ansible_config"
+    if [[ "$OS_TYPE" == "macos" ]]; then
+        ANSIBLE_DIR="$REAL_HOME/.ansible"
+    else
+        ANSIBLE_DIR="$REAL_HOME/.ansible"
+    fi
     
-    # Collection path within our new ANSIBLE_DIR structure
     COLLECTION_PATH="$ANSIBLE_DIR/collections/ansible_collections/ratio1/multi_node_launcher"
 }
 
 # Create required directories
 create_dirs() {
-    # Create Ansible directory structure within $ANSIBLE_DIR
-    # This will create $REAL_HOME/.ratio1/ansible_config/collections if it doesn't exist
+    # Create Ansible directory structure
     mkdir -p "$ANSIBLE_DIR/collections"
+    # Ensure the real user owns the directory structure so that subsequent commands executed as
+    # this user (e.g. `ansible-galaxy collection install`) have the correct permissions.
+    chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$ANSIBLE_DIR"
 }
 
 # Install Ansible collection
 install_collection() {
-    print_message "Installing Multi Node Launcher collection into $ANSIBLE_DIR/collections..." "$YELLOW"
+    print_message "Installing Multi Node Launcher collection..." "$YELLOW"
     
-    # Ensure the target collections directory exists (it should be created by create_dirs)
-    mkdir -p "$ANSIBLE_DIR/collections"
-
-    # Install the collection into the specified path
-    # We use ANSIBLE_COLLECTIONS_PATHS to tell ansible-galaxy where to install and look for collections.
-    if sudo -u "$REAL_USER" env HOME="$REAL_HOME" ANSIBLE_COLLECTIONS_PATHS="$ANSIBLE_DIR/collections" ansible-galaxy collection install ratio1.multi_node_launcher --force --upgrade; then
-        print_message "Ansible collection installation command executed." "$GREEN"
-    else
-        print_message "Ansible collection installation command failed." "$RED"
-        exit 1
-    fi
+    # Install the collection
+    sudo -u "$REAL_USER" env HOME="$REAL_HOME" ansible-galaxy collection install ratio1.multi_node_launcher --collections-path "$ANSIBLE_DIR/collections" --force --upgrade
     
-    # Verify collection installation in the new path
-    COLLECTION_INFO=$(sudo -u "$REAL_USER" env HOME="$REAL_HOME" ANSIBLE_COLLECTIONS_PATHS="$ANSIBLE_DIR/collections" ansible-galaxy collection list 2>/dev/null | grep "ratio1.multi_node_launcher" || true)
+    # Verify collection installation
+    COLLECTION_INFO=$(sudo -u "$REAL_USER" env HOME="$REAL_HOME" ansible-galaxy collection list --collections-path "$ANSIBLE_DIR/collections" 2>/dev/null | grep "ratio1.multi_node_launcher" || true)
     if [ -z "$COLLECTION_INFO" ]; then
-        print_message "Failed to detect installed collection in $ANSIBLE_DIR/collections." "$RED"
-        print_message "Attempted to list collections from: $ANSIBLE_DIR/collections" "$YELLOW"
+        print_message "Failed to detect installed collection" "$RED"
         exit 1
     fi
     
