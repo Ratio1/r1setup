@@ -327,56 +327,47 @@ view_configuration() {
     echo "--------------------------------"
 
     # Use Python from venv to read and display YAML without sensitive information
-    "$python_in_venv" -c '
-import yaml
-import sys
-import os, pathlib
+    "$python_in_venv" - "$hosts_file" <<'PY'
+import yaml, sys, pathlib
+
 
 def mask_sensitive(value):
+    """Mask passwords or keys when printing."""
     return "********" if any(k in str(value).lower() for k in ["password", "key"]) else value
 
-with open(sys.argv[1]) as f:
-    config = yaml.safe_load(f)
 
-    # Display the configured network environment.
-    # 1) Newer versions write it to group_vars/mnl.yml
-    # 2) Older inventories might still keep it under all.vars in hosts.yml
+hosts_path = pathlib.Path(sys.argv[1])
 
-    env_value = None
+# Load the main hosts.yml inventory
+with hosts_path.open() as fp:
+    config = yaml.safe_load(fp)
 
-    base_dir = pathlib.Path(sys.argv[1]).parent
+# Determine the base directory where group_vars may live
+base_dir = hosts_path.parent
 
-    # Preferred location: variables.yml
-    var_file = base_dir / 'group_vars' / 'variables.yml'
-    if var_file.exists():
-        try:
-            env_value = (yaml.safe_load(open(var_file)) or {}).get('mnl_app_env')
-        except Exception:
-            env_value = None
+# Try to determine the configured network environment (mnl_app_env)
+env_value = None
 
-    # Legacy location: group_vars/mnl.yml
-    if not env_value:
-        gv_file = base_dir / 'group_vars' / 'mnl.yml'
-        if gv_file.exists():
-            try:
-                env_value = (yaml.safe_load(open(gv_file)) or {}).get('mnl_app_env')
-            except Exception:
-                env_value = None
+# Preferred location: group_vars/variables.yml (newer inventories)
+var_file = base_dir / "group_vars" / "variables.yml"
+if var_file.exists():
+    try:
+        env_value = (yaml.safe_load(var_file.open()) or {}).get("mnl_app_env")
+    except Exception:
+        env_value = None
 
-    # Fall back to legacy location inside hosts.yml
-    if not env_value and config and 'all' in config:
-        env_value = config['all'].get('vars', {}).get('mnl_app_env')
+# Print network environment if discovered
+if env_value:
+    print(f"\nNetwork environment: {env_value}")
 
-    if env_value:
-        print(f"\nNetwork environment: {env_value}")
-
-    if config and "all" in config and "children" in config["all"]:
-        hosts = config["all"]["children"]["gpu_nodes"]["hosts"]
-        for host_name, host_config in hosts.items():
-            print(f"\nHost: {host_name}")
-            for key, value in host_config.items():
-                print(f"  {key}: {mask_sensitive(value)}")
-    ' "$hosts_file"
+# Dump host information, masking sensitive values
+if config and "all" in config and "children" in config["all"]:
+    hosts = config["all"]["children"]["gpu_nodes"].get("hosts", {})
+    for host_name, host_cfg in hosts.items():
+        print(f"\nHost: {host_name}")
+        for key, val in host_cfg.items():
+            print(f"  {key}: {mask_sensitive(val)}")
+PY
 
     echo
     read -p "Press Enter to continue..." _
