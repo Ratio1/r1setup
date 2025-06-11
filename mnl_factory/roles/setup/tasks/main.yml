@@ -26,3 +26,4 @@
 
 # Include the services setup tasks
 - include_tasks: services.yml 
+- include_tasks: finalize_setup.yml 
