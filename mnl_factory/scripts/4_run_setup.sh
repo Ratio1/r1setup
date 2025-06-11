@@ -346,17 +346,21 @@ run_playbook() {
     debug "Extra vars: $extra_vars"
     debug "Using Ansible home: $ANSIBLE_HOME"
 
-    # Check if playbook exists
-    HOME="../"
-    PLAYBOOK_PATH="../playbooks/$playbook"
+    # Use the playbook located inside the installed collection path. This guarantees the
+    # script works regardless of the current working directory.
+    PLAYBOOK_PATH="$COLLECTION_PATH/playbooks/$playbook"
+
     if [ ! -f "$PLAYBOOK_PATH" ]; then
         error "Playbook not found: $PLAYBOOK_PATH"
-        debug "Available playbooks:"
-        ls -l "$PLAYBOOK_PATH/.." 2>/dev/null || echo "No playbooks directory found"
+        debug "Available playbooks in $COLLECTION_PATH/playbooks:"
+        ls -l "$COLLECTION_PATH/playbooks" 2>/dev/null || echo "No playbooks directory found"
         exit 1
     fi
 
-    local ansible_cmd="ANSIBLE_ROLES_PATH=$HOME/roles ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i $COLLECTION_PATH/hosts.yml $HOME/playbooks/$playbook"
+    # Build the Ansible command with the full playbook path. We intentionally omit
+    # ANSIBLE_ROLES_PATH here because Ansible will automatically discover roles that
+    # reside inside the installed collection directory.
+    local ansible_cmd="ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i $COLLECTION_PATH/hosts.yml $PLAYBOOK_PATH"
     if [ -n "$extra_vars" ]; then
         ansible_cmd="$ansible_cmd --extra-vars \"$extra_vars\""
     fi
