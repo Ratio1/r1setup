@@ -346,8 +346,8 @@ with open(sys.argv[1]) as f:
 
     base_dir = pathlib.Path(sys.argv[1]).parent
 
-    # Preferred location: variables.yml next to hosts.yml
-    var_file = base_dir / 'variables.yml'
+    # Preferred location: variables.yml
+    var_file = base_dir / 'group_vars' / 'variables.yml'
     if var_file.exists():
         try:
             env_value = (yaml.safe_load(open(var_file)) or {}).get('mnl_app_env')

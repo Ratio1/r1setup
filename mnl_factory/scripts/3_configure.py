@@ -35,7 +35,7 @@ class ConfigManager:
     self.config_file = self.config_dir / 'hosts.yml'
 
     # Path to unified variables file where we will persist the selected network environment
-    self.vars_file = self.config_dir / 'variables.yml'
+    self.vars_file = self.config_dir / 'group_vars' /'variables.yml'
 
     # Ensure the configuration directory exists (it should be created by 2_ansible_setup.sh's collection install)
     # Making sure it exists here is a fallback or for direct script use.
@@ -601,7 +601,7 @@ class ConfigManager:
 
   def get_mnl_app_env(self) -> str:
     """Return the currently configured environment or None if not configured."""
-    # 1) Preferred location: variables.yml next to hosts.yml
+    # 1) Preferred location: variables.yml
     if self.vars_file.exists():
       try:
         with open(self.vars_file) as f:
@@ -611,18 +611,7 @@ class ConfigManager:
       except Exception:
         pass
 
-    # 2) Legacy location: group_vars/mnl.yml (to support older setups)
-    legacy_file = self.config_dir / 'group_vars' / 'mnl.yml'
-    if legacy_file.exists():
-      try:
-        with open(legacy_file) as f:
-          data = yaml.safe_load(f) or {}
-          if 'mnl_app_env' in data:
-            return data['mnl_app_env']
-      except Exception:
-        pass
-
-    # 3) Fallback: value still present in in-memory inventory (hosts.yml legacy)
+    # 2) Fallback: value still present in in-memory inventory (hosts.yml legacy)
     return self.inventory.get('all', {}).get('vars', {}).get('mnl_app_env')
 
   def set_mnl_app_env(self, env_value: str) -> None:
