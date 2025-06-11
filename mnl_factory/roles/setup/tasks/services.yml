@@ -56,20 +56,20 @@
 
 - name: "Create service for {{ mnl_app_name }}"
   ansible.builtin.template:
-    src: mnl_execution_engine.service.j2
-    dest: /etc/systemd/system/{{ mnl_service_name }}.service
+    src: edge_node.service.j2
+    dest: /etc/systemd/system/{{ edge_node_service_name }}.service
     mode: '0644'
     force: true
   notify: reload systemd
 
 - name: Stop the service
   ansible.builtin.systemd:
-    name: "{{ mnl_service_name }}"
+    name: "{{ edge_node_service_name }}"
     state: stopped
 
 - name: Start the service
   ansible.builtin.systemd:
-    name: "{{ mnl_service_name }}"
+    name: "{{ edge_node_service_name }}"
     state: started
 
 ############################### SCRIPTS ########################################
@@ -95,16 +95,3 @@
     mode: '0755'
   become: true
 
-- name: Wait for 20 seconds
-  ansible.builtin.pause:
-    seconds: 20
-
-- name: Run get_node_info command
-  ansible.builtin.command:
-    cmd: get_node_info
-  register: node_info
-  ignore_errors: true
-
-- name: Display node information
-  debug:
-    msg: "{{ node_info.stdout_lines }}"

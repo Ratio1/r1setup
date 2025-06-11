@@ -28,14 +28,25 @@ class ConfigManager:
     else:
       self.real_home = Path.home()
 
-    self.config_dir = self.real_home / '.ansible/collections/ansible_collections/ratio1/multi_node_launcher'
+    self.ratio1_base_dir = self.real_home / '.ratio1'
+    self.ansible_config_root = self.ratio1_base_dir / 'ansible_config'
+    # self.config_dir is where the collection is, and thus where hosts.yml should reside within it.
+    self.config_dir = self.ansible_config_root / 'collections/ansible_collections/ratio1/multi_node_launcher'
     self.config_file = self.config_dir / 'hosts.yml'
 
-    # Ensure the configuration directory exists
+    # Path to unified variables file where we will persist the selected network environment
+    self.vars_file = self.config_dir / 'group_vars' /'variables.yml'
+
+    # Ensure the configuration directory exists (it should be created by 2_ansible_setup.sh's collection install)
+    # Making sure it exists here is a fallback or for direct script use.
     self.config_dir.mkdir(parents=True, exist_ok=True)
 
+    # Initialise an in-memory inventory. 'mnl_app_env' is now persisted in
+    # group_vars/mnl.yml rather than inside the inventory file, but we still
+    # keep a runtime copy so the rest of the script can read it easily.
     self.inventory = {
       'all': {
+        'vars': {},
         'children': {
           'gpu_nodes': {
             'hosts': {}
@@ -43,6 +54,11 @@ class ConfigManager:
         }
       }
     }
+
+    # Load any existing environment value from group_vars so menu defaults are correct
+    env_from_file = self.get_mnl_app_env()
+    if env_from_file:
+      self.inventory['all'].setdefault('vars', {})['mnl_app_env'] = env_from_file
 
   def print_colored(self, text: str, color: str = 'white') -> None:
     print(f"{self.colors.get(color, '')}{text}{self.colors['end']}")
@@ -55,11 +71,14 @@ class ConfigManager:
       if required and not value:
         self.print_colored("This field cannot be empty. Please try again.", 'red')
         continue
+      print()  # Add newline for spacing
       return value
 
   def get_secure_input(self, prompt: str) -> str:
     self.print_colored(prompt + ": ", 'blue')
-    return getpass.getpass("")
+    value = getpass.getpass("")
+    print()
+    return value
 
   def validate_ip(self, ip: str) -> bool:
     """Validate IP address format"""
@@ -75,6 +94,42 @@ class ConfigManager:
       if self.validate_ip(ip):
         return ip
       self.print_colored("Invalid IP address format. Please use format: xxx.xxx.xxx.xxx", 'red')
+
+  def select_mnl_app_env(self) -> str:
+    """Select the network environment"""
+    self.print_colored("\nChoose the network environment:", 'cyan')
+    self.print_colored("1) mainnet")
+    self.print_colored("2) testnet")
+    self.print_colored("3) devnet")
+
+    current_env = self.get_mnl_app_env()
+
+    default_choice = '1'
+    if current_env == 'testnet':
+        default_choice = '2'
+    elif current_env == 'devnet':
+        default_choice = '3'
+
+    self.print_colored(f"Current default is '{current_env if current_env else 'not set'}'.", 'yellow')
+
+    network_env = ''
+    while True:
+        env_choice = self.get_input("Enter your choice (1-3)", default_choice)
+        if env_choice == '1':
+            network_env = 'mainnet'
+            break
+        elif env_choice == '2':
+            network_env = 'testnet'
+            break
+        elif env_choice == '3':
+            network_env = 'devnet'
+            break
+        else:
+            self.print_colored("Invalid choice. Please enter 1, 2, or 3", 'red')
+    
+    self.print_colored(f"\n{network_env} network selected.", 'green')
+    print()  # Add newline for spacing
+    return network_env
 
   def configure_host(self, host_num: int) -> Dict[str, Any]:
     """Configure a single host"""
@@ -200,9 +255,14 @@ class ConfigManager:
       try:
         with open(self.config_file) as f:
           current_config = yaml.safe_load(f)
-          if current_config and "all" in current_config and "children" in current_config["all"]:
+          if current_config and "all" in current_config:
+            if "children" not in current_config["all"]:
+              current_config["all"]["children"] = {'gpu_nodes': {'hosts': {}}}
+            if "vars" not in current_config["all"]:
+              current_config["all"]["vars"] = {}
+              
             self.inventory = current_config
-            hosts = current_config["all"]["children"]["gpu_nodes"]["hosts"]
+            hosts = current_config.get("all", {}).get("children", {}).get("gpu_nodes", {}).get("hosts", {})
             for host_name, host_config in hosts.items():
               self.print_colored(f"\nHost: {host_name}", 'yellow')
               for key, value in host_config.items():
@@ -210,6 +270,10 @@ class ConfigManager:
                 if any(k in key.lower() for k in ["password", "key"]):
                   value = "********"
                 self.print_colored(f"  {key}: {value}")
+
+            network = self.get_mnl_app_env()
+            self.print_colored(f"\nNetwork Environment: {network}", 'cyan')
+
       except Exception as e:
         self.print_colored(f"Error reading current configuration: {str(e)}", 'red')
 
@@ -234,9 +298,10 @@ class ConfigManager:
         self.config_file.rename(backup_file)
         self.print_colored(f"Existing configuration backed up to: {backup_file}", 'green')
         
-        # Reset inventory to empty
+        # Reset inventory to empty (environment variable handled in group_vars)
         self.inventory = {
           'all': {
+            'vars': {},
             'children': {
               'gpu_nodes': {
                 'hosts': {}
@@ -337,19 +402,29 @@ class ConfigManager:
     except ValueError:
       self.print_colored("Invalid input", 'red')
 
+  def change_mnl_app_env(self) -> None:
+    """Change the configured network environment."""
+    network_env = self.select_mnl_app_env()
+    # Persist selection to group_vars file
+    self.set_mnl_app_env(network_env)
+    # Save hosts configuration (without env var)
+    self.save_hosts()
+
   def show_configuration_menu(self) -> None:
     """Display the main configuration menu"""
     while True:
-      self.print_colored("\nNode Configuration Menu", 'green')
-      self.print_colored("======================", 'green')
+      self.print_colored("\n=======================", 'green')
+      self.print_colored("Node Configuration Menu", 'green')
+      self.print_colored("=======================", 'green')
       self.print_colored("1) View current configuration")
       self.print_colored("2) Add a new node")
       self.print_colored("3) Update an existing node")
       self.print_colored("4) Delete a node")
-      self.print_colored("5) Create a completely new configuration")
-      self.print_colored("6) Save and exit")
+      self.print_colored("5) Change network environment")
+      self.print_colored("6) Create a completely new configuration")
+      self.print_colored("7) Save and exit")
       
-      choice = self.get_input("Enter your choice (1-6)", "1")
+      choice = self.get_input("Enter your choice (1-7)", "1")
       
       if choice == "1":
         self.view_configuration()
@@ -360,9 +435,11 @@ class ConfigManager:
       elif choice == "4":
         self.delete_host()
       elif choice == "5":
+        self.change_mnl_app_env()
+      elif choice == "6":
         if self.create_new_configuration():
           self.setup_hosts_initial()
-      elif choice == "6":
+      elif choice == "7":
         self.print_colored("Configuration saved. Exiting...", 'green')
         self.print_colored("\nNext steps:", 'yellow')
         self.print_colored("1. Return to the setup menu", 'yellow')
@@ -375,6 +452,9 @@ class ConfigManager:
 
   def view_configuration(self) -> None:
     """View the current configuration"""
+    network_env = self.get_mnl_app_env() or 'Not set'
+    self.print_colored(f"\nNetwork Environment: {network_env}", 'cyan')
+
     hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
     
     if not hosts:
@@ -412,9 +492,10 @@ class ConfigManager:
       self.config_file.rename(backup_file)
       self.print_colored(f"Existing configuration backed up to: {backup_file}", 'green')
     
-    # Reset inventory to empty
+    # Reset inventory to empty (environment variable handled in group_vars)
     self.inventory = {
       'all': {
+        'vars': {},
         'children': {
           'gpu_nodes': {
             'hosts': {}
@@ -426,8 +507,9 @@ class ConfigManager:
 
   def setup_hosts_initial(self) -> None:
     """Initial host setup process for a new configuration"""
-    self.print_colored("\nGPU Node Configuration", 'green')
-    self.print_colored("===================", 'green')
+    network_env = self.select_mnl_app_env()
+    # Persist selection to group_vars file
+    self.set_mnl_app_env(network_env)
 
     while True:
       try:
@@ -438,6 +520,9 @@ class ConfigManager:
         break
       except ValueError:
         self.print_colored("Please enter a valid number", 'red')
+
+    self.print_colored(f"\nConfiguring {num_hosts} GPU node(s).", 'green')
+    print()
 
     hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
 
@@ -452,8 +537,9 @@ class ConfigManager:
 
   def setup_hosts(self) -> None:
     """Main host setup process with flexible configuration options"""
-    self.print_colored("\nGPU Node Configuration", 'green')
-    self.print_colored("===================", 'green')
+    self.print_colored("\n======================", 'green')
+    self.print_colored("GPU Node Configuration", 'green')
+    self.print_colored("======================", 'green')
 
     # Check for existing configuration
     if not self.check_existing_config():
@@ -463,6 +549,10 @@ class ConfigManager:
     if not self.inventory['all']['children']['gpu_nodes']['hosts']:
       self.setup_hosts_initial()
     else:
+      # For existing configurations, ensure network is set
+      if not self.get_mnl_app_env():
+        self.print_colored("\nNetwork environment is not set in the configuration.", "yellow")
+        self.change_mnl_app_env()
       # Otherwise, show the configuration menu
       self.show_configuration_menu()
 
@@ -472,28 +562,18 @@ class ConfigManager:
       # Create directory with proper ownership if it doesn't exist
       self.config_dir.mkdir(parents=True, exist_ok=True)
 
+      # Ensure we don't store mnl_app_env inside hosts.yml before saving
+      if 'vars' in self.inventory['all']:
+        self.inventory['all']['vars'].pop('mnl_app_env', None)
+        if not self.inventory['all']['vars']:
+          self.inventory['all'].pop('vars', None)
+
       # Write the configuration
       with open(self.config_file, 'w') as f:
         yaml.safe_dump(self.inventory, f, default_flow_style=False)
 
       # Set proper permissions
       os.chmod(self.config_file, 0o600)
-
-      # Set proper ownership if running with sudo
-      if 'SUDO_USER' in os.environ:
-        import pwd
-        import grp
-        real_user = os.environ['SUDO_USER']
-        uid = pwd.getpwnam(real_user).pw_uid
-        gid = pwd.getpwnam(real_user).pw_gid
-        os.chown(self.config_file, uid, gid)
-        # Also set ownership of the config directory
-        for root, dirs, files in os.walk(str(self.config_dir)):
-          os.chown(root, uid, gid)
-          for d in dirs:
-            os.chown(os.path.join(root, d), uid, gid)
-          for f in files:
-            os.chown(os.path.join(root, f), uid, gid)
 
       self.print_colored("\nConfiguration completed successfully!", 'green')
       self.print_colored(f"Configuration saved to: {self.config_file}", 'blue')
@@ -509,9 +589,53 @@ class ConfigManager:
 
   def save_hosts(self) -> None:
     """Save the hosts configuration to the YAML file."""
+    # Ensure we don't store the network environment in the inventory file
+    if 'vars' in self.inventory['all']:
+      self.inventory['all']['vars'].pop('mnl_app_env', None)
+      if not self.inventory['all']['vars']:
+        self.inventory['all'].pop('vars', None)
+
     with open(self.config_file, 'w') as f:
       yaml.safe_dump(self.inventory, f, default_flow_style=False)
     print(f"{self.colors['green']}Configuration saved to: {self.config_file}{self.colors['end']}")
+
+  def get_mnl_app_env(self) -> str:
+    """Return the currently configured environment or None if not configured."""
+    # 1) Preferred location: variables.yml
+    if self.vars_file.exists():
+      try:
+        with open(self.vars_file) as f:
+          data = yaml.safe_load(f) or {}
+          if 'mnl_app_env' in data:
+            return data['mnl_app_env']
+      except Exception:
+        pass
+
+    # 2) Fallback: value still present in in-memory inventory (hosts.yml legacy)
+    return self.inventory.get('all', {}).get('vars', {}).get('mnl_app_env')
+
+  def set_mnl_app_env(self, env_value: str) -> None:
+    """Persist the selected network environment to group_vars/mnl.yml"""
+    data = {}
+    if self.vars_file.exists():
+      try:
+        with open(self.vars_file) as f:
+          data = yaml.safe_load(f) or {}
+      except Exception:
+        data = {}
+
+    data['mnl_app_env'] = env_value
+
+    # Ensure directory exists
+    self.vars_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(self.vars_file, 'w') as f:
+      yaml.safe_dump(data, f, default_flow_style=False)
+
+    # Update runtime inventory copy so menus display the current value
+    self.inventory['all'].setdefault('vars', {})['mnl_app_env'] = env_value
+
+    self.print_colored(f"Network environment set to '{env_value}' in {self.vars_file}", 'green')
 
 
 def main():
