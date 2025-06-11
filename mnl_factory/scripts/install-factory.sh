@@ -16,10 +16,10 @@ cd "$TEMP_DIR"
 
 # Download setup scripts
 print_message "Downloading setup scripts to $SETUP_SCRIPTS_DIR..." "$YELLOW"
-curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/gpu-fixes/mnl_factory/scripts/1_prerequisites.sh
-curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/gpu-fixes/mnl_factory/scripts/2_ansible_setup.sh
-curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/gpu-fixes/mnl_factory/scripts/3_configure.py
-curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/gpu-fixes/mnl_factory/scripts/4_run_setup.sh
+curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/path-fix/mnl_factory/scripts/1_prerequisites.sh
+curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/path-fix/mnl_factory/scripts/2_ansible_setup.sh
+curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/path-fix/mnl_factory/scripts/3_configure.py
+curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/path-fix/mnl_factory/scripts/4_run_setup.sh
 print_message "Setup scripts downloaded." "$GREEN"
 
 # Make scripts executable
