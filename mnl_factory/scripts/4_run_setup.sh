@@ -300,8 +300,7 @@ show_deployment_menu() {
     echo "6) Save nodes addresses to CSV - Saves the extracted node addresses into a CSV file for easy access."
     echo "7) View current configuration - Displays the current configuration settings without sensitive information."
     echo "8) Configure nodes - Run the configuration script to add/delete/update node settings."
-    echo "9) Delete edge node deployment - Completely removes the edge node deployment including services, containers, data, and scripts."
-    echo "10) Exit - Terminates the deployment script."
+    echo "9) Exit - Terminates the deployment script."
 }
 
 # Function to view current configuration
@@ -428,7 +427,7 @@ main() {
     # Main loop
     while true; do
         show_deployment_menu
-        read -p "Select an option [1-10]: " choice
+        read -p "Select an option [1-9]: " choice
 
         case $choice in
             1)
@@ -491,24 +490,6 @@ main() {
                 fi
                 ;;
             9)
-                print_status "WARNING: This will completely remove the edge node deployment!"
-                print_status "This includes:"
-                print_status "- Stopping and removing systemd services"
-                print_status "- Removing Docker containers and images"
-                print_status "- Deleting application data directories"
-                print_status "- Removing created command scripts"
-                print_status "- Cleaning up Docker daemon configuration"
-                echo
-                read -p "Are you sure you want to proceed? Type 'YES' to confirm: " confirm
-                if [ "$confirm" = "YES" ]; then
-                    print_status "Starting edge node deletion..."
-                    run_playbook "delete_edge_node.yml"
-                    print_success "Edge node deletion completed!"
-                else
-                    print_status "Edge node deletion cancelled."
-                fi
-                ;;
-            10)
                 print_success "Exiting deployment script."
                 exit 0
                 ;;

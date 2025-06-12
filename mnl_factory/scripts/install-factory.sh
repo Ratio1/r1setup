@@ -10,6 +10,27 @@ print_message() {
     echo -e "${2}${1}${NC}"
 }
 
+# Get the current user and their home directory (script is run as user)
+CURRENT_USER=$(id -u -n)
+CURRENT_HOME=$(eval echo ~$CURRENT_USER) # More reliable way to get home dir
+
+if [ -z "$CURRENT_USER" ] || [ -z "$CURRENT_HOME" ]; then
+    print_message "Error: Could not determine the current user or their home directory." "$RED"
+    exit 1
+fi
+
+print_message "Running setup as user: $CURRENT_USER (Home: $CURRENT_HOME)" "$GREEN"
+
+# Define and create a persistent base directory in the user's home
+RATIO1_BASE_DIR="$CURRENT_HOME/.ratio1"
+SETUP_SCRIPTS_DIR="$RATIO1_BASE_DIR/r1_setup_scripts"
+
+print_message "\nSetup files will be downloaded to: $SETUP_SCRIPTS_DIR" "$YELLOW"
+mkdir -p "$SETUP_SCRIPTS_DIR"
+
+# Change to the setup scripts directory
+cd "$SETUP_SCRIPTS_DIR"
+
 # Create temporary directory
 TEMP_DIR=$(mkdir mnl_setup)
 cd "$TEMP_DIR"
