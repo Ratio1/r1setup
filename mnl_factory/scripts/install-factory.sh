@@ -43,18 +43,21 @@ curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads
 curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/r1setup_wrapper.sh
 print_message "Setup scripts downloaded." "$GREEN"
 
-# Copy r1setup to the persistent directory
+# Copy all scripts to the persistent directory
 cp r1setup "$SETUP_SCRIPTS_DIR/"
-chmod +x "$SETUP_SCRIPTS_DIR/r1setup"
+cp 1_prerequisites.sh "$SETUP_SCRIPTS_DIR/"
+cp 2_ansible_setup.sh "$SETUP_SCRIPTS_DIR/"
+cp r1setup_wrapper.sh "$SETUP_SCRIPTS_DIR/"
 
-# Make other scripts executable
+# Make scripts executable in both locations
+chmod +x "$SETUP_SCRIPTS_DIR/r1setup"
+chmod +x "$SETUP_SCRIPTS_DIR/1_prerequisites.sh"
+chmod +x "$SETUP_SCRIPTS_DIR/2_ansible_setup.sh"
+chmod +x "$SETUP_SCRIPTS_DIR/r1setup_wrapper.sh"
 chmod +x 1_prerequisites.sh 2_ansible_setup.sh r1setup_wrapper.sh
 
 # Install system-wide r1setup command
 print_message "Installing system-wide r1setup command..." "$YELLOW"
-# Copy wrapper to persistent directory and make it executable
-cp r1setup_wrapper.sh "$SETUP_SCRIPTS_DIR/"
-chmod +x "$SETUP_SCRIPTS_DIR/r1setup_wrapper.sh"
 
 if sudo ln -sf "$SETUP_SCRIPTS_DIR/r1setup_wrapper.sh" /usr/local/bin/r1setup; then
     print_message "✓ r1setup command installed system-wide (via symbolic link)" "$GREEN"
@@ -66,6 +69,8 @@ fi
 
 print_message "\nSetup process:" "$GREEN"
 print_message "1. Installing prerequisites..." "$YELLOW"
+# Run prerequisites from the persistent directory so venv is created there
+cd "$SETUP_SCRIPTS_DIR"
 sudo ./1_prerequisites.sh
 
 print_message "2. Ansible setup..." "$YELLOW"
