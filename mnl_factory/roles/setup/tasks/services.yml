@@ -95,3 +95,35 @@
     mode: '0755'
   become: true
 
+################### LEGACY SCRIPTS ##########################
+
+## Additional file creating tasks: create show and restart scripts
+- name: Create show.sh script
+  ansible.builtin.template:
+    src: show.sh.j2
+    dest: "~/show.sh"
+    mode: '0755'
+    force: true
+  become: false
+
+- name: Create restart.sh script
+  ansible.builtin.copy:
+    dest: "~/restart.sh"
+    content: |
+      #!/bin/bash
+      sudo systemctl enable {{ edge_node_service_name }}
+      sudo systemctl restart {{ edge_node_service_name }}
+      sudo journalctl -u {{ edge_node_service_name }} -a -n 100 -f
+    mode: '0755'
+    force: true
+  become: false
+
+- name: Create stop.sh script
+  ansible.builtin.copy:
+    dest: "~/stop.sh"
+    content: |
+      #!/bin/bash
+      sudo systemctl stop {{ edge_node_service_name }}
+    mode: '0755'
+    force: true
+  become: false
