@@ -103,7 +103,7 @@
       docker exec -i {{ mnl_docker_container_name }} bash -c "get_node_history"
     mode: '0755'
     force: true
-  become: false
+  become: true
 
 - name: Create get_e2_pem_file script
   ansible.builtin.copy:
@@ -113,7 +113,7 @@
       docker exec -i {{ mnl_docker_container_name }} bash -c "get_e2_pem_file"
     mode: '0755'
     force: true
-  become: false
+  become: true
 
 - name: Create get_allowed script
   ansible.builtin.copy:
@@ -123,7 +123,7 @@
       docker exec -i {{ mnl_docker_container_name }} bash -c "get_allowed"
     mode: '0755'
     force: true
-  become: false
+  become: true
 
 - name: Create update_allowed_batch script
   ansible.builtin.copy:
@@ -133,7 +133,7 @@
       docker exec -i {{ mnl_docker_container_name }} bash -c "update_allowed_batch"
     mode: '0755'
     force: true
-  become: false
+  become: true
 
 
 ################### LEGACY SCRIPTS ##########################
