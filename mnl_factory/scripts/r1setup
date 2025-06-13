@@ -139,7 +139,9 @@ class R1Setup:
             'nodes_count': 0,
             'last_deployed_date': None,
             'last_deployed_network': None,
-            'deployment_status': 'never_deployed'
+            'deployment_status': 'never_deployed',
+            'last_deleted_date': None,
+            'last_deployment_type': None
         }
         
         if self.active_config_file.exists():
@@ -248,7 +250,9 @@ class R1Setup:
             'description': f"Configuration with {nodes_count} node(s) for {environment} network",
             'last_deployed_date': None,
             'last_deployed_network': None,
-            'deployment_status': 'never_deployed'
+            'deployment_status': 'never_deployed',
+            'last_deleted_date': None,
+            'last_deployment_type': None
         }
         
         with open(metadata_path, 'w') as f:
@@ -484,6 +488,7 @@ class R1Setup:
         deployment_status = self.active_config.get('deployment_status', 'never_deployed')
         last_deployed_date = self.active_config.get('last_deployed_date')
         last_deployed_network = self.active_config.get('last_deployed_network')
+        last_deleted_date = self.active_config.get('last_deleted_date')
         
         if deployment_status == 'deployed' and last_deployed_date:
             try:
@@ -495,6 +500,14 @@ class R1Setup:
                 self.print_colored(f"Deployment: {deployment_text}", 'green')
             except:
                 self.print_colored("Deployment: ✓ Deployed", 'green')
+        elif deployment_status == 'deleted' and last_deleted_date:
+            try:
+                deleted_dt = datetime.fromisoformat(last_deleted_date.replace('Z', '+00:00'))
+                deleted_str = deleted_dt.strftime('%Y-%m-%d %H:%M')
+                deployment_text = f"🗑️ Last deleted: {deleted_str}"
+                self.print_colored(f"Deployment: {deployment_text}", 'red')
+            except:
+                self.print_colored("Deployment: ✓ Deleted", 'red')
         else:
             self.print_colored("Deployment: ✗ Never deployed", 'yellow')
         
@@ -576,6 +589,7 @@ class R1Setup:
                     last_deployed_date = metadata.get('last_deployed_date')
                     last_deployed_network = metadata.get('last_deployed_network')
                     last_deployment_type = metadata.get('last_deployment_type')
+                    last_deleted_date = metadata.get('last_deleted_date')
                     
                     if deployment_status == 'deployed' and last_deployed_date:
                         try:
@@ -590,11 +604,19 @@ class R1Setup:
                                 deployment_info += ")"
                         except:
                             deployment_info = "🚀 Deployed"
+                    elif deployment_status == 'deleted' and last_deleted_date:
+                        try:
+                            deleted_dt = datetime.fromisoformat(last_deleted_date.replace('Z', '+00:00'))
+                            deleted_str = deleted_dt.strftime('%Y-%m-%d %H:%M')
+                            deployment_info = f"🗑️ Last deleted: {deleted_str}"
+                        except:
+                            deployment_info = "🗑️ Deleted"
                     else:
                         deployment_info = "📋 Never deployed"
                     
                     self.print_colored(info_line, 'green' if active_marker else 'white')
-                    self.print_colored(f"     {deployment_info}", 'cyan' if deployment_status == 'deployed' else 'yellow')
+                    deployment_color = 'cyan' if deployment_status == 'deployed' else 'red' if deployment_status == 'deleted' else 'yellow'
+                    self.print_colored(f"     {deployment_info}", deployment_color)
                 print()
             
             self.print_colored("Configuration Options:")
@@ -747,7 +769,9 @@ class R1Setup:
                         'nodes_count': 0,
                         'last_deployed_date': None,
                         'last_deployed_network': None,
-                        'deployment_status': 'never_deployed'
+                        'deployment_status': 'never_deployed',
+                        'last_deleted_date': None,
+                        'last_deployment_type': None
                     }
                     self._save_active_config()
                     
@@ -1284,18 +1308,35 @@ class R1Setup:
             return
         
         self.print_header("Delete Edge Node Deployment")
-        self.print_colored("⚠️  WARNING: This will completely remove the edge node deployment including:", 'red', bold=True)
+        
+        # Load configuration to show target hosts
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        env = self.get_mnl_app_env()
+        
+        # Show deletion details
+        self.print_colored(f"🗑️  Deletion Details:", 'cyan', bold=True)
+        self.print_colored(f"   • Network: {env if env else 'Not set'}", 'white')
+        self.print_colored(f"   • Target Nodes: {len(hosts)}", 'white')
+        
+        self.print_colored(f"\n🖥️  Edge nodes will be deleted from these machines:", 'cyan', bold=True)
+        for name, config in hosts.items():
+            ip = config.get('ansible_host', 'Unknown')
+            user = config.get('ansible_user', 'Unknown')
+            self.print_colored(f"   • {name}: {user}@{ip}", 'white')
+        
+        self.print_colored("\n⚠️  WARNING: This will completely remove the edge node deployment including:", 'red', bold=True)
         self.print_colored("   • Systemd service and Docker containers", 'yellow')
         self.print_colored("   • Docker images and application data", 'yellow')
         self.print_colored("   • Created command scripts", 'yellow')
         self.print_colored("   • Docker daemon configuration", 'yellow')
         
-        if self.get_input("\n⚠️  Are you sure you want to delete the edge node deployment? (y/n)", "n").lower() != 'y':
+        if self.get_input(f"\n⚠️  Are you sure you want to delete edge node deployment from {len(hosts)} machine(s)? (y/n)", "n").lower() != 'y':
             self.print_colored("Deletion cancelled.", 'yellow')
             return
         
         # Final confirmation
-        if self.get_input("⚠️  Type 'DELETE' to confirm deletion", "").upper() != 'DELETE':
+        if self.get_input(f"⚠️  Type 'DELETE' to confirm deletion from {len(hosts)} node(s)", "").upper() != 'DELETE':
             self.print_colored("Deletion cancelled - confirmation not received.", 'yellow')
             return
         
@@ -1315,6 +1356,8 @@ class R1Setup:
         
         if success:
             self.print_colored("\nEdge node deleted successfully!", 'green')
+            # Update deployment metadata after successful deletion
+            self._update_deletion_metadata()
         else:
             self.print_colored("\nEdge node deletion encountered issues. Please check the output above.", 'red')
         
@@ -1357,6 +1400,27 @@ class R1Setup:
             self.print_colored("   • Deploy and start the edge node service (CPU mode)", 'yellow')
         else:
             self.print_colored(f"   • {description}", 'yellow')
+        
+        # Check for network change warning
+        deployment_status = self.active_config.get('deployment_status', 'never_deployed')
+        last_deployed_network = self.active_config.get('last_deployed_network')
+        
+        if deployment_status == 'deployed' and last_deployed_network and last_deployed_network != env:
+            self.print_colored(f"\n🚨 NETWORK CHANGE DETECTED!", 'red', bold=True)
+            self.print_colored(f"   This configuration was previously deployed on: {last_deployed_network}", 'yellow')
+            self.print_colored(f"   You are now deploying to: {env}", 'cyan')
+            self.print_colored(f"\n⚠️  Important Information:", 'yellow', bold=True)
+            self.print_colored(f"   • The edge node will run on the NEW network: {env}", 'white')
+            self.print_colored(f"   • The same node addresses will be used:", 'white')
+            for name, config in hosts.items():
+                ip = config.get('ansible_host', 'Unknown')
+                self.print_colored(f"     - {name}: {ip}", 'white')
+            self.print_colored(f"   • Node configuration and credentials remain the same", 'white')
+            self.print_colored(f"   • Only the blockchain network environment changes", 'white')
+            
+            if self.get_input(f"\n❓ Are you sure you want to deploy to {env} (different from previous {last_deployed_network})? (y/n)", "n").lower() != 'y':
+                self.print_colored("Deployment cancelled due to network change.", 'yellow')
+                return
         
         if not env:
             self.print_colored("\n⚠️  WARNING: Network environment is not set!", 'red', bold=True)
@@ -1532,6 +1596,39 @@ class R1Setup:
             self.print_colored(f"✅ Deployment tracking updated for configuration: {config_name}", 'green')
         except Exception as e:
             self.print_colored(f"Warning: Could not update deployment metadata: {e}", 'yellow')
+
+    def _update_deletion_metadata(self) -> None:
+        """Update deployment metadata after successful deletion"""
+        if not self.active_config.get('config_name'):
+            return
+            
+        config_name = self.active_config['config_name']
+        metadata_path = self.configs_dir / f"{config_name}.json"
+        
+        if not metadata_path.exists():
+            return
+            
+        try:
+            # Load existing metadata
+            with open(metadata_path) as f:
+                metadata = json.load(f)
+            
+            # Update deletion info
+            metadata['last_deleted_date'] = datetime.now().isoformat()
+            metadata['deployment_status'] = 'deleted'
+            # Keep the last deployment info for reference but mark as deleted
+            
+            # Save updated metadata
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            # Update active config
+            self.active_config.update(metadata)
+            self._save_active_config()
+            
+            self.print_colored(f"✅ Deletion tracking updated for configuration: {config_name}", 'green')
+        except Exception as e:
+            self.print_colored(f"Warning: Could not update deletion metadata: {e}", 'yellow')
 
     def run(self) -> None:
         """Main program loop"""
