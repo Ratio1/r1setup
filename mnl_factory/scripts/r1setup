@@ -1,12 +1,48 @@
 #!/usr/bin/env python3
 
+# Check if we should be using the virtual environment's Python interpreter
 import os
 import sys
+from pathlib import Path
+
+def check_and_reexec_with_venv():
+    """Check if we should re-execute with the virtual environment's Python"""
+    # Skip if we're already running from venv or explicitly told not to use venv
+    if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix) or os.environ.get('R1SETUP_NO_VENV'):
+        return False
+    
+    # Get the real user's home directory (handles sudo scenarios)
+    if 'SUDO_USER' in os.environ:
+        real_user = os.environ['SUDO_USER']
+        if os.name == 'posix':
+            import pwd
+            real_home = Path(pwd.getpwnam(real_user).pw_dir)
+        else:
+            real_home = Path.home()
+    else:
+        real_home = Path.home()
+    
+    # Check if virtual environment Python exists
+    venv_python = real_home / '.ratio1' / 'r1_setup_scripts' / 'mnl_venv' / 'bin' / 'python3'
+    
+    if venv_python.exists() and str(venv_python) != sys.executable:
+        # Re-execute with virtual environment Python
+        import subprocess
+        try:
+            os.execv(str(venv_python), [str(venv_python)] + sys.argv)
+        except OSError:
+            # If exec fails, continue with current Python
+            pass
+    
+    return False
+
+# Try to re-execute with virtual environment Python
+check_and_reexec_with_venv()
+
 import subprocess
 import yaml
 import getpass
 import re
-from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
 

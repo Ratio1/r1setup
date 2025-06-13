@@ -16,8 +16,9 @@ else
     REAL_HOME="$HOME"
 fi
 
-# Path to the actual r1setup script
+# Path to the actual r1setup script and virtual environment
 R1SETUP_SCRIPT="$REAL_HOME/.ratio1/r1_setup_scripts/r1setup"
+VENV_PYTHON="$REAL_HOME/.ratio1/r1_setup_scripts/mnl_venv/bin/python3"
 
 # Check if the script exists
 if [ ! -f "$R1SETUP_SCRIPT" ]; then
@@ -27,5 +28,13 @@ if [ ! -f "$R1SETUP_SCRIPT" ]; then
     exit 1
 fi
 
-# Execute the actual r1setup script with all provided arguments
-exec python3 "$R1SETUP_SCRIPT" "$@" 
+# Check if virtual environment Python exists, fallback to system python3
+if [ -f "$VENV_PYTHON" ]; then
+    # Execute the actual r1setup script with virtual environment Python
+    exec "$VENV_PYTHON" "$R1SETUP_SCRIPT" "$@"
+else
+    echo "WARNING: Virtual environment Python not found at: $VENV_PYTHON"
+    echo "Falling back to system python3. Some dependencies might be missing."
+    # Execute the actual r1setup script with system Python
+    exec python3 "$R1SETUP_SCRIPT" "$@"
+fi 
