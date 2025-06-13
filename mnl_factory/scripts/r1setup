@@ -1015,21 +1015,17 @@ class R1Setup:
             # Show current values if updating
             if existing_config:
                 self.print_colored("\nCurrent configuration:", 'yellow')
-                self.print_colored(f"IP: {existing_ip}")
+                self.print_colored(f"Host: {existing_ip}")
                 self.print_colored(f"User: {existing_user}")
                 self.print_colored(f"Auth: {'Password' if existing_auth_type == 'password' else 'SSH Key'}")
                 self.print_colored("\nPress Enter to keep current values, or enter new values:", 'cyan')
 
-            # Get IP address
-            while True:
-                ip_prompt = f"Enter IP address"
-                if existing_ip:
-                    ip_prompt += f" (current: {existing_ip})"
-                ip = self.get_input(ip_prompt, existing_ip)
-                if self.validate_ip(ip):
-                    host['ansible_host'] = ip
-                    break
-                self.print_colored("Invalid IP address format", 'red')
+            # Get host (IP address or URL)
+            host_prompt = f"Enter host (IP address or URL)"
+            if existing_ip:
+                host_prompt += f" (current: {existing_ip})"
+            host_address = self.get_input(host_prompt, existing_ip, required=True)
+            host['ansible_host'] = host_address
 
             # Get username
             user_prompt = f"Enter SSH username"
@@ -1117,7 +1113,7 @@ class R1Setup:
 
             # Show summary and confirm
             self.print_colored("\nConfiguration Summary:", 'yellow')
-            self.print_colored(f"IP: {host['ansible_host']}")
+            self.print_colored(f"Host: {host['ansible_host']}")
             self.print_colored(f"User: {host['ansible_user']}")
             self.print_colored(f"Auth: {'Password' if auth_choice == '1' else 'SSH Key'}")
 
@@ -1525,7 +1521,7 @@ class R1Setup:
         if not hosts:
             self.print_colored("No nodes configured!", 'red')
         else:
-            self.print_colored(f"{'Host':<20} {'IP Address':<15} {'Username':<15}", 'cyan')
+            self.print_colored(f"{'Host':<20} {'Address':<15} {'Username':<15}", 'cyan')
             self.print_colored("-" * 50, 'cyan')
             for name, config in hosts.items():
                 ip = config.get('ansible_host', 'Unknown')
@@ -1556,7 +1552,7 @@ class R1Setup:
 
         try:
             with open(csv_file, 'w') as f:
-                f.write("Host,IP_Address,Username\n")
+                f.write("Host,Address,Username\n")
                 for name, config in hosts.items():
                     ip = config.get('ansible_host', 'Unknown')
                     user = config.get('ansible_user', 'Unknown')
