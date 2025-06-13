@@ -381,6 +381,69 @@ class R1Setup:
             return False
         return all(0 <= int(part) <= 255 for part in ip.split('.'))
 
+    def _validate_ssh_key_file(self, key_path: str) -> Dict[str, Any]:
+        """Validate SSH private key file exists and is readable"""
+        try:
+            # Check if file exists
+            if not os.path.exists(key_path):
+                return {
+                    'valid': False,
+                    'error': f"File does not exist"
+                }
+            
+            # Check if it's a file (not a directory)
+            if not os.path.isfile(key_path):
+                return {
+                    'valid': False,
+                    'error': f"Path is not a file"
+                }
+            
+            # Check if file is readable
+            if not os.access(key_path, os.R_OK):
+                return {
+                    'valid': False,
+                    'error': f"File is not readable (check permissions)"
+                }
+            
+            # Check file size (empty files are invalid)
+            if os.path.getsize(key_path) == 0:
+                return {
+                    'valid': False,
+                    'error': f"File is empty"
+                }
+            
+            # Optional: Basic content validation for SSH key format
+            try:
+                with open(key_path, 'r') as f:
+                    first_line = f.readline().strip()
+                    # Check for common SSH private key headers
+                    valid_headers = [
+                        '-----BEGIN RSA PRIVATE KEY-----',
+                        '-----BEGIN DSA PRIVATE KEY-----', 
+                        '-----BEGIN EC PRIVATE KEY-----',
+                        '-----BEGIN OPENSSH PRIVATE KEY-----',
+                        '-----BEGIN PRIVATE KEY-----'
+                    ]
+                    
+                    if not any(first_line.startswith(header) for header in valid_headers):
+                        self.print_colored(f"Warning: File may not be a valid SSH private key format", 'yellow')
+                        self.print_colored(f"Expected headers: RSA, DSA, EC, or OpenSSH format", 'yellow')
+                        # Don't fail validation, just warn
+            except (UnicodeDecodeError, IOError):
+                # If we can't read as text, it might be a binary key format - that's okay
+                pass
+            
+            return {
+                'valid': True,
+                'error': None
+            }
+            
+        except Exception as e:
+            return {
+                'valid': False,
+                'error': f"Unexpected error: {str(e)}"
+            }
+
     def run_command(self, cmd: str, show_output: bool = True, shell: bool = True) -> tuple:
         """Run a shell command and return success status and output"""
         try:
@@ -1037,76 +1100,106 @@ class R1Setup:
                 continue
             host['ansible_user'] = username or existing_user
 
-            # Authentication method
-            self.print_colored("\nAuthentication method:")
-            self.print_colored("  1) Password")
-            self.print_colored("  2) SSH Key")
+            # Authentication method selection (with retry loop)
+            auth_configured = False
+            while not auth_configured:
+                # Authentication method
+                self.print_colored("\nAuthentication method:")
+                self.print_colored("  1) Password")
+                self.print_colored("  2) SSH Key")
 
-            # Set default based on existing config
-            default_auth = "1" if existing_auth_type == 'password' else "2"
-            auth_prompt = "Select authentication (1/2)"
-            if existing_auth_type:
-                auth_prompt += f" (current: {existing_auth_type})"
+                # Set default based on existing config
+                default_auth = "1" if existing_auth_type == 'password' else "2"
+                auth_prompt = "Select authentication (1/2)"
+                if existing_auth_type:
+                    auth_prompt += f" (current: {existing_auth_type})"
 
-            while True:
-                auth_choice = self.get_input(auth_prompt, default_auth)
-                if auth_choice in ['1', '2']:
-                    break
-                self.print_colored("Invalid choice. Please enter 1 or 2", 'red')
+                while True:
+                    auth_choice = self.get_input(auth_prompt, default_auth)
+                    if auth_choice in ['1', '2']:
+                        break
+                    self.print_colored("Invalid choice. Please enter 1 or 2", 'red')
 
-            if auth_choice == '1':
-                # Password authentication
-                if existing_config and 'ansible_ssh_pass' in existing_config:
-                    self.print_colored("\nPassword authentication - Press Enter to keep existing passwords", 'cyan')
-                    ssh_pass = self.get_secure_input("Enter SSH password (Enter to keep current)")
-                    if not ssh_pass.strip():
-                        # Keep existing password
-                        host['ansible_ssh_pass'] = existing_config['ansible_ssh_pass']
-                        host['ansible_become_password'] = existing_config.get('ansible_become_password', existing_config['ansible_ssh_pass'])
+                if auth_choice == '1':
+                    # Password authentication
+                    if existing_config and 'ansible_ssh_pass' in existing_config:
+                        self.print_colored("\nPassword authentication - Press Enter to keep existing passwords", 'cyan')
+                        ssh_pass = self.get_secure_input("Enter SSH password (Enter to keep current)")
+                        if not ssh_pass.strip():
+                            # Keep existing password
+                            host['ansible_ssh_pass'] = existing_config['ansible_ssh_pass']
+                            host['ansible_become_password'] = existing_config.get('ansible_become_password', existing_config['ansible_ssh_pass'])
+                        else:
+                            # New password provided
+                            host['ansible_ssh_pass'] = ssh_pass
+                            self.print_colored("\nFor sudo password:", 'yellow')
+                            self.print_colored("  - Enter a different password if sudo requires it", 'yellow')
+                            self.print_colored("  - Press Enter to use the same SSH password", 'yellow')
+                            sudo_pass = self.get_secure_input("Enter sudo password")
+                            host['ansible_become_password'] = sudo_pass.strip() or ssh_pass
                     else:
-                        # New password provided
+                        # New password authentication
+                        ssh_pass = self.get_secure_input("Enter SSH password")
+                        if not ssh_pass.strip():
+                            self.print_colored("SSH password cannot be empty!", 'red')
+                            continue  # This will go back to authentication method selection
                         host['ansible_ssh_pass'] = ssh_pass
+
                         self.print_colored("\nFor sudo password:", 'yellow')
                         self.print_colored("  - Enter a different password if sudo requires it", 'yellow')
                         self.print_colored("  - Press Enter to use the same SSH password", 'yellow')
                         sudo_pass = self.get_secure_input("Enter sudo password")
                         host['ansible_become_password'] = sudo_pass.strip() or ssh_pass
+                    
+                    auth_configured = True
                 else:
-                    # New password authentication
-                    ssh_pass = self.get_secure_input("Enter SSH password")
-                    if not ssh_pass.strip():
-                        self.print_colored("SSH password cannot be empty!", 'red')
-                        continue
-                    host['ansible_ssh_pass'] = ssh_pass
+                    # Key authentication
+                    existing_key = existing_config.get('ansible_ssh_private_key_file', '~/.ssh/id_rsa') if existing_config else '~/.ssh/id_rsa'
 
-                    self.print_colored("\nFor sudo password:", 'yellow')
-                    self.print_colored("  - Enter a different password if sudo requires it", 'yellow')
-                    self.print_colored("  - Press Enter to use the same SSH password", 'yellow')
-                    sudo_pass = self.get_secure_input("Enter sudo password")
-                    host['ansible_become_password'] = sudo_pass.strip() or ssh_pass
-            else:
-                # Key authentication
-                existing_key = existing_config.get('ansible_ssh_private_key_file', '~/.ssh/id_rsa') if existing_config else '~/.ssh/id_rsa'
-
-                while True:
-                    key_prompt = "Enter path to SSH private key"
-                    if existing_config and 'ansible_ssh_private_key_file' in existing_config:
-                        key_prompt += f" (current: {existing_key})"
-
-                    key_path = self.get_input(key_prompt, existing_key)
-                    expanded_path = os.path.expanduser(key_path)
-                    if os.path.exists(expanded_path):
-                        host['ansible_ssh_private_key_file'] = key_path
-                        break
-                    self.print_colored(f"Key file not found: {expanded_path}", 'red')
-                    if self.get_input("Try another path? (y/n)", "y").lower() != 'y':
-                        # If updating and user doesn't want to try another path, keep existing
+                    key_auth_success = False
+                    while not key_auth_success:
+                        key_prompt = "Enter path to SSH private key"
                         if existing_config and 'ansible_ssh_private_key_file' in existing_config:
+                            key_prompt += f" (current: {existing_key})"
+
+                        key_path = self.get_input(key_prompt, existing_key)
+                        expanded_path = os.path.expanduser(key_path)
+                        
+                        # Validate SSH key file
+                        validation_result = self._validate_ssh_key_file(expanded_path)
+                        if validation_result['valid']:
+                            host['ansible_ssh_private_key_file'] = key_path
+                            key_auth_success = True
+                            auth_configured = True
+                            break
+                        
+                        # Show specific error message
+                        self.print_colored(f"SSH key validation failed: {validation_result['error']}", 'red')
+                        self.print_colored(f"Path checked: {expanded_path}", 'yellow')
+                        
+                        retry_choice = self.get_input("Choose an option:\n  1) Try another SSH key path\n  2) Switch to password authentication\n  3) Keep existing (if updating)\nSelect option (1/2/3)", "1")
+                        
+                        if retry_choice == '1':
+                            continue  # Try another path
+                        elif retry_choice == '2':
+                            self.print_colored("Switching to password authentication...", 'cyan')
+                            break  # Exit SSH key loop, will go back to auth method selection
+                        elif retry_choice == '3' and existing_config and 'ansible_ssh_private_key_file' in existing_config:
+                            # Keep existing key configuration
                             host['ansible_ssh_private_key_file'] = existing_config['ansible_ssh_private_key_file']
                             self.print_colored("Keeping existing SSH key configuration", 'yellow')
+                            key_auth_success = True
+                            auth_configured = True
                             break
                         else:
-                            break
+                            if retry_choice == '3':
+                                self.print_colored("No existing configuration to keep. Please choose option 1 or 2.", 'red')
+                            else:
+                                self.print_colored("Invalid choice. Please select 1, 2, or 3.", 'red')
+                    
+                    # If user chose to switch to password auth, continue the auth loop
+                    if not key_auth_success and not auth_configured:
+                        continue
 
             # Preserve or set SSH common args
             host['ansible_ssh_common_args'] = existing_config.get('ansible_ssh_common_args', '-o StrictHostKeyChecking=no') if existing_config else '-o StrictHostKeyChecking=no'
