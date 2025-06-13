@@ -136,7 +136,10 @@ class R1Setup:
             'config_name': None,
             'environment': None,
             'created_at': None,
-            'nodes_count': 0
+            'nodes_count': 0,
+            'last_deployed_date': None,
+            'last_deployed_network': None,
+            'deployment_status': 'never_deployed'
         }
         
         if self.active_config_file.exists():
@@ -154,18 +157,44 @@ class R1Setup:
         except Exception as e:
             self.print_colored(f"Error saving active config: {e}", 'red')
 
-    def _generate_config_name(self, nodes_count: int, environment: str) -> str:
-        """Generate a configuration name with timestamp and node count"""
-        timestamp = datetime.now().isoformat().split('T')[0]  # ISO date format YYYY-MM-DD
-        return f"hosts_config_{timestamp}_{nodes_count}_{environment}"
+    def _generate_config_name(self, nodes_count: int, custom_name: str = None) -> str:
+        """Generate a configuration name with user input, timestamp and metadata"""
+        if not custom_name:
+            self.print_colored("\n📝 Configuration Naming", 'cyan', bold=True)
+            self.print_colored("Give your configuration a meaningful name to identify it later.", 'yellow')
+            self.print_colored("Examples: 'production-cluster', 'test-env', 'gpu-farm-1'", 'white')
+            
+            while True:
+                custom_name = self.get_input("Enter configuration name", required=True)
+                # Validate name (allow letters, numbers, hyphens, underscores)
+                if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
+                    break
+                self.print_colored("Invalid name. Use only letters, numbers, hyphens (-), and underscores (_)", 'red')
+        
+        # Generate timestamp components
+        now = datetime.now()
+        date_str = now.strftime('%Y%m%d')  # YYYYMMDD
+        time_str = now.strftime('%H%M')    # HHMM
+        
+        # Create the final config name: customname_YYYYMMDD_HHMM_Nnodes
+        config_name = f"{custom_name}_{date_str}_{time_str}_{nodes_count}n"
+        
+        return config_name
 
     def _list_available_configs(self) -> List[Tuple[str, Dict]]:
         """List all available configurations with their metadata"""
         configs = []
-        for config_file in self.configs_dir.glob("hosts_config_*.yml"):
+        # Look for all .yml files in configs directory (not just hosts_config_*)
+        for config_file in self.configs_dir.glob("*.yml"):
             try:
                 with open(config_file) as f:
                     config_data = yaml.safe_load(f)
+                
+                # Check if this is a valid configuration file by looking for the expected structure
+                if not config_data or 'all' not in config_data:
+                    continue
+                if 'children' not in config_data.get('all', {}) or 'gpu_nodes' not in config_data.get('all', {}).get('children', {}):
+                    continue
                 
                 # Extract metadata from config
                 hosts = config_data.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
@@ -215,7 +244,11 @@ class R1Setup:
             'environment': environment,
             'nodes_count': nodes_count,
             'created_at': datetime.now().isoformat(),
-            'config_name': config_name
+            'config_name': config_name,
+            'description': f"Configuration with {nodes_count} node(s) for {environment} network",
+            'last_deployed_date': None,
+            'last_deployed_network': None,
+            'deployment_status': 'never_deployed'
         }
         
         with open(metadata_path, 'w') as f:
@@ -447,6 +480,24 @@ class R1Setup:
         self.print_colored(f"Network: {current_env if current_env else '✗ Not set'}", 
                           'green' if current_env else 'red')
         
+        # Show deployment status
+        deployment_status = self.active_config.get('deployment_status', 'never_deployed')
+        last_deployed_date = self.active_config.get('last_deployed_date')
+        last_deployed_network = self.active_config.get('last_deployed_network')
+        
+        if deployment_status == 'deployed' and last_deployed_date:
+            try:
+                deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
+                deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
+                deployment_text = f"🚀 Last deployed: {deployed_str}"
+                if last_deployed_network:
+                    deployment_text += f" ({last_deployed_network})"
+                self.print_colored(f"Deployment: {deployment_text}", 'green')
+            except:
+                self.print_colored("Deployment: ✓ Deployed", 'green')
+        else:
+            self.print_colored("Deployment: ✗ Never deployed", 'yellow')
+        
         self.print_section("Available Options")
         print()
         self.print_colored("Configuration Management:")
@@ -488,6 +539,19 @@ class R1Setup:
                     env = metadata.get('environment', 'unknown')
                     nodes = metadata.get('nodes_count', 0)
                     created = metadata.get('created_at', '')
+                    description = metadata.get('description', '')
+                    
+                    # Extract custom name from the config name (everything before the first timestamp)
+                    # Format: customname_YYYYMMDD_HHMM_Nnodes_environment
+                    custom_name = display_name
+                    if '_' in display_name:
+                        parts = display_name.split('_')
+                        if len(parts) >= 2:
+                            # Find where the timestamp starts (8 digits)
+                            for idx, part in enumerate(parts):
+                                if len(part) == 8 and part.isdigit():
+                                    custom_name = '_'.join(parts[:idx])
+                                    break
                     
                     # Format creation date
                     try:
@@ -502,9 +566,35 @@ class R1Setup:
                     # Mark active configuration
                     active_marker = " ← ACTIVE" if display_name == active_config_name else ""
                     
-                    self.print_colored(f"  {i}. {display_name}")
-                    self.print_colored(f"     Environment: {env} | Nodes: {nodes} | Created: {created_str}{active_marker}", 
-                                     'green' if active_marker else 'white')
+                    self.print_colored(f"  {i}. {custom_name}", 'cyan' if active_marker else 'white', bold=bool(active_marker))
+                    info_line = f"     {env} | {nodes} node(s) | {created_str}{active_marker}"
+                    if description:
+                        info_line = f"     {description} | {created_str}{active_marker}"
+                    
+                    # Add deployment status info
+                    deployment_status = metadata.get('deployment_status', 'never_deployed')
+                    last_deployed_date = metadata.get('last_deployed_date')
+                    last_deployed_network = metadata.get('last_deployed_network')
+                    last_deployment_type = metadata.get('last_deployment_type')
+                    
+                    if deployment_status == 'deployed' and last_deployed_date:
+                        try:
+                            deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
+                            deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
+                            deployment_info = f"🚀 Last deployed: {deployed_str}"
+                            if last_deployed_network:
+                                deployment_info += f" ({last_deployed_network}"
+                            if last_deployment_type:
+                                deployment_info += f", {last_deployment_type})"
+                            elif last_deployed_network:
+                                deployment_info += ")"
+                        except:
+                            deployment_info = "🚀 Deployed"
+                    else:
+                        deployment_info = "📋 Never deployed"
+                    
+                    self.print_colored(info_line, 'green' if active_marker else 'white')
+                    self.print_colored(f"     {deployment_info}", 'cyan' if deployment_status == 'deployed' else 'yellow')
                 print()
             
             self.print_colored("Configuration Options:")
@@ -536,6 +626,18 @@ class R1Setup:
         """Create a new configuration with proper management"""
         self.print_section("Create New Configuration")
         
+        # First step: Get configuration name
+        self.print_colored("\n📝 Configuration Naming", 'cyan', bold=True)
+        self.print_colored("Give your configuration a meaningful name to identify it later.", 'yellow')
+        self.print_colored("Examples: 'production-cluster', 'test-env', 'gpu-farm-1'", 'white')
+        
+        while True:
+            custom_name = self.get_input("Enter configuration name", required=True)
+            # Validate name (allow letters, numbers, hyphens, underscores)
+            if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
+                break
+            self.print_colored("Invalid name. Use only letters, numbers, hyphens (-), and underscores (_)", 'red')
+        
         # Select network environment
         env = self._select_network_environment()
         
@@ -550,8 +652,8 @@ class R1Setup:
             except ValueError:
                 self.print_colored("Please enter a valid number", 'red')
         
-        # Generate configuration name
-        config_name = self._generate_config_name(num_nodes, env)
+        # Generate configuration name with the custom name
+        config_name = self._generate_config_name(num_nodes, custom_name)
         
         # Reset inventory for new configuration
         self.inventory = {
@@ -642,7 +744,10 @@ class R1Setup:
                         'config_name': None,
                         'environment': None,
                         'created_at': None,
-                        'nodes_count': 0
+                        'nodes_count': 0,
+                        'last_deployed_date': None,
+                        'last_deployed_network': None,
+                        'deployment_status': 'never_deployed'
                     }
                     self._save_active_config()
                     
@@ -684,7 +789,22 @@ class R1Setup:
             input("Press Enter to continue...")
             return
         
-        new_config_name = f"hosts_config_{new_name}"
+        # Generate new config name with timestamp and metadata (like the original creation)
+        # Extract environment and node count from existing metadata
+        old_metadata_path = self.configs_dir / f"{old_config_name}.json"
+        nodes_count = 1
+        environment = 'mainnet'
+        
+        if old_metadata_path.exists():
+            try:
+                with open(old_metadata_path) as f:
+                    metadata = json.load(f)
+                nodes_count = metadata.get('nodes_count', 1)
+                environment = metadata.get('environment', 'mainnet')
+            except Exception:
+                pass
+        
+        new_config_name = self._generate_config_name(nodes_count, new_name)
         
         # Check if new name already exists
         if (self.configs_dir / f"{new_config_name}.yml").exists():
@@ -774,6 +894,18 @@ class R1Setup:
         """Create initial configuration"""
         self.print_section("Initial Configuration Setup")
         
+        # First step: Get configuration name
+        self.print_colored("\n📝 Configuration Naming", 'cyan', bold=True)
+        self.print_colored("Give your configuration a meaningful name to identify it later.", 'yellow')
+        self.print_colored("Examples: 'production-cluster', 'test-env', 'gpu-farm-1'", 'white')
+        
+        while True:
+            custom_name = self.get_input("Enter configuration name", required=True)
+            # Validate name (allow letters, numbers, hyphens, underscores)
+            if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
+                break
+            self.print_colored("Invalid name. Use only letters, numbers, hyphens (-), and underscores (_)", 'red')
+        
         # Select network environment
         env = self._select_network_environment()
         self.set_mnl_app_env(env)
@@ -789,6 +921,9 @@ class R1Setup:
             except ValueError:
                 self.print_colored("Please enter a valid number", 'red')
         
+        # Generate configuration name with the custom name
+        config_name = self._generate_config_name(num_nodes, custom_name)
+        
         # Configure each node
         hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
         for i in range(num_nodes):
@@ -797,7 +932,9 @@ class R1Setup:
             hosts[name] = self._configure_single_node()
             self.print_colored(f"Node '{name}' configured successfully!", 'green')
         
-        self._save_configuration()
+        # Save configuration with metadata (instead of legacy _save_configuration)
+        self._save_config_with_metadata(config_name, env, num_nodes)
+        self.print_colored(f"Configuration '{config_name}' created and activated!", 'green')
 
     def _select_network_environment(self) -> str:
         """Select network environment"""
@@ -1051,7 +1188,7 @@ class R1Setup:
         
         # Generate config name if not set
         if not self.active_config.get('config_name'):
-            config_name = self._generate_config_name(nodes_count, env)
+            config_name = self._generate_config_name(nodes_count)
             self._save_config_with_metadata(config_name, env, nodes_count)
         else:
             # Update existing config
@@ -1250,6 +1387,9 @@ class R1Setup:
         
         if success:
             self.print_colored(f"\n{title} completed successfully!", 'green')
+            # Update deployment metadata after successful deployment
+            deployment_type = "full" if "NVIDIA" in description else "docker_only"
+            self._update_deployment_metadata(deployment_type)
         else:
             self.print_colored(f"\n{title} encountered issues. Please check the output above.", 'red')
         
@@ -1357,6 +1497,41 @@ class R1Setup:
         self.print_colored(f"Network environment changed to: {env}", 'green')
         
         input("Press Enter to continue...")
+
+    def _update_deployment_metadata(self, deployment_type: str) -> None:
+        """Update deployment metadata after successful deployment"""
+        if not self.active_config.get('config_name'):
+            return
+            
+        config_name = self.active_config['config_name']
+        metadata_path = self.configs_dir / f"{config_name}.json"
+        
+        if not metadata_path.exists():
+            return
+            
+        try:
+            # Load existing metadata
+            with open(metadata_path) as f:
+                metadata = json.load(f)
+            
+            # Update deployment info
+            current_network = self.get_mnl_app_env()
+            metadata['last_deployed_date'] = datetime.now().isoformat()
+            metadata['last_deployed_network'] = current_network
+            metadata['deployment_status'] = 'deployed'
+            metadata['last_deployment_type'] = deployment_type
+            
+            # Save updated metadata
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            # Update active config
+            self.active_config.update(metadata)
+            self._save_active_config()
+            
+            self.print_colored(f"✅ Deployment tracking updated for configuration: {config_name}", 'green')
+        except Exception as e:
+            self.print_colored(f"Warning: Could not update deployment metadata: {e}", 'yellow')
 
     def run(self) -> None:
         """Main program loop"""
