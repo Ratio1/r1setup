@@ -95,6 +95,47 @@
     mode: '0755'
   become: true
 
+- name: Create get_node_history script
+  ansible.builtin.copy:
+    dest: "/usr/local/bin/get_node_history"
+    content: |
+      #!/bin/bash
+      docker exec -i {{ mnl_docker_container_name }} bash -c "get_node_history"
+    mode: '0755'
+    force: true
+  become: false
+
+- name: Create get_e2_pem_file script
+  ansible.builtin.copy:
+    dest: "/usr/local/bin/get_e2_pem_file"
+    content: |
+      #!/bin/bash
+      docker exec -i {{ mnl_docker_container_name }} bash -c "get_e2_pem_file"
+    mode: '0755'
+    force: true
+  become: false
+
+- name: Create get_allowed script
+  ansible.builtin.copy:
+    dest: "/usr/local/bin/get_allowed"
+    content: |
+      #!/bin/bash
+      docker exec -i {{ mnl_docker_container_name }} bash -c "get_allowed"
+    mode: '0755'
+    force: true
+  become: false
+
+- name: Create update_allowed_batch script
+  ansible.builtin.copy:
+    dest: "/usr/local/bin/update_allowed_batch"
+    content: |
+      #!/bin/bash
+      docker exec -i {{ mnl_docker_container_name }} bash -c "update_allowed_batch"
+    mode: '0755'
+    force: true
+  become: false
+
+
 ################### LEGACY SCRIPTS ##########################
 
 ## Additional file creating tasks: create show and restart scripts
