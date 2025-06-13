@@ -23,7 +23,7 @@ print_message "Running setup as user: $CURRENT_USER (Home: $CURRENT_HOME)" "$GRE
 
 # Define and create a persistent base directory in the user's home
 RATIO1_BASE_DIR="$CURRENT_HOME/.ratio1"
-SETUP_SCRIPTS_DIR="$RATIO1_BASE_DIR/r1_setup_scripts"
+SETUP_SCRIPTS_DIR="$RATIO1_BASE_DIR/r1_setup"
 
 print_message "\nSetup files will be downloaded to: $SETUP_SCRIPTS_DIR" "$YELLOW"
 mkdir -p "$SETUP_SCRIPTS_DIR"

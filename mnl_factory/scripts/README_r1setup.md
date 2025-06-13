@@ -33,7 +33,7 @@ r1setup
 
 ## File Structure
 ```
-~/.ratio1/r1_setup_scripts/r1setup    # Main script
+~/.ratio1/r1_setup/r1setup    # Main script
 /usr/local/bin/r1setup                # System-wide command
 ```
 
