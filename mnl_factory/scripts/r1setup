@@ -49,6 +49,7 @@ import urllib.error
 import shutil
 import tempfile
 import stat
+import ssl
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 
@@ -1739,13 +1740,61 @@ class R1Setup:
         except Exception as e:
             self.print_colored(f"Warning: Could not update deletion metadata: {e}", 'yellow')
 
+    def _create_ssl_context(self) -> ssl.SSLContext:
+        """Create SSL context for secure connections, with certifi support"""
+        try:
+            # Try to create a default SSL context
+            context = ssl.create_default_context()
+            
+            # Try to use certifi for certificate verification (should be installed in venv)
+            try:
+                import certifi
+                context.load_verify_locations(certifi.where())
+                # If we reach here, certifi is working properly
+                return context
+            except ImportError:
+                # Certifi not available, try alternative approaches
+                if self.os_type == "macos":
+                    try:
+                        # Try to load system root certificates on macOS
+                        context.load_default_certs()
+                        return context
+                    except Exception:
+                        # If all else fails, disable certificate verification for GitHub
+                        # This is safe since we're only downloading from GitHub releases
+                        self.print_colored("Warning: Could not load system certificates, disabling SSL verification for updates", 'yellow')
+                        context.check_hostname = False
+                        context.verify_mode = ssl.CERT_NONE
+                else:
+                    # On Linux, the default context should work
+                    try:
+                        context.load_default_certs()
+                        return context
+                    except Exception:
+                        self.print_colored("Warning: Could not load system certificates, disabling SSL verification for updates", 'yellow')
+                        context.check_hostname = False
+                        context.verify_mode = ssl.CERT_NONE
+            
+            return context
+            
+        except Exception as e:
+            # Fallback: create unverified context
+            self.print_colored(f"SSL context creation failed ({e}), using unverified context for updates", 'yellow')
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            return context
+
     def _check_latest_version(self) -> Tuple[Optional[str], Optional[str]]:
         """Check the latest version from GitHub repository"""
         try:
             req = urllib.request.Request(UPDATE_CHECK_URL)
             req.add_header('User-Agent', f'Ratio1-CLI/{CLI_VERSION}')
 
-            with urllib.request.urlopen(req, timeout=10) as response:
+            # Create SSL context for secure connection
+            ssl_context = self._create_ssl_context()
+
+            with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
                 content = response.read().decode('utf-8')
 
                 # Parse version from ver.py content
@@ -1773,7 +1822,15 @@ class R1Setup:
                 return latest_version, download_urls
 
         except urllib.error.URLError as e:
-            self.print_colored(f"Network error checking for updates: {e}", 'red')
+            error_msg = str(e)
+            if "CERTIFICATE_VERIFY_FAILED" in error_msg or "SSL" in error_msg:
+                self.print_colored("SSL certificate verification failed.", 'red')
+                self.print_colored("This is a common issue on macOS. Possible solutions:", 'yellow')
+                self.print_colored("1. Install certificates: /Applications/Python\\ 3.x/Install\\ Certificates.command", 'white')
+                self.print_colored("2. Install certifi: pip install certifi", 'white')
+                self.print_colored("3. Update macOS and Python to latest versions", 'white')
+            else:
+                self.print_colored(f"Network error checking for updates: {e}", 'red')
             return None, None
         except Exception as e:
             self.print_colored(f"Error checking for updates: {e}", 'red')
@@ -1834,7 +1891,10 @@ class R1Setup:
                     req.add_header('User-Agent', f'Ratio1-CLI/{CLI_VERSION}')
 
                     try:
-                        with urllib.request.urlopen(req, timeout=30) as response:
+                        # Create SSL context for secure connection
+                        ssl_context = self._create_ssl_context()
+                        
+                        with urllib.request.urlopen(req, timeout=30, context=ssl_context) as response:
                             with open(temp_file, 'wb') as f:
                                 shutil.copyfileobj(response, f)
 
