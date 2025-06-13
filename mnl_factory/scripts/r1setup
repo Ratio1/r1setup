@@ -23,7 +23,7 @@ def check_and_reexec_with_venv():
         real_home = Path.home()
     
     # Check if virtual environment Python exists
-    venv_python = real_home / '.ratio1' / 'r1_setup_scripts' / 'mnl_venv' / 'bin' / 'python3'
+    venv_python = real_home / '.ratio1' / 'r1_setup_scripts' / '.r1_venv' / 'bin' / 'python3'
     
     if venv_python.exists() and str(venv_python) != sys.executable:
         # Re-execute with virtual environment Python

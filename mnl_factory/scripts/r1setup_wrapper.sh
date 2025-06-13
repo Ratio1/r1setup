@@ -18,7 +18,7 @@ fi
 
 # Path to the actual r1setup script and virtual environment
 R1SETUP_SCRIPT="$REAL_HOME/.ratio1/r1_setup_scripts/r1setup"
-VENV_PYTHON="$REAL_HOME/.ratio1/r1_setup_scripts/mnl_venv/bin/python3"
+VENV_PYTHON="$REAL_HOME/.ratio1/r1_setup_scripts/.r1_venv/bin/python3"
 
 # Check if the script exists
 if [ ! -f "$R1SETUP_SCRIPT" ]; then
