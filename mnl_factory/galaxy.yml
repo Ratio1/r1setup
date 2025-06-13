@@ -1,6 +1,6 @@
 namespace: "ratio1"
 name: "multi_node_launcher"
-version: "1.1.5"
+version: "1.1.6"
 readme: "README.md"
 authors:
   - Andrei Damian <andrei.damian@me.com>
