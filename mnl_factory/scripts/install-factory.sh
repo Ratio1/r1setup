@@ -37,10 +37,10 @@ cd "$TEMP_DIR"
 
 # Download setup scripts
 print_message "Downloading setup scripts to $SETUP_SCRIPTS_DIR..." "$YELLOW"
-curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/1_prerequisites.sh
-curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/2_ansible_setup.sh
-curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/r1setup
-curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/r1setup_wrapper.sh
+curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/reformat-cli-fixes/mnl_factory/scripts/1_prerequisites.sh
+curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/reformat-cli-fixes/mnl_factory/scripts/2_ansible_setup.sh
+curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/reformat-cli-fixes/mnl_factory/scripts/r1setup
+curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/reformat-cli-fixes/mnl_factory/scripts/r1setup_wrapper.sh
 print_message "Setup scripts downloaded." "$GREEN"
 
 # Copy all scripts to the persistent directory
