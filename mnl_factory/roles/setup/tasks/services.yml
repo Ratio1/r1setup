@@ -95,3 +95,76 @@
     mode: '0755'
   become: true
 
+- name: Create get_node_history script
+  ansible.builtin.copy:
+    dest: "/usr/local/bin/get_node_history"
+    content: |
+      #!/bin/bash
+      docker exec -i {{ mnl_docker_container_name }} bash -c "get_node_history"
+    mode: '0755'
+    force: true
+  become: true
+
+- name: Create get_e2_pem_file script
+  ansible.builtin.copy:
+    dest: "/usr/local/bin/get_e2_pem_file"
+    content: |
+      #!/bin/bash
+      docker exec -i {{ mnl_docker_container_name }} bash -c "get_e2_pem_file"
+    mode: '0755'
+    force: true
+  become: true
+
+- name: Create get_allowed script
+  ansible.builtin.copy:
+    dest: "/usr/local/bin/get_allowed"
+    content: |
+      #!/bin/bash
+      docker exec -i {{ mnl_docker_container_name }} bash -c "get_allowed"
+    mode: '0755'
+    force: true
+  become: true
+
+- name: Create update_allowed_batch script
+  ansible.builtin.copy:
+    dest: "/usr/local/bin/update_allowed_batch"
+    content: |
+      #!/bin/bash
+      docker exec -i {{ mnl_docker_container_name }} bash -c "update_allowed_batch"
+    mode: '0755'
+    force: true
+  become: true
+
+
+################### LEGACY SCRIPTS ##########################
+
+## Additional file creating tasks: create show and restart scripts
+- name: Create show.sh script
+  ansible.builtin.template:
+    src: legacy/show.sh.j2
+    dest: "~/show.sh"
+    mode: '0755'
+    force: true
+  become: false
+
+- name: Create restart.sh script
+  ansible.builtin.copy:
+    dest: "~/restart.sh"
+    content: |
+      #!/bin/bash
+      sudo systemctl enable {{ edge_node_service_name }}
+      sudo systemctl restart {{ edge_node_service_name }}
+      sudo journalctl -u {{ edge_node_service_name }} -a -n 100 -f
+    mode: '0755'
+    force: true
+  become: false
+
+- name: Create stop.sh script
+  ansible.builtin.copy:
+    dest: "~/stop.sh"
+    content: |
+      #!/bin/bash
+      sudo systemctl stop {{ edge_node_service_name }}
+    mode: '0755'
+    force: true
+  become: false

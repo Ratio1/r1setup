@@ -155,20 +155,21 @@ print_message "Installing Python packages into virtual environment (./$VENV_PATH
 # to ensure packages are installed correctly within the user-owned venv.
 if [ -n "$SUDO_USER" ]; then
     sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PIP_IN_VENV" install --upgrade pip
-    sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PIP_IN_VENV" install pyyaml typing_extensions
+    sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PIP_IN_VENV" install pyyaml typing_extensions certifi
 else
     # If script somehow runs without sudo (not the typical path for this script)
     "$PIP_IN_VENV" install --upgrade pip
-    "$PIP_IN_VENV" install pyyaml typing_extensions
+    "$PIP_IN_VENV" install pyyaml typing_extensions certifi
 fi
 
 # Verify core packages installed in venv
 if ! sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PYTHON_IN_VENV" -m pip show pyyaml > /dev/null 2>&1 || \
-   ! sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PYTHON_IN_VENV" -m pip show typing_extensions > /dev/null 2>&1; then
+   ! sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PYTHON_IN_VENV" -m pip show typing_extensions > /dev/null 2>&1 || \
+   ! sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PYTHON_IN_VENV" -m pip show certifi > /dev/null 2>&1; then
    if [ -n "$SUDO_USER" ]; then
-        print_message "Failed to install required Python packages (pyyaml, typing_extensions) into the virtual environment as $REAL_USER." "$RED"
+        print_message "Failed to install required Python packages (pyyaml, typing_extensions, certifi) into the virtual environment as $REAL_USER." "$RED"
    else
-        print_message "Failed to install required Python packages (pyyaml, typing_extensions) into the virtual environment." "$RED"
+        print_message "Failed to install required Python packages (pyyaml, typing_extensions, certifi) into the virtual environment." "$RED"
    fi
    exit 1
 fi

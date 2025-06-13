@@ -69,6 +69,10 @@
         - "/usr/local/bin/get_logs"
         - "/usr/local/bin/restart_service"
         - "/usr/local/bin/get_node_info"
+        - "/usr/local/bin/get_node_history"
+        - "/usr/local/bin/get_e2_pem_file"
+        - "/usr/local/bin/get_allowed"
+        - "/usr/local/bin/update_allowed_batch"
       ignore_errors: true
 
     - name: Check if Docker daemon.json exists and was created by our setup
