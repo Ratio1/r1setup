@@ -1,0 +1,839 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import subprocess
+import yaml
+import getpass
+import re
+from pathlib import Path
+from typing import Dict, Any, Optional
+from datetime import datetime
+
+
+class R1Setup:
+    def __init__(self):
+        self.colors = {
+            'red': '\033[91m',
+            'green': '\033[92m',
+            'yellow': '\033[93m',
+            'blue': '\033[94m',
+            'cyan': '\033[96m',
+            'magenta': '\033[95m',
+            'white': '\033[97m',
+            'end': '\033[0m'
+        }
+
+        # Get the real user's home directory when running with sudo
+        if 'SUDO_USER' in os.environ:
+            import pwd
+            real_user = os.environ['SUDO_USER']
+            self.real_home = Path(pwd.getpwnam(real_user).pw_dir)
+            self.real_user = real_user
+        else:
+            self.real_home = Path.home()
+            self.real_user = os.environ.get('USER', 'unknown')
+
+        # Detect OS
+        self.os_type = self._detect_os()
+        
+        # Set up paths
+        self.ratio1_base_dir = self.real_home / '.ratio1'
+        self.ansible_config_root = self.ratio1_base_dir / 'ansible_config'
+        self.config_dir = self.ansible_config_root / 'collections/ansible_collections/ratio1/multi_node_launcher'
+        self.config_file = self.config_dir / 'hosts.yml'
+        self.vars_file = self.config_dir / 'group_vars/variables.yml'
+        
+        # Set installation directories based on OS
+        if self.os_type == "macos":
+            self.install_dir = self.real_home / "multi-node-launcher"
+        else:
+            self.install_dir = Path("/opt/multi-node-launcher")
+
+        # Set up Ansible environment
+        self._setup_ansible_env()
+
+        # Initialize inventory
+        self.inventory = {
+            'all': {
+                'vars': {},
+                'children': {
+                    'gpu_nodes': {
+                        'hosts': {}
+                    }
+                }
+            }
+        }
+
+    def _detect_os(self) -> str:
+        """Detect the operating system"""
+        os_name = os.uname().sysname
+        if os_name == "Darwin":
+            return "macos"
+        elif os_name == "Linux":
+            return "linux"
+        else:
+            self.print_colored(f"Unsupported OS: {os_name}", 'red')
+            sys.exit(1)
+
+    def _setup_ansible_env(self):
+        """Set up Ansible environment variables"""
+        os.environ['ANSIBLE_CONFIG'] = str(self.ansible_config_root / 'ansible.cfg')
+        os.environ['ANSIBLE_COLLECTIONS_PATH'] = str(self.ansible_config_root / 'collections')
+        os.environ['ANSIBLE_HOME'] = str(self.ansible_config_root)
+
+    def print_colored(self, text: str, color: str = 'white', bold: bool = False, end: str = '\n') -> None:
+        """Print colored text"""
+        color_code = self.colors.get(color, self.colors['white'])
+        if bold:
+            color_code = '\033[1m' + color_code
+        print(f"{color_code}{text}{self.colors['end']}", end=end)
+
+    def print_header(self, title: str) -> None:
+        """Print a formatted header"""
+        self.print_colored("=" * 60, 'cyan')
+        self.print_colored(f" {title.center(58)} ", 'cyan', bold=True)
+        self.print_colored("=" * 60, 'cyan')
+
+    def print_section(self, title: str) -> None:
+        """Print a section header"""
+        self.print_colored(f"\n{title}", 'yellow', bold=True)
+        self.print_colored("-" * len(title), 'yellow')
+
+    def get_input(self, prompt: str, default: str = '', required: bool = False) -> str:
+        """Get user input with validation"""
+        while True:
+            default_str = f" [{default}]" if default else ""
+            self.print_colored(f"{prompt}{default_str}: ", 'blue', end='')
+            try:
+                value = input().strip() or default
+                if required and not value:
+                    self.print_colored("This field cannot be empty. Please try again.", 'red')
+                    continue
+                return value
+            except KeyboardInterrupt:
+                self.print_colored("\nOperation cancelled by user.", 'yellow')
+                sys.exit(0)
+
+    def get_secure_input(self, prompt: str) -> str:
+        """Get secure password input"""
+        self.print_colored(f"{prompt}: ", 'blue', end='')
+        return getpass.getpass("")
+
+    def validate_ip(self, ip: str) -> bool:
+        """Validate IP address format"""
+        pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+        if not re.match(pattern, ip):
+            return False
+        return all(0 <= int(part) <= 255 for part in ip.split('.'))
+
+    def run_command(self, cmd: str, show_output: bool = True, shell: bool = True) -> tuple:
+        """Run a shell command and return success status and output"""
+        try:
+            if show_output:
+                self.print_colored(f"Running: {cmd}", 'cyan')
+            
+            result = subprocess.run(
+                cmd,
+                shell=shell,
+                capture_output=not show_output,
+                text=True,
+                check=False
+            )
+            
+            if show_output:
+                return result.returncode == 0, ""
+            else:
+                return result.returncode == 0, result.stdout
+        except Exception as e:
+            self.print_colored(f"Error running command: {e}", 'red')
+            return False, str(e)
+
+    def check_ansible_installation(self) -> bool:
+        """Check if Ansible is properly installed"""
+        success, _ = self.run_command("ansible --version", show_output=False)
+        if not success:
+            self.print_colored("Ansible is not installed or not accessible!", 'red')
+            return False
+        
+        # Check if collection is installed
+        success, output = self.run_command(
+            f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+            f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+            f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+            "ansible-galaxy collection list",
+            show_output=False
+        )
+        
+        if not success or "ratio1.multi_node_launcher" not in output:
+            self.print_colored("Required Ansible collection is not installed!", 'red')
+            return False
+        
+        return True
+
+    def check_hosts_config(self) -> bool:
+        """Check if hosts configuration exists and is valid"""
+        if not self.config_file.exists():
+            return False
+        
+        if self.config_file.stat().st_size == 0:
+            return False
+        
+        try:
+            with open(self.config_file) as f:
+                config = yaml.safe_load(f)
+                if not config or 'all' not in config:
+                    return False
+                hosts = config.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+                return len(hosts) > 0
+        except Exception:
+            return False
+
+    def load_configuration(self) -> bool:
+        """Load existing configuration"""
+        if not self.config_file.exists():
+            return False
+        
+        try:
+            with open(self.config_file) as f:
+                self.inventory = yaml.safe_load(f) or self.inventory
+            return True
+        except Exception as e:
+            self.print_colored(f"Error loading configuration: {e}", 'red')
+            return False
+
+    def get_mnl_app_env(self) -> Optional[str]:
+        """Get the current network environment setting"""
+        if self.vars_file.exists():
+            try:
+                with open(self.vars_file) as f:
+                    data = yaml.safe_load(f) or {}
+                    return data.get('mnl_app_env')
+            except Exception:
+                pass
+        return self.inventory.get('all', {}).get('vars', {}).get('mnl_app_env')
+
+    def set_mnl_app_env(self, env_value: str) -> None:
+        """Set the network environment"""
+        data = {}
+        if self.vars_file.exists():
+            try:
+                with open(self.vars_file) as f:
+                    data = yaml.safe_load(f) or {}
+            except Exception:
+                data = {}
+
+        data['mnl_app_env'] = env_value
+        self.vars_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(self.vars_file, 'w') as f:
+            yaml.safe_dump(data, f, default_flow_style=False)
+        
+        self.inventory['all'].setdefault('vars', {})['mnl_app_env'] = env_value
+
+    def show_main_menu(self) -> None:
+        """Display the main menu"""
+        self.print_header("Ratio1 Multi-Node Launcher Setup")
+        
+        # Show current status
+        has_config = self.check_hosts_config()
+        current_env = self.get_mnl_app_env()
+        
+        self.print_section("Current Status")
+        self.print_colored(f"Configuration: {'✓ Configured' if has_config else '✗ Not configured'}", 
+                          'green' if has_config else 'red')
+        self.print_colored(f"Network: {current_env if current_env else '✗ Not set'}", 
+                          'green' if current_env else 'red')
+        
+        self.print_section("Available Options")
+        print()
+        self.print_colored("Node Management:")
+        self.print_colored("  1) Configure nodes          - Set up GPU nodes for deployment")
+        self.print_colored("  2) View configuration        - Display current node configuration")
+        self.print_colored("  3) Test node connectivity   - Verify connection to configured nodes")
+        print()
+        self.print_colored("Deployment:")
+        self.print_colored("  4) Deploy full setup        - Deploy Docker + NVIDIA drivers + GPU setup")
+        self.print_colored("  5) Deploy Docker only       - Deploy only Docker without GPU setup")
+        self.print_colored("  6) Delete edge node         - Completely remove deployed edge node")
+        print()
+        self.print_colored("Information:")
+        self.print_colored("  7) Get node information     - Retrieve detailed node information")
+        self.print_colored("  8) Get node addresses       - Display node IP addresses")
+        self.print_colored("  9) Export addresses to CSV  - Save node addresses to CSV file")
+        print()
+        self.print_colored("Settings:")
+        self.print_colored(" 10) Change network environment - Switch between mainnet/testnet/devnet")
+        print()
+        self.print_colored("  0) Exit")
+        print()
+
+    def configure_nodes_menu(self) -> None:
+        """Show node configuration submenu"""
+        while True:
+            self.print_header("Node Configuration")
+            
+            # Load current configuration
+            self.load_configuration()
+            hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+            
+            if hosts:
+                self.print_section(f"Current Nodes ({len(hosts)})")
+                for i, (name, config) in enumerate(hosts.items(), 1):
+                    ip = config.get('ansible_host', 'Unknown')
+                    user = config.get('ansible_user', 'Unknown')
+                    self.print_colored(f"  {i}. {name} ({user}@{ip})")
+                print()
+            
+            self.print_colored("Configuration Options:")
+            if not hosts:
+                self.print_colored("  1) Create initial configuration - Set up your first nodes")
+            else:
+                self.print_colored("  1) Add new node                 - Add another node to the configuration")
+                self.print_colored("  2) Update existing node         - Modify an existing node's settings")
+                self.print_colored("  3) Delete node                  - Remove a node from configuration")
+                self.print_colored("  4) Create new configuration     - Start over with fresh configuration")
+            self.print_colored("  0) Back to main menu")
+            print()
+            
+            choice = self.get_input("Select option")
+            
+            if choice == '0':
+                break
+            elif choice == '1':
+                if not hosts:
+                    self._create_initial_configuration()
+                else:
+                    self._add_node()
+            elif choice == '2' and hosts:
+                self._update_node()
+            elif choice == '3' and hosts:
+                self._delete_node()
+            elif choice == '4' and hosts:
+                self._create_new_configuration()
+            else:
+                self.print_colored("Invalid option. Please try again.", 'red')
+                input("Press Enter to continue...")
+
+    def _create_initial_configuration(self) -> None:
+        """Create initial configuration"""
+        self.print_section("Initial Configuration Setup")
+        
+        # Select network environment
+        env = self._select_network_environment()
+        self.set_mnl_app_env(env)
+        
+        # Get number of nodes
+        while True:
+            try:
+                num_nodes = int(self.get_input("How many GPU nodes do you want to configure", "1"))
+                if num_nodes <= 0:
+                    self.print_colored("Please enter a positive number", 'red')
+                    continue
+                break
+            except ValueError:
+                self.print_colored("Please enter a valid number", 'red')
+        
+        # Configure each node
+        hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
+        for i in range(num_nodes):
+            self.print_section(f"Configuring Node {i + 1} of {num_nodes}")
+            name = self.get_input(f"Enter name for node {i + 1}", f"gpu-node-{i + 1}")
+            hosts[name] = self._configure_single_node()
+            self.print_colored(f"Node '{name}' configured successfully!", 'green')
+        
+        self._save_configuration()
+
+    def _select_network_environment(self) -> str:
+        """Select network environment"""
+        self.print_colored("\nNetwork Environment Options:")
+        self.print_colored("  1) mainnet")
+        self.print_colored("  2) testnet") 
+        self.print_colored("  3) devnet")
+        
+        current_env = self.get_mnl_app_env()
+        if current_env:
+            self.print_colored(f"Current: {current_env}", 'yellow')
+        
+        while True:
+            choice = self.get_input("Select network environment (1-3)", "1")
+            if choice == '1':
+                return 'mainnet'
+            elif choice == '2':
+                return 'testnet'
+            elif choice == '3':
+                return 'devnet'
+            else:
+                self.print_colored("Invalid choice. Please enter 1, 2, or 3", 'red')
+
+    def _configure_single_node(self) -> Dict[str, Any]:
+        """Configure a single node"""
+        while True:
+            host = {}
+            
+            # Get IP address
+            while True:
+                ip = self.get_input("Enter IP address", required=True)
+                if self.validate_ip(ip):
+                    host['ansible_host'] = ip
+                    break
+                self.print_colored("Invalid IP address format", 'red')
+            
+            # Get username
+            host['ansible_user'] = self.get_input("Enter SSH username", required=True)
+            
+            # Authentication method
+            self.print_colored("\nAuthentication method:")
+            self.print_colored("  1) Password")
+            self.print_colored("  2) SSH Key")
+            
+            while True:
+                auth_choice = self.get_input("Select authentication (1/2)", "2")
+                if auth_choice in ['1', '2']:
+                    break
+                self.print_colored("Invalid choice. Please enter 1 or 2", 'red')
+            
+            if auth_choice == '1':
+                # Password authentication
+                ssh_pass = self.get_secure_input("Enter SSH password")
+                host['ansible_ssh_pass'] = ssh_pass
+                sudo_pass = self.get_secure_input("Enter sudo password (press Enter if same as SSH)")
+                host['ansible_become_password'] = sudo_pass or ssh_pass
+            else:
+                # Key authentication
+                while True:
+                    key_path = self.get_input("Enter path to SSH private key", "~/.ssh/id_rsa")
+                    expanded_path = os.path.expanduser(key_path)
+                    if os.path.exists(expanded_path):
+                        host['ansible_ssh_private_key_file'] = key_path
+                        break
+                    self.print_colored(f"Key file not found: {expanded_path}", 'red')
+                    if self.get_input("Try another path? (y/n)", "y").lower() != 'y':
+                        break
+            
+            host['ansible_ssh_common_args'] = '-o StrictHostKeyChecking=no'
+            
+            # Show summary and confirm
+            self.print_colored("\nConfiguration Summary:", 'yellow')
+            self.print_colored(f"IP: {host['ansible_host']}")
+            self.print_colored(f"User: {host['ansible_user']}")
+            self.print_colored(f"Auth: {'Password' if auth_choice == '1' else 'SSH Key'}")
+            
+            if self.get_input("\nConfirm this configuration? (y/n)", "y").lower() == 'y':
+                return host
+            
+            self.print_colored("Let's reconfigure this node...", 'yellow')
+
+    def _add_node(self) -> None:
+        """Add a new node to existing configuration"""
+        self.print_section("Add New Node")
+        name = self.get_input("Enter name for the new node", required=True)
+        
+        hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
+        if name in hosts:
+            self.print_colored(f"Node '{name}' already exists!", 'red')
+            return
+        
+        hosts[name] = self._configure_single_node()
+        self._save_configuration()
+        self.print_colored(f"Node '{name}' added successfully!", 'green')
+
+    def _update_node(self) -> None:
+        """Update an existing node"""
+        hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
+        if not hosts:
+            self.print_colored("No nodes configured!", 'red')
+            return
+        
+        self.print_section("Select Node to Update")
+        node_list = list(hosts.keys())
+        for i, name in enumerate(node_list, 1):
+            ip = hosts[name].get('ansible_host', 'Unknown')
+            self.print_colored(f"  {i}) {name} ({ip})")
+        
+        while True:
+            try:
+                choice = int(self.get_input("Select node number")) - 1
+                if 0 <= choice < len(node_list):
+                    name = node_list[choice]
+                    break
+                self.print_colored("Invalid selection", 'red')
+            except ValueError:
+                self.print_colored("Please enter a number", 'red')
+        
+        self.print_colored(f"Updating node: {name}", 'yellow')
+        hosts[name] = self._configure_single_node()
+        self._save_configuration()
+        self.print_colored(f"Node '{name}' updated successfully!", 'green')
+
+    def _delete_node(self) -> None:
+        """Delete a node"""
+        hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
+        if not hosts:
+            self.print_colored("No nodes configured!", 'red')
+            return
+        
+        self.print_section("Select Node to Delete")
+        node_list = list(hosts.keys())
+        for i, name in enumerate(node_list, 1):
+            ip = hosts[name].get('ansible_host', 'Unknown')
+            self.print_colored(f"  {i}) {name} ({ip})")
+        
+        while True:
+            try:
+                choice = int(self.get_input("Select node number")) - 1
+                if 0 <= choice < len(node_list):
+                    name = node_list[choice]
+                    break
+                self.print_colored("Invalid selection", 'red')
+            except ValueError:
+                self.print_colored("Please enter a number", 'red')
+        
+        if self.get_input(f"Delete node '{name}'? (y/n)", "n").lower() == 'y':
+            del hosts[name]
+            self._save_configuration()
+            self.print_colored(f"Node '{name}' deleted successfully!", 'green')
+
+    def _create_new_configuration(self) -> None:
+        """Create completely new configuration"""
+        if self.get_input("This will overwrite your current configuration. Continue? (y/n)", "n").lower() == 'y':
+            # Backup existing config
+            if self.config_file.exists():
+                backup_dir = self.config_dir / 'hosts-history'
+                backup_dir.mkdir(exist_ok=True)
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                backup_file = backup_dir / f'hosts-{timestamp}.yml'
+                self.config_file.rename(backup_file)
+                self.print_colored(f"Configuration backed up to: {backup_file}", 'green')
+            
+            # Reset inventory
+            self.inventory = {
+                'all': {
+                    'vars': {},
+                    'children': {
+                        'gpu_nodes': {
+                            'hosts': {}
+                        }
+                    }
+                }
+            }
+            self._create_initial_configuration()
+
+    def _save_configuration(self) -> None:
+        """Save configuration to file"""
+        try:
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Remove mnl_app_env from inventory before saving
+            if 'vars' in self.inventory['all']:
+                self.inventory['all']['vars'].pop('mnl_app_env', None)
+                if not self.inventory['all']['vars']:
+                    self.inventory['all'].pop('vars', None)
+            
+            with open(self.config_file, 'w') as f:
+                yaml.safe_dump(self.inventory, f, default_flow_style=False)
+            
+            os.chmod(self.config_file, 0o600)
+            self.print_colored(f"Configuration saved to: {self.config_file}", 'green')
+            
+        except Exception as e:
+            self.print_colored(f"Error saving configuration: {e}", 'red')
+
+    def view_configuration(self) -> None:
+        """View current configuration"""
+        self.print_header("Current Configuration")
+        
+        # Show network environment
+        env = self.get_mnl_app_env()
+        self.print_colored(f"Network Environment: {env if env else 'Not set'}", 
+                          'green' if env else 'red')
+        
+        # Load and show hosts
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        
+        if not hosts:
+            self.print_colored("\nNo nodes configured!", 'red')
+        else:
+            self.print_section(f"Configured Nodes ({len(hosts)})")
+            for name, config in hosts.items():
+                self.print_colored(f"\nNode: {name}", 'yellow')
+                for key, value in config.items():
+                    if any(k in key.lower() for k in ["password", "key"]):
+                        value = "********"
+                    self.print_colored(f"  {key}: {value}")
+        
+        input("\nPress Enter to continue...")
+
+    def test_connectivity(self) -> None:
+        """Test connectivity to configured nodes"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+        
+        self.print_header("Testing Node Connectivity")
+        
+        playbook_path = self.config_dir / 'playbooks/test_connection.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"Test playbook not found: {playbook_path}", 'red')
+            input("Press Enter to continue...")
+            return
+        
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+        
+        success, _ = self.run_command(cmd, show_output=True)
+        
+        if success:
+            self.print_colored("\nConnectivity test completed successfully!", 'green')
+        else:
+            self.print_colored("\nConnectivity test failed. Please check your configuration.", 'red')
+        
+        input("Press Enter to continue...")
+
+    def deploy_full(self) -> None:
+        """Deploy full setup (Docker + NVIDIA + GPU)"""
+        self._deploy_setup("site.yml", "Full Deployment", "Docker + NVIDIA drivers + GPU setup")
+
+    def deploy_docker_only(self) -> None:
+        """Deploy Docker only"""
+        self._deploy_setup("site.yml", "Docker-Only Deployment", "Docker without GPU setup", extra_vars="skip_gpu=true")
+
+    def delete_edge_node(self) -> None:
+        """Delete deployed edge node"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+        
+        self.print_header("Delete Edge Node Deployment")
+        self.print_colored("⚠️  WARNING: This will completely remove the edge node deployment including:", 'red', bold=True)
+        self.print_colored("   • Systemd service and Docker containers", 'yellow')
+        self.print_colored("   • Docker images and application data", 'yellow')
+        self.print_colored("   • Created command scripts", 'yellow')
+        self.print_colored("   • Docker daemon configuration", 'yellow')
+        
+        if self.get_input("\n⚠️  Are you sure you want to delete the edge node deployment? (y/n)", "n").lower() != 'y':
+            self.print_colored("Deletion cancelled.", 'yellow')
+            return
+        
+        # Final confirmation
+        if self.get_input("⚠️  Type 'DELETE' to confirm deletion", "").upper() != 'DELETE':
+            self.print_colored("Deletion cancelled - confirmation not received.", 'yellow')
+            return
+        
+        playbook_path = self.config_dir / 'playbooks/delete_edge_node.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"Delete edge node playbook not found: {playbook_path}", 'red')
+            input("Press Enter to continue...")
+            return
+        
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+        
+        self.print_colored("\nStarting edge node deletion...", 'cyan')
+        success, _ = self.run_command(cmd, show_output=True)
+        
+        if success:
+            self.print_colored("\nEdge node deleted successfully!", 'green')
+        else:
+            self.print_colored("\nEdge node deletion encountered issues. Please check the output above.", 'red')
+        
+        input("Press Enter to continue...")
+
+    def _deploy_setup(self, playbook: str, title: str, description: str, extra_vars: str = "") -> None:
+        """Common deployment logic"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+        
+        self.print_header(title)
+        self.print_colored(f"This will deploy: {description}", 'yellow')
+        
+        if self.get_input("\nContinue with deployment? (y/n)", "y").lower() != 'y':
+            self.print_colored("Deployment cancelled.", 'yellow')
+            return
+        
+        playbook_path = self.config_dir / f'playbooks/{playbook}'
+        if not playbook_path.exists():
+            self.print_colored(f"Playbook not found: {playbook_path}", 'red')
+            input("Press Enter to continue...")
+            return
+        
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+        
+        if extra_vars:
+            cmd += f' --extra-vars "{extra_vars}"'
+        
+        self.print_colored(f"\nStarting {title.lower()}...", 'cyan')
+        success, _ = self.run_command(cmd, show_output=True)
+        
+        if success:
+            self.print_colored(f"\n{title} completed successfully!", 'green')
+        else:
+            self.print_colored(f"\n{title} encountered issues. Please check the output above.", 'red')
+        
+        input("Press Enter to continue...")
+
+    def get_node_info(self) -> None:
+        """Get detailed node information"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+        
+        self.print_header("Node Information")
+        
+        playbook_path = self.config_dir / 'playbooks/get_node_info.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"Node info playbook not found: {playbook_path}", 'red')
+            input("Press Enter to continue...")
+            return
+        
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+        
+        success, _ = self.run_command(cmd, show_output=True)
+        
+        if success:
+            self.print_colored("\nNode information retrieved successfully!", 'green')
+        else:
+            self.print_colored("\nFailed to retrieve node information.", 'red')
+        
+        input("Press Enter to continue...")
+
+    def get_node_addresses(self) -> None:
+        """Get and display node addresses in a formatted table"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+        
+        self.print_header("Node Addresses")
+        
+        # This would need the parse_node_info functionality from the original script
+        # For now, we'll show the configured addresses
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        
+        if not hosts:
+            self.print_colored("No nodes configured!", 'red')
+        else:
+            self.print_colored(f"{'Host':<20} {'IP Address':<15} {'Username':<15}", 'cyan')
+            self.print_colored("-" * 50, 'cyan')
+            for name, config in hosts.items():
+                ip = config.get('ansible_host', 'Unknown')
+                user = config.get('ansible_user', 'Unknown')
+                self.print_colored(f"{name:<20} {ip:<15} {user:<15}")
+        
+        input("\nPress Enter to continue...")
+
+    def export_addresses_csv(self) -> None:
+        """Export node addresses to CSV"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+        
+        self.print_header("Export Addresses to CSV")
+        
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        
+        if not hosts:
+            self.print_colored("No nodes configured!", 'red')
+            input("Press Enter to continue...")
+            return
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        csv_file = f"node_addresses_{timestamp}.csv"
+        
+        try:
+            with open(csv_file, 'w') as f:
+                f.write("Host,IP_Address,Username\n")
+                for name, config in hosts.items():
+                    ip = config.get('ansible_host', 'Unknown')
+                    user = config.get('ansible_user', 'Unknown')
+                    f.write(f"{name},{ip},{user}\n")
+            
+            self.print_colored(f"Addresses exported to: {csv_file}", 'green')
+        except Exception as e:
+            self.print_colored(f"Error exporting to CSV: {e}", 'red')
+        
+        input("Press Enter to continue...")
+
+    def change_network_environment(self) -> None:
+        """Change the network environment"""
+        self.print_header("Change Network Environment")
+        
+        current_env = self.get_mnl_app_env()
+        if current_env:
+            self.print_colored(f"Current environment: {current_env}", 'yellow')
+        
+        env = self._select_network_environment()
+        self.set_mnl_app_env(env)
+        self.print_colored(f"Network environment changed to: {env}", 'green')
+        
+        input("Press Enter to continue...")
+
+    def run(self) -> None:
+        """Main program loop"""
+        # Check prerequisites
+        if not self.check_ansible_installation():
+            self.print_colored("Please ensure Ansible and the required collection are installed.", 'red')
+            sys.exit(1)
+        
+        while True:
+            try:
+                self.show_main_menu()
+                choice = self.get_input("Select option (0-10)")
+                
+                if choice == '0':
+                    self.print_colored("Thank you for using Ratio1 Multi-Node Launcher Setup!", 'green')
+                    break
+                elif choice == '1':
+                    self.configure_nodes_menu()
+                elif choice == '2':
+                    self.view_configuration()
+                elif choice == '3':
+                    self.test_connectivity()
+                elif choice == '4':
+                    self.deploy_full()
+                elif choice == '5':
+                    self.deploy_docker_only()
+                elif choice == '6':
+                    self.delete_edge_node()
+                elif choice == '7':
+                    self.get_node_info()
+                elif choice == '8':
+                    self.get_node_addresses()
+                elif choice == '9':
+                    self.export_addresses_csv()
+                elif choice == '10':
+                    self.change_network_environment()
+                else:
+                    self.print_colored("Invalid option. Please try again.", 'red')
+                    input("Press Enter to continue...")
+                    
+            except KeyboardInterrupt:
+                self.print_colored("\n\nOperation cancelled by user.", 'yellow')
+                break
+            except Exception as e:
+                self.print_colored(f"An error occurred: {e}", 'red')
+                input("Press Enter to continue...")
+
+
+if __name__ == "__main__":
+    r1setup = R1Setup()
+    r1setup.run() 

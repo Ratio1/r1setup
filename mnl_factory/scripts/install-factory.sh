@@ -32,19 +32,37 @@ mkdir -p "$SETUP_SCRIPTS_DIR"
 cd "$SETUP_SCRIPTS_DIR"
 
 # Create temporary directory
-TEMP_DIR=$(mkdir mnl_setup)
+TEMP_DIR=$(mktemp -d -p "$SETUP_SCRIPTS_DIR" r1_setup.XXXXXX)
 cd "$TEMP_DIR"
 
 # Download setup scripts
 print_message "Downloading setup scripts to $SETUP_SCRIPTS_DIR..." "$YELLOW"
 curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/1_prerequisites.sh
 curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/2_ansible_setup.sh
-curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/3_configure.py
-curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/4_run_setup.sh
+curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/r1setup
+curl -sO https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/r1setup_wrapper.sh
 print_message "Setup scripts downloaded." "$GREEN"
 
-# Make scripts executable
-chmod +x 1_prerequisites.sh 2_ansible_setup.sh 3_configure.py 4_run_setup.sh
+# Copy r1setup to the persistent directory
+cp r1setup "$SETUP_SCRIPTS_DIR/"
+chmod +x "$SETUP_SCRIPTS_DIR/r1setup"
+
+# Make other scripts executable
+chmod +x 1_prerequisites.sh 2_ansible_setup.sh r1setup_wrapper.sh
+
+# Install system-wide r1setup command
+print_message "Installing system-wide r1setup command..." "$YELLOW"
+# Copy wrapper to persistent directory and make it executable
+cp r1setup_wrapper.sh "$SETUP_SCRIPTS_DIR/"
+chmod +x "$SETUP_SCRIPTS_DIR/r1setup_wrapper.sh"
+
+if sudo ln -sf "$SETUP_SCRIPTS_DIR/r1setup_wrapper.sh" /usr/local/bin/r1setup; then
+    print_message "✓ r1setup command installed system-wide (via symbolic link)" "$GREEN"
+    print_message "  You can now use 'r1setup' from anywhere in the system" "$GREEN"
+else
+    print_message "⚠ Failed to install system-wide command. You may need to run this script with sudo privileges." "$YELLOW"
+    print_message "  You can still use the script directly from: $SETUP_SCRIPTS_DIR/r1setup" "$YELLOW"
+fi
 
 print_message "\nSetup process:" "$GREEN"
 print_message "1. Installing prerequisites..." "$YELLOW"
@@ -53,8 +71,15 @@ sudo ./1_prerequisites.sh
 print_message "2. Ansible setup..." "$YELLOW"
 ./2_ansible_setup.sh
 
-print_message "\n3. Configuring nodes..." "$YELLOW"
-python3 3_configure.py
+print_message "\n3. Setup complete! You can now use the unified r1setup command:" "$GREEN"
+print_message "   • Run 'r1setup' from anywhere to configure nodes and deploy" "$GREEN"
+print_message "   • Or use: $SETUP_SCRIPTS_DIR/r1setup" "$GREEN"
+print_message "\nNote: The old individual scripts (3_configure.py, 4_run_setup.sh) have been" "$YELLOW"
+print_message "replaced by the unified r1setup command with a cleaner interface." "$YELLOW"
 
-print_message "\n4. Running setup..." "$YELLOW"
-./4_run_setup.sh
+# Cleanup temporary directory
+cd "$SETUP_SCRIPTS_DIR"
+rm -rf "$TEMP_DIR"
+
+print_message "\n🎉 Installation complete!" "$GREEN"
+print_message "Run 'r1setup' to get started with node configuration and deployment." "$GREEN"
