@@ -312,8 +312,12 @@ class R1Setup:
 
     def get_secure_input(self, prompt: str) -> str:
         """Get secure password input"""
-        self.print_colored(f"{prompt}: ", 'blue', end='')
-        return getpass.getpass("")
+        try:
+            # Use getpass with the full prompt to avoid display issues
+            return getpass.getpass(f"{prompt}: ")
+        except (EOFError, KeyboardInterrupt):
+            self.print_colored("\nOperation cancelled by user.", 'yellow')
+            sys.exit(0)
 
     def validate_ip(self, ip: str) -> bool:
         """Validate IP address format"""
@@ -817,52 +821,118 @@ class R1Setup:
             else:
                 self.print_colored("Invalid choice. Please enter 1, 2, or 3", 'red')
 
-    def _configure_single_node(self) -> Dict[str, Any]:
+    def _configure_single_node(self, existing_config: Dict[str, Any] = None) -> Dict[str, Any]:
         """Configure a single node"""
         while True:
             host = {}
             
+            # Get existing values for defaults
+            existing_ip = existing_config.get('ansible_host', '') if existing_config else ''
+            existing_user = existing_config.get('ansible_user', '') if existing_config else ''
+            existing_auth_type = 'password' if existing_config and 'ansible_ssh_pass' in existing_config else 'key' if existing_config else None
+            
+            # Show current values if updating
+            if existing_config:
+                self.print_colored("\nCurrent configuration:", 'yellow')
+                self.print_colored(f"IP: {existing_ip}")
+                self.print_colored(f"User: {existing_user}")
+                self.print_colored(f"Auth: {'Password' if existing_auth_type == 'password' else 'SSH Key'}")
+                self.print_colored("\nPress Enter to keep current values, or enter new values:", 'cyan')
+            
             # Get IP address
             while True:
-                ip = self.get_input("Enter IP address", required=True)
+                ip_prompt = f"Enter IP address"
+                if existing_ip:
+                    ip_prompt += f" (current: {existing_ip})"
+                ip = self.get_input(ip_prompt, existing_ip)
                 if self.validate_ip(ip):
                     host['ansible_host'] = ip
                     break
                 self.print_colored("Invalid IP address format", 'red')
             
             # Get username
-            host['ansible_user'] = self.get_input("Enter SSH username", required=True)
+            user_prompt = f"Enter SSH username"
+            if existing_user:
+                user_prompt += f" (current: {existing_user})"
+            username = self.get_input(user_prompt, existing_user)
+            if not username.strip() and not existing_user:
+                self.print_colored("Username cannot be empty for new nodes", 'red')
+                continue
+            host['ansible_user'] = username or existing_user
             
             # Authentication method
             self.print_colored("\nAuthentication method:")
             self.print_colored("  1) Password")
             self.print_colored("  2) SSH Key")
             
+            # Set default based on existing config
+            default_auth = "1" if existing_auth_type == 'password' else "2"
+            auth_prompt = "Select authentication (1/2)"
+            if existing_auth_type:
+                auth_prompt += f" (current: {existing_auth_type})"
+            
             while True:
-                auth_choice = self.get_input("Select authentication (1/2)", "2")
+                auth_choice = self.get_input(auth_prompt, default_auth)
                 if auth_choice in ['1', '2']:
                     break
                 self.print_colored("Invalid choice. Please enter 1 or 2", 'red')
             
             if auth_choice == '1':
                 # Password authentication
-                ssh_pass = self.get_secure_input("Enter SSH password")
-                host['ansible_ssh_pass'] = ssh_pass
-                sudo_pass = self.get_secure_input("Enter sudo password (press Enter if same as SSH)")
-                host['ansible_become_password'] = sudo_pass or ssh_pass
+                if existing_config and 'ansible_ssh_pass' in existing_config:
+                    self.print_colored("\nPassword authentication - Press Enter to keep existing passwords", 'cyan')
+                    ssh_pass = self.get_secure_input("Enter SSH password (Enter to keep current)")
+                    if not ssh_pass.strip():
+                        # Keep existing password
+                        host['ansible_ssh_pass'] = existing_config['ansible_ssh_pass']
+                        host['ansible_become_password'] = existing_config.get('ansible_become_password', existing_config['ansible_ssh_pass'])
+                    else:
+                        # New password provided
+                        host['ansible_ssh_pass'] = ssh_pass
+                        self.print_colored("\nFor sudo password:", 'yellow')
+                        self.print_colored("  - Enter a different password if sudo requires it", 'yellow')
+                        self.print_colored("  - Press Enter to use the same SSH password", 'yellow')
+                        sudo_pass = self.get_secure_input("Enter sudo password")
+                        host['ansible_become_password'] = sudo_pass.strip() or ssh_pass
+                else:
+                    # New password authentication
+                    ssh_pass = self.get_secure_input("Enter SSH password")
+                    if not ssh_pass.strip():
+                        self.print_colored("SSH password cannot be empty!", 'red')
+                        continue
+                    host['ansible_ssh_pass'] = ssh_pass
+                    
+                    self.print_colored("\nFor sudo password:", 'yellow')
+                    self.print_colored("  - Enter a different password if sudo requires it", 'yellow')
+                    self.print_colored("  - Press Enter to use the same SSH password", 'yellow')
+                    sudo_pass = self.get_secure_input("Enter sudo password")
+                    host['ansible_become_password'] = sudo_pass.strip() or ssh_pass
             else:
                 # Key authentication
+                existing_key = existing_config.get('ansible_ssh_private_key_file', '~/.ssh/id_rsa') if existing_config else '~/.ssh/id_rsa'
+                
                 while True:
-                    key_path = self.get_input("Enter path to SSH private key", "~/.ssh/id_rsa")
+                    key_prompt = "Enter path to SSH private key"
+                    if existing_config and 'ansible_ssh_private_key_file' in existing_config:
+                        key_prompt += f" (current: {existing_key})"
+                    
+                    key_path = self.get_input(key_prompt, existing_key)
                     expanded_path = os.path.expanduser(key_path)
                     if os.path.exists(expanded_path):
                         host['ansible_ssh_private_key_file'] = key_path
                         break
                     self.print_colored(f"Key file not found: {expanded_path}", 'red')
                     if self.get_input("Try another path? (y/n)", "y").lower() != 'y':
-                        break
+                        # If updating and user doesn't want to try another path, keep existing
+                        if existing_config and 'ansible_ssh_private_key_file' in existing_config:
+                            host['ansible_ssh_private_key_file'] = existing_config['ansible_ssh_private_key_file']
+                            self.print_colored("Keeping existing SSH key configuration", 'yellow')
+                            break
+                        else:
+                            break
             
-            host['ansible_ssh_common_args'] = '-o StrictHostKeyChecking=no'
+            # Preserve or set SSH common args
+            host['ansible_ssh_common_args'] = existing_config.get('ansible_ssh_common_args', '-o StrictHostKeyChecking=no') if existing_config else '-o StrictHostKeyChecking=no'
             
             # Show summary and confirm
             self.print_colored("\nConfiguration Summary:", 'yellow')
@@ -913,7 +983,9 @@ class R1Setup:
                 self.print_colored("Please enter a number", 'red')
         
         self.print_colored(f"Updating node: {name}", 'yellow')
-        hosts[name] = self._configure_single_node()
+        # Pass existing configuration to preserve values
+        existing_config = hosts[name].copy()
+        hosts[name] = self._configure_single_node(existing_config)
         self._save_configuration()
         self.print_colored(f"Node '{name}' updated successfully!", 'green')
 
