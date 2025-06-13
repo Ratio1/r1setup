@@ -1,0 +1,101 @@
+---
+- name: Delete edge node deployment
+  hosts: gpu_nodes
+  become: true
+  vars:
+    ansible_roles_path: "{{ playbook_dir }}/../roles"
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+    - ../group_vars/mnl.yml
+    - ../group_vars/variables.yml
+  tasks:
+    - name: Display cleanup warning
+      debug:
+        msg: |
+          WARNING: This will completely remove the edge node deployment including:
+          - Systemd service ({{ edge_node_service_name }})
+          - Docker container ({{ mnl_docker_container_name }})
+          - Docker images ({{ mnl_docker_image_url }})
+          - Application data directory ({{ mnl_base_folder }})
+          - Created command scripts (/usr/local/bin/get_logs, /usr/local/bin/restart_service, /usr/local/bin/get_node_info)
+          - Docker daemon configuration (/etc/docker/daemon.json)
+
+    - name: Stop the edge node service
+      ansible.builtin.systemd:
+        name: "{{ edge_node_service_name }}"
+        state: stopped
+      ignore_errors: true
+
+    - name: Disable the edge node service
+      ansible.builtin.systemd:
+        name: "{{ edge_node_service_name }}"
+        enabled: false
+      ignore_errors: true
+
+    - name: Remove the systemd service file
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ edge_node_service_name }}.service"
+        state: absent
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Stop the Docker container
+      docker_container:
+        name: "{{ mnl_docker_container_name }}"
+        state: absent
+      ignore_errors: true
+
+    - name: Remove Docker image
+      docker_image:
+        name: "{{ mnl_docker_image_url }}"
+        state: absent
+        force_absent: true
+      ignore_errors: true
+
+    - name: Remove application data directory
+      ansible.builtin.file:
+        path: "{{ mnl_base_folder }}"
+        state: absent
+      ignore_errors: true
+
+    - name: Remove created command scripts
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/usr/local/bin/get_logs"
+        - "/usr/local/bin/restart_service"
+        - "/usr/local/bin/get_node_info"
+      ignore_errors: true
+
+    - name: Check if Docker daemon.json exists and was created by our setup
+      ansible.builtin.stat:
+        path: /etc/docker/daemon.json
+      register: docker_daemon_config
+
+    - name: Remove Docker daemon configuration if it exists
+      ansible.builtin.file:
+        path: /etc/docker/daemon.json
+        state: absent
+      when: docker_daemon_config.stat.exists
+      ignore_errors: true
+
+    - name: Restart Docker service to apply daemon configuration changes
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
+      when: docker_daemon_config.stat.exists
+      ignore_errors: true
+
+    - name: Remove any remaining container exit status files
+      ansible.builtin.file:
+        path: /tmp/ee-node.exit
+        state: absent
+      ignore_errors: true
+
+    - name: Display completion message
+      debug:
+        msg: "Edge node cleanup completed successfully on {{ inventory_hostname }}" 

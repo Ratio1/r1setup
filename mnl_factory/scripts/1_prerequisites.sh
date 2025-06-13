@@ -124,7 +124,7 @@ if [[ "$OS_TYPE" == "linux" ]]; then
 fi
 
 # Define Venv Path (relative to $SETUP_DIR where this script runs)
-VENV_PATH_IN_SETUP_DIR="mnl_venv"
+VENV_PATH_IN_SETUP_DIR=".r1_venv"
 
 print_message "Creating Python virtual environment at ./$VENV_PATH_IN_SETUP_DIR..." "$YELLOW"
 python3 -m venv "./$VENV_PATH_IN_SETUP_DIR"
