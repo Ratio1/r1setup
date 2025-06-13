@@ -1191,9 +1191,43 @@ class R1Setup:
             return
         
         self.print_header(title)
-        self.print_colored(f"This will deploy: {description}", 'yellow')
         
-        if self.get_input("\nContinue with deployment? (y/n)", "y").lower() != 'y':
+        # Load configuration to show deployment details
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        env = self.get_mnl_app_env()
+        
+        # Show deployment details
+        self.print_colored(f"📋 Deployment Details:", 'cyan', bold=True)
+        self.print_colored(f"   • Action: {description}", 'white')
+        self.print_colored(f"   • Network: {env if env else 'Not set'}", 'green' if env else 'red')
+        self.print_colored(f"   • Target Nodes: {len(hosts)}", 'white')
+        
+        self.print_colored(f"\n🖥️  Target Machines:", 'cyan', bold=True)
+        for name, config in hosts.items():
+            ip = config.get('ansible_host', 'Unknown')
+            user = config.get('ansible_user', 'Unknown')
+            self.print_colored(f"   • {name}: {user}@{ip}", 'white')
+        
+        self.print_colored(f"\n⚠️  This will:", 'yellow', bold=True)
+        if "Docker + NVIDIA" in description:
+            self.print_colored("   • Install Docker and Docker Compose", 'yellow')
+            self.print_colored("   • Install NVIDIA drivers and CUDA toolkit", 'yellow')
+            self.print_colored("   • Configure GPU access for containers", 'yellow')
+            self.print_colored("   • Deploy and start the edge node service", 'yellow')
+        elif "Docker only" in description:
+            self.print_colored("   • Install Docker and Docker Compose", 'yellow')
+            self.print_colored("   • Deploy and start the edge node service (CPU mode)", 'yellow')
+        else:
+            self.print_colored(f"   • {description}", 'yellow')
+        
+        if not env:
+            self.print_colored("\n⚠️  WARNING: Network environment is not set!", 'red', bold=True)
+            self.print_colored("   Please set the network environment before deploying.", 'red')
+            input("Press Enter to continue...")
+            return
+        
+        if self.get_input(f"\n🚀 Continue with deployment to {len(hosts)} node(s) on {env}? (y/n)", "y").lower() != 'y':
             self.print_colored("Deployment cancelled.", 'yellow')
             return
         
