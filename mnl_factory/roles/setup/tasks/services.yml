@@ -141,7 +141,7 @@
 ## Additional file creating tasks: create show and restart scripts
 - name: Create show.sh script
   ansible.builtin.template:
-    src: show.sh.j2
+    src: legacy/show.sh.j2
     dest: "~/show.sh"
     mode: '0755'
     force: true
