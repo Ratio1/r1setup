@@ -1,0 +1,91 @@
+name: Release CLI Files
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Trigger on version tags like v1.1.14
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.get_version.outputs.VERSION }}
+          release_name: Release ${{ steps.get_version.outputs.VERSION }}
+          draft: false
+          prerelease: false
+
+      - name: Create complete repository archive
+        run: |
+          echo "📦 Creating complete repository archive..."
+          # Create a clean archive of the entire repository
+          git archive --format=tar.gz --prefix=multi-node-launcher-${{ steps.get_version.outputs.VERSION }}/ HEAD > multi-node-launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          echo "✅ Created repository archive: multi-node-launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz"
+          
+          # Also create individual CLI files for direct download
+          mkdir -p cli-files
+          cp mnl_factory/scripts/r1setup cli-files/
+          cp mnl_factory/scripts/ver.py cli-files/
+          cp mnl_factory/scripts/update.py cli-files/
+
+      - name: Upload Complete Repository Archive
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./multi-node-launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          asset_name: multi-node-launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload CLI Scripts (for direct update)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./cli-files/r1setup
+          asset_name: r1setup
+          asset_content_type: application/octet-stream
+
+      - name: Upload Version Script (for direct update)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./cli-files/ver.py
+          asset_name: ver.py
+          asset_content_type: text/x-python
+
+      - name: Upload Update Script (for direct update)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./cli-files/update.py
+          asset_name: update.py
+          asset_content_type: text/x-python
+
+      - name: Upload Packaged Collection
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./mnl_factory/ratio1-multi_node_launcher-*.tar.gz
+          asset_name: ratio1-multi_node_launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          asset_content_type: application/gzip 

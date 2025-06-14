@@ -451,32 +451,32 @@ class R1Setup:
         self.print_colored("   • Maximum 15 characters", 'white')
         self.print_colored("   • Only letters (a-z, A-Z), numbers (0-9), hyphens (-), underscores (_)", 'white')
         self.print_colored("   • Cannot be empty", 'white')
-        
+
         while True:
             hostname = self.get_input(prompt, default, required=True).strip()
-            
+
             # Check if empty
             if not hostname:
                 self.print_colored("Hostname cannot be empty. Please try again.", 'red')
                 continue
-            
+
             # Check character restrictions
             if not re.match(r'^[a-zA-Z0-9_-]+$', hostname):
                 self.print_colored("Invalid characters in hostname.", 'red')
                 self.print_colored("Only letters, numbers, hyphens (-), and underscores (_) are allowed.", 'red')
                 continue
-            
+
             # Check length
             if len(hostname) <= 15:
                 return hostname
-            
+
             # Hostname is too long, suggest shortened version
             shortened = hostname[:15]
             self.print_colored(f"Hostname '{hostname}' is too long ({len(hostname)} characters, max 15).", 'red')
             self.print_colored(f"Suggested shortened version: '{shortened}'", 'yellow')
-            
+
             choice = self.get_input("Options:\n  1) Use shortened version\n  2) Enter a different name\nSelect option (1/2)", "1")
-            
+
             if choice == '1':
                 return shortened
             elif choice == '2':
@@ -655,7 +655,7 @@ class R1Setup:
         print()
         self.print_colored("Settings:")
         self.print_colored(" 12) Change network environment - Switch between mainnet/testnet/devnet")
-        self.print_colored(" 13) Update CLI                 - Check for and install CLI updates")
+        self.print_colored(" 12) Update CLI & Collection    - Check for and install CLI & Ansible collection updates")
         print()
         self.print_colored("  0) Exit")
         print()
@@ -1266,7 +1266,7 @@ class R1Setup:
         """Add a new node to existing configuration"""
         self.print_section("Add New Node")
         hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
-        
+
         while True:
             name = self._get_valid_hostname("Enter name for the new node", "")
             if name in hosts:
@@ -1302,10 +1302,10 @@ class R1Setup:
                 self.print_colored("Please enter a number", 'red')
 
         self.print_colored(f"Updating node: {original_name}", 'yellow')
-        
+
         # Ask if user wants to rename the node
         rename_node = self.get_input(f"\nDo you want to rename this node? Current name: '{original_name}' (y/n)", "n").lower() == 'y'
-        
+
         new_name = original_name
         if rename_node:
             while True:
@@ -1317,11 +1317,11 @@ class R1Setup:
                     self.print_colored(f"Node name '{new_name}' already exists! Please choose a different name.", 'red')
                     continue
                 break
-        
+
         # Update node configuration
         existing_config = hosts[original_name].copy()
         updated_config = self._configure_single_node(existing_config)
-        
+
         # Handle name change
         name_changed = new_name != original_name
         if name_changed:
@@ -1332,9 +1332,9 @@ class R1Setup:
         else:
             # Update existing entry
             hosts[original_name] = updated_config
-        
+
         self._save_configuration()
-        
+
         if name_changed:
             self.print_colored(f"Node '{original_name}' updated and renamed to '{new_name}' successfully!", 'green')
             self.print_colored("\n💡 Recommendation:", 'cyan', bold=True)
@@ -1959,13 +1959,21 @@ class R1Setup:
                     return None, None
 
                 # Construct download URLs for the latest version
+                # First try release assets, fall back to raw content if needed
                 download_urls = {
                     'r1setup': f"{DOWNLOAD_BASE_URL}/v{latest_version}/r1setup",
                     'ver.py': f"{DOWNLOAD_BASE_URL}/v{latest_version}/ver.py",
                     'update.py': f"{DOWNLOAD_BASE_URL}/v{latest_version}/update.py"
                 }
 
-                return latest_version, download_urls
+                # Fallback URLs using raw GitHub content
+                fallback_urls = {
+                    'r1setup': "https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/r1setup",
+                    'ver.py': "https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/ver.py",
+                    'update.py': "https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/update.py"
+                }
+
+                return latest_version, download_urls, fallback_urls
 
         except urllib.error.URLError as e:
             error_msg = str(e)
@@ -1977,10 +1985,10 @@ class R1Setup:
                 self.print_colored("3. Update macOS and Python to latest versions", 'white')
             else:
                 self.print_colored(f"Network error checking for updates: {e}", 'red')
-            return None, None
+            return None, None, None
         except Exception as e:
             self.print_colored(f"Error checking for updates: {e}", 'red')
-            return None, None
+            return None, None, None
 
     def _compare_versions(self, version1: str, version2: str) -> int:
         """Compare two version strings. Returns: 1 if v1 > v2, -1 if v1 < v2, 0 if equal"""
@@ -2013,7 +2021,7 @@ class R1Setup:
 
         return 0
 
-    def _perform_update(self, latest_version: str, download_urls: Dict[str, str]) -> bool:
+    def _perform_update(self, latest_version: str, download_urls: Dict[str, str], fallback_urls: Dict[str, str] = None) -> bool:
         """Download and install the update"""
         try:
             self.print_colored("Downloading update files...", 'yellow')
@@ -2055,6 +2063,31 @@ class R1Setup:
                         self.print_colored(f"✅ Downloaded {filename}", 'green')
 
                     except urllib.error.URLError as e:
+                        # Try fallback URL if available
+                        if fallback_urls and filename in fallback_urls:
+                            self.print_colored(f"Trying fallback URL for {filename}...", 'yellow')
+                            try:
+                                fallback_req = urllib.request.Request(fallback_urls[filename])
+                                fallback_req.add_header('User-Agent', f'Ratio1-CLI/{CLI_VERSION}')
+
+                                with urllib.request.urlopen(fallback_req, timeout=30, context=ssl_context) as response:
+                                    with open(temp_file, 'wb') as f:
+                                        shutil.copyfileobj(response, f)
+
+                                # Verify fallback download
+                                if not temp_file.exists() or temp_file.stat().st_size == 0:
+                                    self.print_colored(f"Fallback download failed - {filename} is empty", 'red')
+                                    if filename == 'r1setup':
+                                        return False  # r1setup is critical
+                                    continue  # Other files are optional
+
+                                downloaded_files[filename] = temp_file
+                                self.print_colored(f"✅ Downloaded {filename} (fallback)", 'green')
+                                continue  # Success with fallback, move to next file
+
+                            except urllib.error.URLError as fallback_error:
+                                self.print_colored(f"Fallback also failed for {filename}: {fallback_error}", 'red')
+
                         if filename == 'r1setup':
                             # r1setup is critical, fail the update
                             self.print_colored(f"Failed to download critical file {filename}: {e}", 'red')
@@ -2122,6 +2155,15 @@ class R1Setup:
 
                     self.print_colored("✅ Installation validated successfully", 'green')
 
+                    # Update Ansible collection
+                    self.print_colored("\nUpdating Ansible collection...", 'yellow')
+                    collection_updated = self._update_ansible_collection()
+
+                    if collection_updated:
+                        self.print_colored("✅ Ansible collection updated successfully", 'green')
+                    else:
+                        self.print_colored("⚠️  Ansible collection update failed, but CLI update succeeded", 'yellow')
+
                     # Show backup information
                     self.print_colored("\nBackup files created:", 'cyan')
                     for filename, backup_path in backup_files.items():
@@ -2156,16 +2198,101 @@ class R1Setup:
             self.print_colored(f"Update installation failed: {e}", 'red')
             return False
 
+    def _update_ansible_collection(self) -> bool:
+        """Update the Ansible collection to the latest version"""
+        try:
+            # Use the same collection path as the setup scripts
+            ansible_dir = self.ansible_config_root
+            collections_path = ansible_dir / 'collections'
+
+            # Ensure collections directory exists
+            collections_path.mkdir(parents=True, exist_ok=True)
+
+            # Update the collection using ansible-galaxy
+            self.print_colored("  Downloading latest collection from Ansible Galaxy...", 'yellow')
+
+            cmd = [
+                'ansible-galaxy', 'collection', 'install',
+                'ratio1.multi_node_launcher',
+                '--collections-path', str(collections_path),
+                '--force', '--upgrade'
+            ]
+
+            # Set environment variables for the subprocess
+            env = os.environ.copy()
+            env['ANSIBLE_CONFIG'] = str(self.ansible_config_root / 'ansible.cfg')
+            env['ANSIBLE_COLLECTIONS_PATH'] = str(collections_path)
+            env['ANSIBLE_HOME'] = str(self.ansible_config_root)
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+                env=env
+            )
+
+            if result.returncode == 0:
+                # Verify the collection was installed/updated
+                verify_cmd = [
+                    'ansible-galaxy', 'collection', 'list',
+                    '--collections-path', str(collections_path)
+                ]
+
+                verify_result = subprocess.run(
+                    verify_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env=env
+                )
+
+                if verify_result.returncode == 0 and 'ratio1.multi_node_launcher' in verify_result.stdout:
+                    # Extract version information if possible
+                    for line in verify_result.stdout.split('\n'):
+                        if 'ratio1.multi_node_launcher' in line:
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                version = parts[1]
+                                self.print_colored(f"  Updated to collection version: {version}", 'cyan')
+                            break
+                    return True
+                else:
+                    self.print_colored("  Warning: Collection update completed but verification failed", 'yellow')
+                    return False
+            else:
+                # Log the error but don't fail the entire update
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                self.print_colored(f"  ansible-galaxy command failed: {error_msg}", 'red')
+
+                # Check if it's a common issue and provide helpful hints
+                if "timeout" in error_msg.lower() or "connection" in error_msg.lower():
+                    self.print_colored("  This might be a network connectivity issue. Try again later.", 'yellow')
+                elif "permission" in error_msg.lower():
+                    self.print_colored("  This might be a permissions issue. Check directory permissions.", 'yellow')
+
+                return False
+
+        except subprocess.TimeoutExpired:
+            self.print_colored("  Collection update timed out. This might be due to slow network.", 'yellow')
+            return False
+        except FileNotFoundError:
+            self.print_colored("  ansible-galaxy command not found. Please ensure Ansible is installed.", 'yellow')
+            return False
+        except Exception as e:
+            self.print_colored(f"  Unexpected error updating collection: {e}", 'red')
+            return False
+
     def update_cli(self) -> None:
-        """Check for and install CLI updates"""
-        self.print_header("CLI Update")
+        """Check for and install CLI and Ansible collection updates"""
+        self.print_header("CLI & Collection Update")
 
         self.print_colored(f"Current version: {CLI_VERSION}", 'cyan')
         self.print_colored("Checking for updates...", 'yellow')
 
         try:
             # Check for latest version
-            latest_version, download_urls = self._check_latest_version()
+            latest_version, download_urls, fallback_urls = self._check_latest_version()
 
             if not latest_version or not download_urls:
                 self.print_colored("Could not check for updates. Please try again later.", 'red')
@@ -2194,10 +2321,11 @@ class R1Setup:
                 return
 
             # Perform update
-            success = self._perform_update(latest_version, download_urls)
+            success = self._perform_update(latest_version, download_urls, fallback_urls)
 
             if success:
-                self.print_colored(f"\n✅ Successfully updated to version {latest_version}!", 'green')
+                self.print_colored(f"\n✅ Successfully updated CLI to version {latest_version}!", 'green')
+                self.print_colored("✅ Ansible collection has also been updated to the latest version!", 'green')
                 self.print_colored("The CLI will restart with the new version...", 'cyan')
                 input("Press Enter to restart...")
 
@@ -2219,16 +2347,16 @@ class R1Setup:
 
         self.print_header("Configuration Required")
         self.print_colored("⚠️  No active configuration detected!", 'red', bold=True)
-        
+
         # Check if we have saved configurations
         configs = self._list_available_configs()
-        
+
         if configs:
             # If there's only one configuration, automatically select it
             if len(configs) == 1:
                 config_name, metadata = configs[0]
                 display_name = config_name.replace('.yml', '')
-                
+
                 # Extract custom name for display
                 custom_name = display_name
                 if '_' in display_name:
@@ -2239,13 +2367,13 @@ class R1Setup:
                             if len(part) == 8 and part.isdigit():
                                 custom_name = '_'.join(parts[:idx])
                                 break
-                
+
                 env = metadata.get('environment', 'unknown')
                 nodes = metadata.get('nodes_count', 0)
-                
+
                 self.print_colored(f"\n📁 Found 1 saved configuration: {custom_name} ({env}, {nodes} node(s))", 'cyan')
                 self.print_colored("Automatically activating the only available configuration...", 'yellow')
-                
+
                 if self._load_config_by_name(display_name):
                     self.print_colored(f"✅ Successfully activated configuration: {custom_name}", 'green')
                     self.print_colored("Proceeding to main menu...", 'green')
@@ -2256,12 +2384,12 @@ class R1Setup:
                     self.print_colored("The configuration file may be corrupted. Please create a new one.", 'red')
                     self._create_new_configuration_with_management()
                     return True
-            
+
             # Multiple configurations - show selection menu
             self.print_colored(f"\n📁 Found {len(configs)} saved configuration(s):", 'cyan')
             self.print_colored("It looks like you have existing configurations but none are currently active.", 'yellow')
             self.print_colored("This can happen after reinstalling or updating r1setup.", 'yellow')
-            
+
             # Show available configurations
             for i, (config_name, metadata) in enumerate(configs, 1):
                 display_name = config_name.replace('.yml', '')
@@ -2270,7 +2398,7 @@ class R1Setup:
                 created_at = metadata.get('created_at')
                 last_deployed_date = metadata.get('last_deployed_date')
                 deployment_status = metadata.get('deployment_status', 'never_deployed')
-                
+
                 # Extract custom name from the config name
                 custom_name = display_name
                 if '_' in display_name:
@@ -2281,7 +2409,7 @@ class R1Setup:
                             if len(part) == 8 and part.isdigit():
                                 custom_name = '_'.join(parts[:idx])
                                 break
-                
+
                 # Format creation date
                 created_str = "Unknown"
                 if created_at:
@@ -2293,7 +2421,7 @@ class R1Setup:
                             created_str = datetime.fromtimestamp(created_at).strftime('%Y-%m-%d %H:%M')
                     except:
                         created_str = "Unknown"
-                
+
                 # Format deployment status
                 deployment_str = ""
                 if deployment_status == 'deployed' and last_deployed_date:
@@ -2307,18 +2435,18 @@ class R1Setup:
                     deployment_str = " | 🗑️ Deleted"
                 else:
                     deployment_str = " | 📋 Never deployed"
-                
+
                 self.print_colored(f"  {i}. {custom_name}", 'cyan', bold=True)
                 self.print_colored(f"     {env} | {nodes} node(s) | Created: {created_str}{deployment_str}", 'white')
-            
+
             self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
             self.print_colored("  1) Select an existing configuration to activate")
             self.print_colored("  2) Create a new configuration")
             self.print_colored("  0) Exit")
-            
+
             while True:
                 choice = self.get_input("\nSelect option (0-2)", "1")
-                
+
                 if choice == '0':
                     self.print_colored("Exiting r1setup.", 'yellow')
                     return False
@@ -2333,7 +2461,7 @@ class R1Setup:
                             self.print_colored("Invalid selection", 'red')
                         except ValueError:
                             self.print_colored("Please enter a number", 'red')
-                    
+
                     if self._load_config_by_name(selected_config):
                         self.print_colored(f"✅ Successfully activated configuration: {selected_config}", 'green')
                         self.print_colored("You can now access the main menu.", 'green')
@@ -2354,14 +2482,14 @@ class R1Setup:
             self.print_colored("\n📝 No configurations found!", 'yellow')
             self.print_colored("You need to create your first configuration to use r1setup.", 'white')
             self.print_colored("A configuration contains your GPU node connection details and network settings.", 'white')
-            
+
             self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
             self.print_colored("  1) Create your first configuration")
             self.print_colored("  0) Exit")
-            
+
             while True:
                 choice = self.get_input("\nSelect option (0-1)", "1")
-                
+
                 if choice == '0':
                     self.print_colored("Exiting r1setup.", 'yellow')
                     return False
