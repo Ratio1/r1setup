@@ -445,6 +445,46 @@ class R1Setup:
                 'error': f"Unexpected error: {str(e)}"
             }
 
+    def _get_valid_hostname(self, prompt: str, default: str = "") -> str:
+        """Get a valid hostname with length and character restrictions"""
+        self.print_colored("\n📝 Hostname Requirements:", 'cyan')
+        self.print_colored("   • Maximum 15 characters", 'white')
+        self.print_colored("   • Only letters (a-z, A-Z), numbers (0-9), hyphens (-), underscores (_)", 'white')
+        self.print_colored("   • Cannot be empty", 'white')
+        
+        while True:
+            hostname = self.get_input(prompt, default, required=True).strip()
+            
+            # Check if empty
+            if not hostname:
+                self.print_colored("Hostname cannot be empty. Please try again.", 'red')
+                continue
+            
+            # Check character restrictions
+            if not re.match(r'^[a-zA-Z0-9_-]+$', hostname):
+                self.print_colored("Invalid characters in hostname.", 'red')
+                self.print_colored("Only letters, numbers, hyphens (-), and underscores (_) are allowed.", 'red')
+                continue
+            
+            # Check length
+            if len(hostname) <= 15:
+                return hostname
+            
+            # Hostname is too long, suggest shortened version
+            shortened = hostname[:15]
+            self.print_colored(f"Hostname '{hostname}' is too long ({len(hostname)} characters, max 15).", 'red')
+            self.print_colored(f"Suggested shortened version: '{shortened}'", 'yellow')
+            
+            choice = self.get_input("Options:\n  1) Use shortened version\n  2) Enter a different name\nSelect option (1/2)", "1")
+            
+            if choice == '1':
+                return shortened
+            elif choice == '2':
+                continue  # Ask for hostname again
+            else:
+                self.print_colored("Invalid choice. Please select 1 or 2.", 'red')
+                continue
+
     def run_command(self, cmd: str, show_output: bool = True, shell: bool = True) -> tuple:
         """Run a shell command and return success status and output"""
         try:
@@ -777,7 +817,7 @@ class R1Setup:
         hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
         for i in range(num_nodes):
             self.print_section(f"Configuring Node {i + 1} of {num_nodes}")
-            name = self.get_input(f"Enter name for node {i + 1}", f"gpu-node-{i + 1}")
+            name = self._get_valid_hostname(f"Enter name for node {i + 1}", f"gpu-node-{i + 1}")
             hosts[name] = self._configure_single_node()
             self.print_colored(f"Node '{name}' configured successfully!", 'green')
 
@@ -1036,7 +1076,12 @@ class R1Setup:
         hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
         for i in range(num_nodes):
             self.print_section(f"Configuring Node {i + 1} of {num_nodes}")
-            name = self.get_input(f"Enter name for node {i + 1}", f"gpu-node-{i + 1}")
+            while True:
+                name = self._get_valid_hostname(f"Enter name for node {i + 1}", f"gpu-node-{i + 1}")
+                if name in hosts:
+                    self.print_colored(f"Node '{name}' already exists! Please choose a different name.", 'red')
+                    continue
+                break
             hosts[name] = self._configure_single_node()
             self.print_colored(f"Node '{name}' configured successfully!", 'green')
 
@@ -1219,12 +1264,14 @@ class R1Setup:
     def _add_node(self) -> None:
         """Add a new node to existing configuration"""
         self.print_section("Add New Node")
-        name = self.get_input("Enter name for the new node", required=True)
-
         hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
-        if name in hosts:
-            self.print_colored(f"Node '{name}' already exists!", 'red')
-            return
+        
+        while True:
+            name = self._get_valid_hostname("Enter name for the new node", "")
+            if name in hosts:
+                self.print_colored(f"You already have a node named '{name}'! Please choose a different name.", 'red')
+                continue
+            break
 
         hosts[name] = self._configure_single_node()
         self._save_configuration()
