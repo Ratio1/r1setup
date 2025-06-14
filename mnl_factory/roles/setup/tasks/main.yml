@@ -25,5 +25,8 @@
 #      ENV_VAR_NAME: "value"
 
 # Include the services setup tasks
-- include_tasks: services.yml 
-- include_tasks: finalize_setup.yml 
+- name: Setup Services
+  include_tasks: services.yml 
+
+- name: Update node names (aliases)
+  include_tasks: update_node_names.yml
