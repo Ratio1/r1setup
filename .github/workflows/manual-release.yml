@@ -47,18 +47,35 @@ jobs:
           fi
           echo "✅ Version format is valid: ${{ inputs.version }}"
 
-      - name: Check if files exist
+      - name: Check repository structure
         run: |
-          echo "📁 Checking required files..."
-          files=("mnl_factory/scripts/r1setup" "mnl_factory/scripts/ver.py" "mnl_factory/scripts/update.py")
-          for file in "${files[@]}"; do
+          echo "📁 Checking repository structure..."
+          
+          # Check essential CLI files
+          essential_files=(
+            "mnl_factory/scripts/r1setup"
+            "mnl_factory/scripts/ver.py" 
+            "mnl_factory/scripts/update.py"
+          )
+          
+          for file in "${essential_files[@]}"; do
             if [ -f "$file" ]; then
-              echo "✅ Found: $file"
+              echo "✅ Found essential file: $file"
             else
-              echo "❌ Missing: $file"
+              echo "❌ Missing essential file: $file"
               exit 1
             fi
           done
+          
+          # Check for main directories
+          if [ -d "mnl_factory" ]; then
+            echo "✅ Found mnl_factory directory"
+          else
+            echo "❌ Missing mnl_factory directory"
+            exit 1
+          fi
+          
+          echo "✅ Repository structure looks good for complete archive creation"
 
       - name: Update version in ver.py
         run: |
@@ -140,37 +157,60 @@ jobs:
           draft: false
           prerelease: ${{ inputs.prerelease }}
 
-      - name: Upload r1setup
+      - name: Create complete repository archive
+        run: |
+          echo "📦 Creating complete repository archive..."
+          # Create a clean archive of the entire repository
+          git archive --format=tar.gz --prefix=multi-node-launcher-${{ inputs.version }}/ HEAD > multi-node-launcher-${{ inputs.version }}.tar.gz
+          echo "✅ Created repository archive: multi-node-launcher-${{ inputs.version }}.tar.gz"
+          
+          # Also create individual CLI files for direct download
+          mkdir -p cli-files
+          cp mnl_factory/scripts/r1setup cli-files/
+          cp mnl_factory/scripts/ver.py cli-files/
+          cp mnl_factory/scripts/update.py cli-files/
+
+      - name: Upload Complete Repository Archive
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mnl_factory/scripts/r1setup
+          asset_path: ./multi-node-launcher-${{ inputs.version }}.tar.gz
+          asset_name: multi-node-launcher-${{ inputs.version }}.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload CLI Scripts (for direct update)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./cli-files/r1setup
           asset_name: r1setup
           asset_content_type: application/octet-stream
 
-      - name: Upload ver.py
+      - name: Upload Version Script (for direct update)
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mnl_factory/scripts/ver.py
+          asset_path: ./cli-files/ver.py
           asset_name: ver.py
           asset_content_type: text/x-python
 
-      - name: Upload update.py
+      - name: Upload Update Script (for direct update)
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mnl_factory/scripts/update.py
+          asset_path: ./cli-files/update.py
           asset_name: update.py
           asset_content_type: text/x-python
 
-      - name: Upload collection package
+      - name: Upload Collection Package
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -191,10 +231,16 @@ jobs:
           echo "- **Tag created:** ${{ inputs.create_tag }}"
           echo ""
           echo "📄 **Uploaded Assets:**"
-          echo "- r1setup (CLI script)"
-          echo "- ver.py (version file)"
-          echo "- update.py (update script)" 
-          echo "- ratio1-multi_node_launcher-${{ inputs.version }}.tar.gz (collection package)"
+          echo "- **multi-node-launcher-${{ inputs.version }}.tar.gz** (complete repository archive)"
+          echo "- **ratio1-multi_node_launcher-${{ inputs.version }}.tar.gz** (ansible collection package)"
+          echo "- **r1setup** (CLI script for direct update)"
+          echo "- **ver.py** (version file for direct update)"
+          echo "- **update.py** (update script for direct update)"
+          echo ""
+          echo "💡 **Download Options:**"
+          echo "- **Full Repository**: Download multi-node-launcher-${{ inputs.version }}.tar.gz for complete codebase"
+          echo "- **CLI Only**: Download individual r1setup, ver.py, update.py files for updates"
+          echo "- **Collection**: Download ratio1-multi_node_launcher-${{ inputs.version }}.tar.gz for Ansible"
           echo ""
           echo "🔗 **Release URL:** ${{ steps.create_release.outputs.html_url }}"
           echo ""

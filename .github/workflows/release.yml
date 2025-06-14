@@ -27,37 +27,60 @@ jobs:
           draft: false
           prerelease: false
 
-      - name: Upload r1setup
+      - name: Create complete repository archive
+        run: |
+          echo "📦 Creating complete repository archive..."
+          # Create a clean archive of the entire repository
+          git archive --format=tar.gz --prefix=multi-node-launcher-${{ steps.get_version.outputs.VERSION }}/ HEAD > multi-node-launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          echo "✅ Created repository archive: multi-node-launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz"
+          
+          # Also create individual CLI files for direct download
+          mkdir -p cli-files
+          cp mnl_factory/scripts/r1setup cli-files/
+          cp mnl_factory/scripts/ver.py cli-files/
+          cp mnl_factory/scripts/update.py cli-files/
+
+      - name: Upload Complete Repository Archive
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mnl_factory/scripts/r1setup
+          asset_path: ./multi-node-launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          asset_name: multi-node-launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload CLI Scripts (for direct update)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./cli-files/r1setup
           asset_name: r1setup
           asset_content_type: application/octet-stream
 
-      - name: Upload ver.py
+      - name: Upload Version Script (for direct update)
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mnl_factory/scripts/ver.py
+          asset_path: ./cli-files/ver.py
           asset_name: ver.py
           asset_content_type: text/x-python
 
-      - name: Upload update.py
+      - name: Upload Update Script (for direct update)
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mnl_factory/scripts/update.py
+          asset_path: ./cli-files/update.py
           asset_name: update.py
           asset_content_type: text/x-python
 
-      - name: Upload packaged collection
+      - name: Upload Packaged Collection
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
