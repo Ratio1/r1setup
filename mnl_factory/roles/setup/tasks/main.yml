@@ -28,5 +28,5 @@
 - name: Setup Services
   include_tasks: services.yml 
 
-- name: Update node names (EE_ID configuration)
+- name: Update node names (aliases)
   include_tasks: update_node_names.yml

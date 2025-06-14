@@ -646,7 +646,7 @@ class R1Setup:
         self.print_colored("  5) Deploy full setup        - Deploy Docker + NVIDIA drivers + GPU setup")
         self.print_colored("  6) Deploy Docker only       - Deploy only Docker without GPU setup")
         self.print_colored("  7) Delete edge node         - Completely remove deployed edge node")
-        self.print_colored("  8) Apply new nodes names    - Update node EE_ID configuration")
+        self.print_colored("  8) Apply new nodes names    - Update node aliases")
         print()
         self.print_colored("Information:")
         self.print_colored("  9) Get node information     - Retrieve detailed node information")
