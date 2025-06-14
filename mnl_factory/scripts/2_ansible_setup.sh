@@ -152,16 +152,6 @@ set_ownership() {
     fi
 }
 
-# Print next steps
-print_next_steps() {
-    print_message "\nInstallation completed successfully!" "$GREEN"
-    print_message "\nNext steps:" "$YELLOW"
-    print_message "1. Run the configuration script:" "$NC"
-    print_message "   python3 3_configure.py" "$NC"
-    print_message "2. After configuration, deploy with:" "$NC"
-    print_message "   ansible-playbook deploy.yml" "$NC"
-}
-
 # Main function
 main() {
     detect_os
@@ -171,7 +161,6 @@ main() {
     create_ansible_cfg
     install_collection
     set_ownership
-    print_next_steps
 }
 
 # Run the main function
