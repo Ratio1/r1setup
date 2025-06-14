@@ -2112,6 +2112,132 @@ class R1Setup:
 
         input("Press Enter to continue...")
 
+    def ensure_active_configuration(self) -> bool:
+        """Ensure there's an active configuration before proceeding to main menu"""
+        # Check if we have a valid active configuration
+        if self.check_hosts_config():
+            return True
+
+        self.print_header("Configuration Required")
+        self.print_colored("⚠️  No active configuration detected!", 'red', bold=True)
+        
+        # Check if we have saved configurations
+        configs = self._list_available_configs()
+        
+        if configs:
+            self.print_colored(f"\n📁 Found {len(configs)} saved configuration(s):", 'cyan')
+            self.print_colored("It looks like you have existing configurations but none are currently active.", 'yellow')
+            self.print_colored("This can happen after reinstalling or updating r1setup.", 'yellow')
+            
+            # Show available configurations
+            for i, (config_name, metadata) in enumerate(configs, 1):
+                display_name = config_name.replace('.yml', '')
+                env = metadata.get('environment', 'unknown')
+                nodes = metadata.get('nodes_count', 0)
+                created_at = metadata.get('created_at')
+                last_deployed_date = metadata.get('last_deployed_date')
+                deployment_status = metadata.get('deployment_status', 'never_deployed')
+                
+                # Extract custom name from the config name
+                custom_name = display_name
+                if '_' in display_name:
+                    parts = display_name.split('_')
+                    if len(parts) >= 2:
+                        # Find where the timestamp starts (8 digits)
+                        for idx, part in enumerate(parts):
+                            if len(part) == 8 and part.isdigit():
+                                custom_name = '_'.join(parts[:idx])
+                                break
+                
+                # Format creation date
+                created_str = "Unknown"
+                if created_at:
+                    try:
+                        if isinstance(created_at, str):
+                            created_dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                            created_str = created_dt.strftime('%Y-%m-%d %H:%M')
+                        else:
+                            created_str = datetime.fromtimestamp(created_at).strftime('%Y-%m-%d %H:%M')
+                    except:
+                        created_str = "Unknown"
+                
+                # Format deployment status
+                deployment_str = ""
+                if deployment_status == 'deployed' and last_deployed_date:
+                    try:
+                        deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
+                        deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
+                        deployment_str = f" | 🚀 Last deployed: {deployed_str}"
+                    except:
+                        deployment_str = " | 🚀 Deployed"
+                elif deployment_status == 'deleted':
+                    deployment_str = " | 🗑️ Deleted"
+                else:
+                    deployment_str = " | 📋 Never deployed"
+                
+                self.print_colored(f"  {i}. {custom_name}", 'cyan', bold=True)
+                self.print_colored(f"     {env} | {nodes} node(s) | Created: {created_str}{deployment_str}", 'white')
+            
+            self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
+            self.print_colored("  1) Select an existing configuration to activate")
+            self.print_colored("  2) Create a new configuration")
+            self.print_colored("  0) Exit")
+            
+            while True:
+                choice = self.get_input("\nSelect option (0-2)", "1")
+                
+                if choice == '0':
+                    self.print_colored("Exiting r1setup.", 'yellow')
+                    return False
+                elif choice == '1':
+                    # Let user select from existing configurations
+                    while True:
+                        try:
+                            selection = int(self.get_input(f"Select configuration number (1-{len(configs)})")) - 1
+                            if 0 <= selection < len(configs):
+                                selected_config = configs[selection][0].replace('.yml', '')
+                                break
+                            self.print_colored("Invalid selection", 'red')
+                        except ValueError:
+                            self.print_colored("Please enter a number", 'red')
+                    
+                    if self._load_config_by_name(selected_config):
+                        self.print_colored(f"✅ Successfully activated configuration: {selected_config}", 'green')
+                        self.print_colored("You can now access the main menu.", 'green')
+                        input("Press Enter to continue...")
+                        return True
+                    else:
+                        self.print_colored(f"❌ Failed to activate configuration: {selected_config}", 'red')
+                        self.print_colored("Please try another configuration or create a new one.", 'red')
+                        continue
+                elif choice == '2':
+                    # Create new configuration
+                    self._create_new_configuration_with_management()
+                    return True
+                else:
+                    self.print_colored("Invalid option. Please enter 0, 1, or 2.", 'red')
+        else:
+            # No saved configurations exist
+            self.print_colored("\n📝 No configurations found!", 'yellow')
+            self.print_colored("You need to create your first configuration to use r1setup.", 'white')
+            self.print_colored("A configuration contains your GPU node connection details and network settings.", 'white')
+            
+            self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
+            self.print_colored("  1) Create your first configuration")
+            self.print_colored("  0) Exit")
+            
+            while True:
+                choice = self.get_input("\nSelect option (0-1)", "1")
+                
+                if choice == '0':
+                    self.print_colored("Exiting r1setup.", 'yellow')
+                    return False
+                elif choice == '1':
+                    self._create_new_configuration_with_management()
+                    return True
+                else:
+                    self.print_colored("Invalid option. Please enter 0 or 1.", 'red')
+
     def run(self) -> None:
         """Main program loop"""
         # Handle version check
@@ -2123,6 +2249,10 @@ class R1Setup:
         if not self.check_ansible_installation():
             self.print_colored("Please ensure Ansible and the required collection are installed.", 'red')
             sys.exit(1)
+
+        # Ensure we have an active configuration before proceeding
+        if not self.ensure_active_configuration():
+            sys.exit(0)
 
         while True:
             try:
