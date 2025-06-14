@@ -61,7 +61,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.1.6"
+    CLI_VERSION = "1.1.16"
 
 # Version information
 UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/ver.py"
