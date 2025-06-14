@@ -1295,18 +1295,54 @@ class R1Setup:
             try:
                 choice = int(self.get_input("Select node number")) - 1
                 if 0 <= choice < len(node_list):
-                    name = node_list[choice]
+                    original_name = node_list[choice]
                     break
                 self.print_colored("Invalid selection", 'red')
             except ValueError:
                 self.print_colored("Please enter a number", 'red')
 
-        self.print_colored(f"Updating node: {name}", 'yellow')
-        # Pass existing configuration to preserve values
-        existing_config = hosts[name].copy()
-        hosts[name] = self._configure_single_node(existing_config)
+        self.print_colored(f"Updating node: {original_name}", 'yellow')
+        
+        # Ask if user wants to rename the node
+        rename_node = self.get_input(f"\nDo you want to rename this node? Current name: '{original_name}' (y/n)", "n").lower() == 'y'
+        
+        new_name = original_name
+        if rename_node:
+            while True:
+                new_name = self._get_valid_hostname(f"Enter new name for node (current: {original_name})", original_name)
+                if new_name == original_name:
+                    self.print_colored("New name is the same as current name.", 'yellow')
+                    break
+                if new_name in hosts:
+                    self.print_colored(f"Node name '{new_name}' already exists! Please choose a different name.", 'red')
+                    continue
+                break
+        
+        # Update node configuration
+        existing_config = hosts[original_name].copy()
+        updated_config = self._configure_single_node(existing_config)
+        
+        # Handle name change
+        name_changed = new_name != original_name
+        if name_changed:
+            # Remove old entry and add new one
+            del hosts[original_name]
+            hosts[new_name] = updated_config
+            self.print_colored(f"Node renamed from '{original_name}' to '{new_name}'", 'green')
+        else:
+            # Update existing entry
+            hosts[original_name] = updated_config
+        
         self._save_configuration()
-        self.print_colored(f"Node '{name}' updated successfully!", 'green')
+        
+        if name_changed:
+            self.print_colored(f"Node '{original_name}' updated and renamed to '{new_name}' successfully!", 'green')
+            self.print_colored("\n💡 Recommendation:", 'cyan', bold=True)
+            self.print_colored("Since you changed the node name, consider running option 8 (Apply new node names)", 'yellow')
+            self.print_colored("from the main menu to update the node name on the network.", 'yellow')
+            self.print_colored("This will ensure your node is visible with the new name on the blockchain.", 'white')
+        else:
+            self.print_colored(f"Node '{original_name}' updated successfully!", 'green')
 
     def _delete_node(self) -> None:
         """Delete a node"""
