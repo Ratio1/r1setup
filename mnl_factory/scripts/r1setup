@@ -1558,7 +1558,7 @@ class R1Setup:
         input("Press Enter to continue...")
 
     def apply_node_names(self) -> None:
-        """Apply new node names (Update EE_ID configuration)"""
+        """Apply new node names (Update node alias configuration)"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
             input("Press Enter to continue...")
@@ -1573,7 +1573,7 @@ class R1Setup:
 
         # Show rename details
         self.print_colored(f"🏷️  Node Renaming Details:", 'cyan', bold=True)
-        self.print_colored(f"   • Action: Update EE_ID configuration for each node", 'white')
+        self.print_colored(f"   • Action: Update node alias configuration for each node", 'white')
         self.print_colored(f"   • Network: {env if env else 'Not set'}", 'green' if env else 'red')
         self.print_colored(f"   • Target Nodes: {len(hosts)}", 'white')
 
@@ -1581,10 +1581,10 @@ class R1Setup:
         for name, config in hosts.items():
             ip = config.get('ansible_host', 'Unknown')
             user = config.get('ansible_user', 'Unknown')
-            self.print_colored(f"   • {name}: {user}@{ip} → EE_ID will be set to '{name}'", 'white')
+            self.print_colored(f"   • {name}: {user}@{ip} → node alias will be set to '{name}'", 'white')
 
         self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
-        self.print_colored("   • Update the startup configuration file with new EE_ID", 'yellow')
+        self.print_colored("   • Update the startup configuration file with new node alias", 'yellow')
         self.print_colored("   • Restart the edge node service", 'yellow')
         self.print_colored("   • Wait for the service to start", 'yellow')
         self.print_colored("   • Retrieve and display updated node information", 'yellow')
@@ -1613,7 +1613,7 @@ class R1Setup:
 
         if success:
             self.print_colored("\nNode renaming completed successfully!", 'green')
-            self.print_colored("All nodes have been updated with their new EE_ID configuration.", 'green')
+            self.print_colored("All nodes have been updated with their new node alias configuration.", 'green')
         else:
             self.print_colored("\nNode renaming encountered issues. Please check the output above.", 'red')
 
