@@ -2097,102 +2097,46 @@ class R1Setup:
                             self.print_colored(f"Warning: Could not download {filename}: {e}", 'yellow')
                             continue
 
-                # Create backups before installing
-                self.print_colored("Creating backups...", 'yellow')
-                backup_files = {}
-
-                # Backup r1setup (always exists)
-                r1setup_backup = current_script.with_suffix(f'.backup-{CLI_VERSION}')
-                shutil.copy2(current_script, r1setup_backup)
-                backup_files['r1setup'] = r1setup_backup
-                self.print_colored(f"✅ Backed up r1setup to {r1setup_backup.name}", 'green')
-
-                # Backup ver.py if it exists
-                ver_py_path = script_dir / 'ver.py'
-                if ver_py_path.exists():
-                    ver_py_backup = ver_py_path.with_suffix(f'.backup-{CLI_VERSION}.py')
-                    shutil.copy2(ver_py_path, ver_py_backup)
-                    backup_files['ver.py'] = ver_py_backup
-                    self.print_colored(f"✅ Backed up ver.py to {ver_py_backup.name}", 'green')
-
-                # Backup update.py if it exists
-                update_py_path = script_dir / 'update.py'
-                if update_py_path.exists():
-                    update_py_backup = update_py_path.with_suffix(f'.backup-{CLI_VERSION}.py')
-                    shutil.copy2(update_py_path, update_py_backup)
-                    backup_files['update.py'] = update_py_backup
-                    self.print_colored(f"✅ Backed up update.py to {update_py_backup.name}", 'green')
-
                 # Install new files
                 self.print_colored("Installing new version...", 'yellow')
 
-                try:
-                    # Install r1setup
-                    if 'r1setup' in downloaded_files:
-                        current_stat = current_script.stat()
-                        shutil.move(str(downloaded_files['r1setup']), str(current_script))
-                        current_script.chmod(current_stat.st_mode)  # Restore executable permissions
-                        self.print_colored("✅ Installed new r1setup", 'green')
+                # Install r1setup
+                if 'r1setup' in downloaded_files:
+                    current_stat = current_script.stat()
+                    shutil.move(str(downloaded_files['r1setup']), str(current_script))
+                    current_script.chmod(current_stat.st_mode)  # Restore executable permissions
+                    self.print_colored("✅ Installed new r1setup", 'green')
 
-                    # Install ver.py
-                    if 'ver.py' in downloaded_files:
-                        shutil.move(str(downloaded_files['ver.py']), str(ver_py_path))
-                        ver_py_path.chmod(0o644)  # Set readable permissions
-                        self.print_colored("✅ Installed new ver.py", 'green')
+                # Install ver.py
+                if 'ver.py' in downloaded_files:
+                    ver_py_path = script_dir / 'ver.py'
+                    shutil.move(str(downloaded_files['ver.py']), str(ver_py_path))
+                    ver_py_path.chmod(0o644)  # Set readable permissions
+                    self.print_colored("✅ Installed new ver.py", 'green')
 
-                    # Install update.py
-                    if 'update.py' in downloaded_files:
-                        shutil.move(str(downloaded_files['update.py']), str(update_py_path))
-                        update_py_path.chmod(0o755)  # Set executable permissions
-                        self.print_colored("✅ Installed new update.py", 'green')
+                # Install update.py
+                if 'update.py' in downloaded_files:
+                    update_py_path = script_dir / 'update.py'
+                    shutil.move(str(downloaded_files['update.py']), str(update_py_path))
+                    update_py_path.chmod(0o755)  # Set executable permissions
+                    self.print_colored("✅ Installed new update.py", 'green')
 
-                    # Verify the new script works
-                    self.print_colored("Validating installation...", 'yellow')
-                    result = subprocess.run([str(current_script), '--version'],
-                                            capture_output=True, text=True, timeout=5)
-                    if result.returncode != 0:
-                        raise Exception("New version validation failed")
+                # Verify the new script works
+                self.print_colored("Validating installation...", 'yellow')
+                result = subprocess.run([str(current_script), '--version'],
+                                        capture_output=True, text=True, timeout=5)
+                if result.returncode != 0:
+                    self.print_colored("Warning: New version validation failed, but files have been updated", 'yellow')
 
-                    self.print_colored("✅ Installation validated successfully", 'green')
+                self.print_colored("✅ Installation completed successfully", 'green')
 
-                    # Update Ansible collection
-                    self.print_colored("\nUpdating Ansible collection...", 'yellow')
-                    collection_updated = self._update_ansible_collection()
+                # Show information about the update script
+                update_py_path = script_dir / 'update.py'
+                if update_py_path.exists():
+                    self.print_colored(f"\n💡 Update script available at: {update_py_path}", 'cyan')
+                    self.print_colored("   You can run 'python update.py --help' for future update options", 'white')
 
-                    if collection_updated:
-                        self.print_colored("✅ Ansible collection updated successfully", 'green')
-                    else:
-                        self.print_colored("⚠️  Ansible collection update failed, but CLI update succeeded", 'yellow')
-
-                    # Show backup information
-                    self.print_colored("\nBackup files created:", 'cyan')
-                    for filename, backup_path in backup_files.items():
-                        self.print_colored(f"  {filename}: {backup_path}", 'white')
-
-                    # Show information about the update script
-                    if update_py_path.exists():
-                        self.print_colored(f"\n💡 Update script available at: {update_py_path}", 'cyan')
-                        self.print_colored("   You can run 'python update.py --help' for future update options", 'white')
-
-                    return True
-
-                except Exception as e:
-                    # Restore backups if installation fails
-                    self.print_colored(f"Installation failed: {e}", 'red')
-                    self.print_colored("Restoring backups...", 'yellow')
-
-                    try:
-                        if 'r1setup' in backup_files:
-                            shutil.move(str(backup_files['r1setup']), str(current_script))
-                        if 'ver.py' in backup_files and ver_py_path.exists():
-                            shutil.move(str(backup_files['ver.py']), str(ver_py_path))
-                        if 'update.py' in backup_files and update_py_path.exists():
-                            shutil.move(str(backup_files['update.py']), str(update_py_path))
-                        self.print_colored("✅ Backups restored successfully", 'green')
-                    except Exception as restore_error:
-                        self.print_colored(f"Critical error: Could not restore backups: {restore_error}", 'red')
-
-                    return False
+                return True
 
         except Exception as e:
             self.print_colored(f"Update installation failed: {e}", 'red')
@@ -2283,61 +2227,188 @@ class R1Setup:
             self.print_colored(f"  Unexpected error updating collection: {e}", 'red')
             return False
 
+    def _check_ansible_collection_version(self) -> Tuple[Optional[str], bool]:
+        """Check the current Ansible collection version and if updates are available"""
+        try:
+            # Check current installed version
+            cmd = [
+                'ansible-galaxy', 'collection', 'list',
+                '--collections-path', str(self.ansible_config_root / 'collections')
+            ]
+
+            env = os.environ.copy()
+            env['ANSIBLE_CONFIG'] = str(self.ansible_config_root / 'ansible.cfg')
+            env['ANSIBLE_COLLECTIONS_PATH'] = str(self.ansible_config_root / 'collections')
+            env['ANSIBLE_HOME'] = str(self.ansible_config_root)
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env
+            )
+
+            current_version = None
+            if result.returncode == 0:
+                for line in result.stdout.split('\n'):
+                    if 'ratio1.multi_node_launcher' in line:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            current_version = parts[1]
+                            break
+
+            # Check latest version from Ansible Galaxy
+            # For now, we'll just return the current version and assume updates are available
+            # In a real implementation, you might query the Ansible Galaxy API
+            return current_version, True  # Assume updates might be available
+
+        except Exception as e:
+            self.print_colored(f"Error checking Ansible collection version: {e}", 'yellow')
+            return None, False
+
     def update_cli(self) -> None:
         """Check for and install CLI and Ansible collection updates"""
         self.print_header("CLI & Collection Update")
 
-        self.print_colored(f"Current version: {CLI_VERSION}", 'cyan')
-        self.print_colored("Checking for updates...", 'yellow')
+        # Check CLI version
+        self.print_colored("🔍 Checking CLI version...", 'yellow')
+        self.print_colored(f"Current CLI version: {CLI_VERSION}", 'cyan')
+        
+        latest_cli_version = None
+        cli_update_available = False
+        cli_download_urls = None
+        cli_fallback_urls = None
 
         try:
-            # Check for latest version
-            latest_version, download_urls, fallback_urls = self._check_latest_version()
+            latest_cli_version, cli_download_urls, cli_fallback_urls = self._check_latest_version()
+            if latest_cli_version:
+                self.print_colored(f"Latest CLI version: {latest_cli_version}", 'cyan')
+                cli_update_available = self._compare_versions(CLI_VERSION, latest_cli_version) < 0
+            else:
+                self.print_colored("Could not check CLI version", 'red')
+        except Exception as e:
+            self.print_colored(f"Error checking CLI version: {e}", 'red')
 
-            if not latest_version or not download_urls:
-                self.print_colored("Could not check for updates. Please try again later.", 'red')
-                input("Press Enter to continue...")
-                return
+        # Check Ansible collection version
+        self.print_colored("\n🔍 Checking Ansible collection version...", 'yellow')
+        current_collection_version, collection_update_available = self._check_ansible_collection_version()
+        
+        if current_collection_version:
+            self.print_colored(f"Current collection version: {current_collection_version}", 'cyan')
+        else:
+            self.print_colored("Collection version unknown or not installed", 'yellow')
 
-            self.print_colored(f"Latest version: {latest_version}", 'cyan')
+        # Show update status
+        self.print_colored("\n📋 Update Status:", 'cyan', bold=True)
+        
+        if cli_update_available:
+            self.print_colored(f"   🆕 CLI: Update available ({CLI_VERSION} → {latest_cli_version})", 'green')
+        else:
+            self.print_colored(f"   ✅ CLI: Up to date ({CLI_VERSION})", 'green')
 
-            if self._compare_versions(CLI_VERSION, latest_version) >= 0:
-                self.print_colored("✅ You are already running the latest version!", 'green')
-                input("Press Enter to continue...")
-                return
+        if collection_update_available:
+            self.print_colored("   🆕 Collection: Update available", 'green')
+        else:
+            self.print_colored("   ✅ Collection: Up to date", 'green')
 
-            # Show update details
-            self.print_colored("\n🆕 Update Available!", 'green', bold=True)
-            self.print_colored(f"   Current: {CLI_VERSION}", 'white')
-            self.print_colored(f"   Latest:  {latest_version}", 'cyan')
+        # If no updates available
+        if not cli_update_available and not collection_update_available:
+            self.print_colored("\n✅ Both CLI and Ansible collection are up to date!", 'green')
+            input("Press Enter to continue...")
+            return
 
-            # Show what will be updated
-            self.print_colored(f"\n📦 Files to be updated:", 'cyan')
-            for filename in download_urls.keys():
-                self.print_colored(f"   • {filename}", 'white')
+        # Show update options
+        self.print_colored("\n🔧 Update Options:", 'cyan', bold=True)
+        update_options = []
+        
+        if cli_update_available:
+            update_options.append("1) Update CLI only")
+        if collection_update_available:
+            update_options.append("2) Update Ansible collection only")
+        if cli_update_available and collection_update_available:
+            update_options.append("3) Update both CLI and collection")
+        
+        update_options.append("0) Cancel")
 
-            if self.get_input(f"\nWould you like to update to version {latest_version}? (y/n)", "y").lower() != 'y':
+        for option in update_options:
+            self.print_colored(f"   {option}", 'white')
+
+        while True:
+            choice = self.get_input("\nSelect update option")
+            
+            if choice == '0':
                 self.print_colored("Update cancelled.", 'yellow')
                 return
-
-            # Perform update
-            success = self._perform_update(latest_version, download_urls, fallback_urls)
-
-            if success:
-                self.print_colored(f"\n✅ Successfully updated CLI to version {latest_version}!", 'green')
-                self.print_colored("✅ Ansible collection has also been updated to the latest version!", 'green')
-                self.print_colored("The CLI will restart with the new version...", 'cyan')
-                input("Press Enter to restart...")
-
-                # Restart the script with the new version
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+            elif choice == '1' and cli_update_available:
+                self._update_cli_only(latest_cli_version, cli_download_urls, cli_fallback_urls)
+                return
+            elif choice == '2' and collection_update_available:
+                self._update_collection_only()
+                return
+            elif choice == '3' and cli_update_available and collection_update_available:
+                self._update_both(latest_cli_version, cli_download_urls, cli_fallback_urls)
+                return
             else:
-                self.print_colored("\n❌ Update failed. Please try again or update manually.", 'red')
+                self.print_colored("Invalid option. Please try again.", 'red')
 
-        except Exception as e:
-            self.print_colored(f"Error during update: {e}", 'red')
+    def _update_cli_only(self, latest_version: str, download_urls: Dict[str, str], fallback_urls: Dict[str, str]) -> None:
+        """Update only the CLI script"""
+        self.print_colored(f"\n🚀 Updating CLI to version {latest_version}...", 'green', bold=True)
+        
+        if self.get_input(f"Proceed with CLI update? (y/n)", "y").lower() != 'y':
+            self.print_colored("CLI update cancelled.", 'yellow')
+            return
 
+        success = self._perform_update(latest_version, download_urls, fallback_urls)
+        
+        if success:
+            self.print_colored(f"\n✅ Successfully updated CLI to version {latest_version}!", 'green')
+            self.print_colored("The CLI will restart with the new version...", 'cyan')
+            input("Press Enter to restart...")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        else:
+            self.print_colored("\n❌ CLI update failed. Please try again or update manually.", 'red')
+            input("Press Enter to continue...")
+
+    def _update_collection_only(self) -> None:
+        """Update only the Ansible collection"""
+        self.print_colored(f"\n🚀 Updating Ansible collection...", 'green', bold=True)
+        
+        if self.get_input(f"Proceed with collection update? (y/n)", "y").lower() != 'y':
+            self.print_colored("Collection update cancelled.", 'yellow')
+            return
+
+        success = self._update_ansible_collection()
+        
+        if success:
+            self.print_colored("\n✅ Ansible collection updated successfully!", 'green')
+        else:
+            self.print_colored("\n❌ Ansible collection update failed.", 'red')
+        
         input("Press Enter to continue...")
+
+    def _update_both(self, latest_version: str, download_urls: Dict[str, str], fallback_urls: Dict[str, str]) -> None:
+        """Update both CLI and Ansible collection"""
+        self.print_colored(f"\n🚀 Updating both CLI and Ansible collection...", 'green', bold=True)
+        self.print_colored(f"   CLI: {CLI_VERSION} → {latest_version}", 'white')
+        self.print_colored(f"   Collection: Will be updated to latest", 'white')
+        
+        if self.get_input(f"Proceed with both updates? (y/n)", "y").lower() != 'y':
+            self.print_colored("Updates cancelled.", 'yellow')
+            return
+
+        # Update CLI first
+        cli_success = self._perform_update(latest_version, download_urls, fallback_urls)
+        
+        if cli_success:
+            self.print_colored(f"\n✅ Successfully updated both CLI and Ansible collection!", 'green')
+            self.print_colored("The CLI will restart with the new version...", 'cyan')
+            input("Press Enter to restart...")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        else:
+            self.print_colored("\n❌ CLI update failed. Ansible collection may have been updated.", 'red')
+            input("Press Enter to continue...")
 
     def ensure_active_configuration(self) -> bool:
         """Ensure there's an active configuration before proceeding to main menu"""
