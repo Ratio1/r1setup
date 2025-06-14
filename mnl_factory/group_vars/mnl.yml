@@ -34,4 +34,7 @@ mnl_container_memory_limit: 30GB
 # Container behavior
 mnl_commented_restart: ''  # Empty -> restart enabled, '#' -> restart disabled
 
+# Service files paths
+mnl_config_startup_path: "{{ mnl_docker_volume_path }}/config_startup.json"
+
 # Optional settings (commented out)

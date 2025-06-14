@@ -2,6 +2,51 @@
   ansible.builtin.pause:
     seconds: 20
 
+- name: Ensure config startup directory exists
+  ansible.builtin.file:
+    path: "{{ mnl_config_startup_path | dirname }}"
+    state: directory
+    mode: '0755'
+  become: yes
+
+- name: Check if startup configuration file exists
+  ansible.builtin.stat:
+    path: "{{ mnl_config_startup_path }}"
+  register: config_file_stat
+
+- name: Create startup configuration with EE_ID if it doesn't exist
+  ansible.builtin.copy:
+    content: |
+      {
+        "EE_ID": "{{ inventory_hostname }}"
+      }
+    dest: "{{ mnl_config_startup_path }}"
+    mode: '0644'
+  become: yes
+  when: not config_file_stat.stat.exists
+
+- name: Read existing startup configuration
+  ansible.builtin.slurp:
+    src: "{{ mnl_config_startup_path }}"
+  register: config_content
+  when: config_file_stat.stat.exists
+
+- name: Update EE_ID in existing startup configuration
+  ansible.builtin.copy:
+    content: "{{ (config_content.content | b64decode | from_json) | combine({'EE_ID': inventory_hostname}) | to_nice_json }}"
+    dest: "{{ mnl_config_startup_path }}"
+    backup: yes
+    mode: '0644'
+  become: yes
+  when: config_file_stat.stat.exists
+
+- name: Restart edge node service
+  ansible.builtin.systemd:
+    name: "{{ edge_node_service_name }}"
+    state: restarted
+    enabled: yes
+  become: yes
+
 - name: Run get_node_info command
   ansible.builtin.shell: get_node_info
   register: node_info
