@@ -1,7 +1,3 @@
-- name: Wait for 20 seconds
-  ansible.builtin.pause:
-    seconds: 20
-
 - name: Ensure config startup directory exists
   ansible.builtin.file:
     path: "{{ mnl_config_startup_path | dirname }}"
@@ -46,6 +42,10 @@
     state: restarted
     enabled: yes
   become: yes
+
+- name: Wait for 20 seconds, for node to start
+  ansible.builtin.pause:
+    seconds: 20
 
 - name: Run get_node_info command
   ansible.builtin.shell: get_node_info
