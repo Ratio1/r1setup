@@ -1,0 +1,201 @@
+name: Manual Release Creation
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., 1.1.15)'
+        required: true
+        type: string
+      release_name:
+        description: 'Release name (optional, defaults to "Release v{version}")'
+        required: false
+        type: string
+      release_notes:
+        description: 'Release notes (optional)'
+        required: false
+        type: string
+        default: |
+          ## What's Changed
+          - Bug fixes and improvements
+          - Updated CLI components
+          
+          **Full Changelog**: https://github.com/Ratio1/multi-node-launcher/commits/main
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        type: boolean
+        default: false
+      create_tag:
+        description: 'Create git tag (if it does not exist)'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate version format
+        run: |
+          if [[ ! "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ Invalid version format. Use semantic versioning (e.g., 1.1.15)"
+            exit 1
+          fi
+          echo "✅ Version format is valid: ${{ inputs.version }}"
+
+      - name: Check if files exist
+        run: |
+          echo "📁 Checking required files..."
+          files=("mnl_factory/scripts/r1setup" "mnl_factory/scripts/ver.py" "mnl_factory/scripts/update.py")
+          for file in "${files[@]}"; do
+            if [ -f "$file" ]; then
+              echo "✅ Found: $file"
+            else
+              echo "❌ Missing: $file"
+              exit 1
+            fi
+          done
+
+      - name: Update version in ver.py
+        run: |
+          echo "🔄 Updating version in ver.py to ${{ inputs.version }}"
+          sed -i "s/__VER__ = '[^']*'/__VER__ = '${{ inputs.version }}'/" mnl_factory/scripts/ver.py
+          
+          # Verify the change
+          if grep -q "__VER__ = '${{ inputs.version }}'" mnl_factory/scripts/ver.py; then
+            echo "✅ Version updated successfully in ver.py"
+          else
+            echo "❌ Failed to update version in ver.py"
+            exit 1
+          fi
+
+      - name: Update version in r1setup fallback
+        run: |
+          echo "🔄 Updating fallback version in r1setup to ${{ inputs.version }}"
+          sed -i 's/CLI_VERSION = "[^"]*"/CLI_VERSION = "${{ inputs.version }}"/' mnl_factory/scripts/r1setup
+          
+          # Verify the change
+          if grep -q 'CLI_VERSION = "${{ inputs.version }}"' mnl_factory/scripts/r1setup; then
+            echo "✅ Fallback version updated successfully in r1setup"
+          else
+            echo "❌ Failed to update fallback version in r1setup"
+            exit 1
+          fi
+
+      - name: Create and push tag (if requested)
+        if: inputs.create_tag
+        run: |
+          TAG_NAME="v${{ inputs.version }}"
+          echo "🏷️ Creating tag: $TAG_NAME"
+          
+          # Check if tag already exists
+          if git tag -l | grep -q "^$TAG_NAME$"; then
+            echo "ℹ️ Tag $TAG_NAME already exists, skipping tag creation"
+          else
+            # Configure git
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            
+            # Commit version changes
+            git add mnl_factory/scripts/ver.py mnl_factory/scripts/r1setup
+            git commit -m "Release ${{ inputs.version }}" || echo "No changes to commit"
+            
+            # Create and push tag
+            git tag -a "$TAG_NAME" -m "Release ${{ inputs.version }}"
+            git push origin "$TAG_NAME"
+            echo "✅ Tag $TAG_NAME created and pushed"
+          fi
+
+      - name: Find collection tar.gz file
+        id: find_collection
+        run: |
+          COLLECTION_FILE=$(find mnl_factory -name "ratio1-multi_node_launcher-${{ inputs.version }}.tar.gz" | head -n 1)
+          if [ -z "$COLLECTION_FILE" ]; then
+            COLLECTION_FILE=$(find mnl_factory -name "ratio1-multi_node_launcher-*.tar.gz" | sort -V | tail -n 1)
+            echo "⚠️ Exact version tar.gz not found, using latest: $COLLECTION_FILE"
+          else
+            echo "✅ Found exact version tar.gz: $COLLECTION_FILE"
+          fi
+          
+          if [ -n "$COLLECTION_FILE" ]; then
+            echo "collection_file=$COLLECTION_FILE" >> $GITHUB_OUTPUT
+          else
+            echo "❌ No collection tar.gz file found"
+            exit 1
+          fi
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ inputs.version }}
+          release_name: ${{ inputs.release_name || format('Release v{0}', inputs.version) }}
+          body: ${{ inputs.release_notes }}
+          draft: false
+          prerelease: ${{ inputs.prerelease }}
+
+      - name: Upload r1setup
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./mnl_factory/scripts/r1setup
+          asset_name: r1setup
+          asset_content_type: application/octet-stream
+
+      - name: Upload ver.py
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./mnl_factory/scripts/ver.py
+          asset_name: ver.py
+          asset_content_type: text/x-python
+
+      - name: Upload update.py
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./mnl_factory/scripts/update.py
+          asset_name: update.py
+          asset_content_type: text/x-python
+
+      - name: Upload collection package
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.find_collection.outputs.collection_file }}
+          asset_name: ratio1-multi_node_launcher-${{ inputs.version }}.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Release Summary
+        run: |
+          echo "🎉 Release v${{ inputs.version }} created successfully!"
+          echo ""
+          echo "📦 **Release Details:**"
+          echo "- **Version:** ${{ inputs.version }}"
+          echo "- **Name:** ${{ inputs.release_name || format('Release v{0}', inputs.version) }}"
+          echo "- **Pre-release:** ${{ inputs.prerelease }}"
+          echo "- **Tag created:** ${{ inputs.create_tag }}"
+          echo ""
+          echo "📄 **Uploaded Assets:**"
+          echo "- r1setup (CLI script)"
+          echo "- ver.py (version file)"
+          echo "- update.py (update script)" 
+          echo "- ratio1-multi_node_launcher-${{ inputs.version }}.tar.gz (collection package)"
+          echo ""
+          echo "🔗 **Release URL:** ${{ steps.create_release.outputs.html_url }}"
+          echo ""
+          echo "✅ CLI updates should now work properly from this release!" 

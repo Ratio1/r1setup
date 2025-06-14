@@ -1,0 +1,68 @@
+name: Release CLI Files
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Trigger on version tags like v1.1.14
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.get_version.outputs.VERSION }}
+          release_name: Release ${{ steps.get_version.outputs.VERSION }}
+          draft: false
+          prerelease: false
+
+      - name: Upload r1setup
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./mnl_factory/scripts/r1setup
+          asset_name: r1setup
+          asset_content_type: application/octet-stream
+
+      - name: Upload ver.py
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./mnl_factory/scripts/ver.py
+          asset_name: ver.py
+          asset_content_type: text/x-python
+
+      - name: Upload update.py
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./mnl_factory/scripts/update.py
+          asset_name: update.py
+          asset_content_type: text/x-python
+
+      - name: Upload packaged collection
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./mnl_factory/ratio1-multi_node_launcher-*.tar.gz
+          asset_name: ratio1-multi_node_launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          asset_content_type: application/gzip 
