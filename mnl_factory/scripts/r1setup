@@ -655,7 +655,7 @@ class R1Setup:
         print()
         self.print_colored("Settings:")
         self.print_colored(" 12) Change network environment - Switch between mainnet/testnet/devnet")
-        self.print_colored(" 12) Update CLI & Collection    - Check for and install CLI & Ansible collection updates")
+        self.print_colored(" 13) Update CLI & Collection    - Check for and install CLI & Ansible collection updates")
         print()
         self.print_colored("  0) Exit")
         print()
