@@ -445,6 +445,46 @@ class R1Setup:
                 'error': f"Unexpected error: {str(e)}"
             }
 
+    def _get_valid_hostname(self, prompt: str, default: str = "") -> str:
+        """Get a valid hostname with length and character restrictions"""
+        self.print_colored("\n📝 Hostname Requirements:", 'cyan')
+        self.print_colored("   • Maximum 15 characters", 'white')
+        self.print_colored("   • Only letters (a-z, A-Z), numbers (0-9), hyphens (-), underscores (_)", 'white')
+        self.print_colored("   • Cannot be empty", 'white')
+        
+        while True:
+            hostname = self.get_input(prompt, default, required=True).strip()
+            
+            # Check if empty
+            if not hostname:
+                self.print_colored("Hostname cannot be empty. Please try again.", 'red')
+                continue
+            
+            # Check character restrictions
+            if not re.match(r'^[a-zA-Z0-9_-]+$', hostname):
+                self.print_colored("Invalid characters in hostname.", 'red')
+                self.print_colored("Only letters, numbers, hyphens (-), and underscores (_) are allowed.", 'red')
+                continue
+            
+            # Check length
+            if len(hostname) <= 15:
+                return hostname
+            
+            # Hostname is too long, suggest shortened version
+            shortened = hostname[:15]
+            self.print_colored(f"Hostname '{hostname}' is too long ({len(hostname)} characters, max 15).", 'red')
+            self.print_colored(f"Suggested shortened version: '{shortened}'", 'yellow')
+            
+            choice = self.get_input("Options:\n  1) Use shortened version\n  2) Enter a different name\nSelect option (1/2)", "1")
+            
+            if choice == '1':
+                return shortened
+            elif choice == '2':
+                continue  # Ask for hostname again
+            else:
+                self.print_colored("Invalid choice. Please select 1 or 2.", 'red')
+                continue
+
     def run_command(self, cmd: str, show_output: bool = True, shell: bool = True) -> tuple:
         """Run a shell command and return success status and output"""
         try:
@@ -599,22 +639,23 @@ class R1Setup:
         self.print_colored("Configuration Management:")
         self.print_colored("  1) Configure nodes          - Set up GPU nodes for deployment")
         self.print_colored("  2) Manage configurations    - List, switch, or delete saved configurations")
-        self.print_colored("  3) View configuration        - Display current node configuration")
+        self.print_colored("  3) View configuration       - Display current node configuration")
         self.print_colored("  4) Test node connectivity   - Verify connection to configured nodes")
         print()
         self.print_colored("Deployment:")
         self.print_colored("  5) Deploy full setup        - Deploy Docker + NVIDIA drivers + GPU setup")
         self.print_colored("  6) Deploy Docker only       - Deploy only Docker without GPU setup")
         self.print_colored("  7) Delete edge node         - Completely remove deployed edge node")
+        self.print_colored("  8) Apply new nodes names    - Update node aliases")
         print()
         self.print_colored("Information:")
-        self.print_colored("  8) Get node information     - Retrieve detailed node information")
-        self.print_colored("  9) Get node addresses       - Display node IP addresses")
-        self.print_colored(" 10) Export addresses to CSV  - Save node addresses to CSV file")
+        self.print_colored("  9) Get node information     - Retrieve detailed node information")
+        self.print_colored(" 10) Get node addresses       - Display node IP addresses")
+        self.print_colored(" 11) Export addresses to CSV  - Save node addresses to CSV file")
         print()
         self.print_colored("Settings:")
-        self.print_colored(" 11) Change network environment - Switch between mainnet/testnet/devnet")
-        self.print_colored(" 12) Update CLI               - Check for and install CLI updates")
+        self.print_colored(" 12) Change network environment - Switch between mainnet/testnet/devnet")
+        self.print_colored(" 13) Update CLI                 - Check for and install CLI updates")
         print()
         self.print_colored("  0) Exit")
         print()
@@ -777,7 +818,7 @@ class R1Setup:
         hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
         for i in range(num_nodes):
             self.print_section(f"Configuring Node {i + 1} of {num_nodes}")
-            name = self.get_input(f"Enter name for node {i + 1}", f"gpu-node-{i + 1}")
+            name = self._get_valid_hostname(f"Enter name for node {i + 1}", f"gpu-node-{i + 1}")
             hosts[name] = self._configure_single_node()
             self.print_colored(f"Node '{name}' configured successfully!", 'green')
 
@@ -1036,7 +1077,12 @@ class R1Setup:
         hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
         for i in range(num_nodes):
             self.print_section(f"Configuring Node {i + 1} of {num_nodes}")
-            name = self.get_input(f"Enter name for node {i + 1}", f"gpu-node-{i + 1}")
+            while True:
+                name = self._get_valid_hostname(f"Enter name for node {i + 1}", f"gpu-node-{i + 1}")
+                if name in hosts:
+                    self.print_colored(f"Node '{name}' already exists! Please choose a different name.", 'red')
+                    continue
+                break
             hosts[name] = self._configure_single_node()
             self.print_colored(f"Node '{name}' configured successfully!", 'green')
 
@@ -1219,12 +1265,14 @@ class R1Setup:
     def _add_node(self) -> None:
         """Add a new node to existing configuration"""
         self.print_section("Add New Node")
-        name = self.get_input("Enter name for the new node", required=True)
-
         hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
-        if name in hosts:
-            self.print_colored(f"Node '{name}' already exists!", 'red')
-            return
+        
+        while True:
+            name = self._get_valid_hostname("Enter name for the new node", "")
+            if name in hosts:
+                self.print_colored(f"You already have a node named '{name}'! Please choose a different name.", 'red')
+                continue
+            break
 
         hosts[name] = self._configure_single_node()
         self._save_configuration()
@@ -1247,18 +1295,54 @@ class R1Setup:
             try:
                 choice = int(self.get_input("Select node number")) - 1
                 if 0 <= choice < len(node_list):
-                    name = node_list[choice]
+                    original_name = node_list[choice]
                     break
                 self.print_colored("Invalid selection", 'red')
             except ValueError:
                 self.print_colored("Please enter a number", 'red')
 
-        self.print_colored(f"Updating node: {name}", 'yellow')
-        # Pass existing configuration to preserve values
-        existing_config = hosts[name].copy()
-        hosts[name] = self._configure_single_node(existing_config)
+        self.print_colored(f"Updating node: {original_name}", 'yellow')
+        
+        # Ask if user wants to rename the node
+        rename_node = self.get_input(f"\nDo you want to rename this node? Current name: '{original_name}' (y/n)", "n").lower() == 'y'
+        
+        new_name = original_name
+        if rename_node:
+            while True:
+                new_name = self._get_valid_hostname(f"Enter new name for node (current: {original_name})", original_name)
+                if new_name == original_name:
+                    self.print_colored("New name is the same as current name.", 'yellow')
+                    break
+                if new_name in hosts:
+                    self.print_colored(f"Node name '{new_name}' already exists! Please choose a different name.", 'red')
+                    continue
+                break
+        
+        # Update node configuration
+        existing_config = hosts[original_name].copy()
+        updated_config = self._configure_single_node(existing_config)
+        
+        # Handle name change
+        name_changed = new_name != original_name
+        if name_changed:
+            # Remove old entry and add new one
+            del hosts[original_name]
+            hosts[new_name] = updated_config
+            self.print_colored(f"Node renamed from '{original_name}' to '{new_name}'", 'green')
+        else:
+            # Update existing entry
+            hosts[original_name] = updated_config
+        
         self._save_configuration()
-        self.print_colored(f"Node '{name}' updated successfully!", 'green')
+        
+        if name_changed:
+            self.print_colored(f"Node '{original_name}' updated and renamed to '{new_name}' successfully!", 'green')
+            self.print_colored("\n💡 Recommendation:", 'cyan', bold=True)
+            self.print_colored("Since you changed the node name, consider running option 8 (Apply new node names)", 'yellow')
+            self.print_colored("from the main menu to update the node name on the network.", 'yellow')
+            self.print_colored("This will ensure your node is visible with the new name on the blockchain.", 'white')
+        else:
+            self.print_colored(f"Node '{original_name}' updated successfully!", 'green')
 
     def _delete_node(self) -> None:
         """Delete a node"""
@@ -1470,6 +1554,68 @@ class R1Setup:
             self._update_deletion_metadata()
         else:
             self.print_colored("\nEdge node deletion encountered issues. Please check the output above.", 'red')
+
+        input("Press Enter to continue...")
+
+    def apply_node_names(self) -> None:
+        """Apply new node names (Update node alias configuration)"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        self.print_header("Apply New Node Names")
+
+        # Load configuration to show rename details
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        env = self.get_mnl_app_env()
+
+        # Show rename details
+        self.print_colored(f"🏷️  Node Renaming Details:", 'cyan', bold=True)
+        self.print_colored(f"   • Action: Update node alias configuration for each node", 'white')
+        self.print_colored(f"   • Network: {env if env else 'Not set'}", 'green' if env else 'red')
+        self.print_colored(f"   • Target Nodes: {len(hosts)}", 'white')
+
+        self.print_colored(f"\n🖥️  Target Machines and Names:", 'cyan', bold=True)
+        for name, config in hosts.items():
+            ip = config.get('ansible_host', 'Unknown')
+            user = config.get('ansible_user', 'Unknown')
+            self.print_colored(f"   • {name}: {user}@{ip} → node alias will be set to '{name}'", 'white')
+
+        self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
+        self.print_colored("   • Update the startup configuration file with new node alias", 'yellow')
+        self.print_colored("   • Restart the edge node service", 'yellow')
+        self.print_colored("   • Wait for the service to start", 'yellow')
+        self.print_colored("   • Retrieve and display updated node information", 'yellow')
+
+        if not env:
+            self.print_colored("\n⚠️  WARNING: Network environment is not set!", 'red', bold=True)
+            self.print_colored("   The renaming will proceed, but please ensure network is configured properly.", 'red')
+
+        if self.get_input(f"\n🏷️  Continue with applying new node names to {len(hosts)} node(s)? (y/n)", "y").lower() != 'y':
+            self.print_colored("Node renaming cancelled.", 'yellow')
+            return
+
+        playbook_path = self.config_dir / 'playbooks/rename_nodes.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"Rename playbook not found: {playbook_path}", 'red')
+            input("Press Enter to continue...")
+            return
+
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+
+        self.print_colored("\nStarting node renaming process...", 'cyan')
+        success, _ = self.run_command(cmd, show_output=True)
+
+        if success:
+            self.print_colored("\nNode renaming completed successfully!", 'green')
+            self.print_colored("All nodes have been updated with their new node alias configuration.", 'green')
+        else:
+            self.print_colored("\nNode renaming encountered issues. Please check the output above.", 'red')
 
         input("Press Enter to continue...")
 
@@ -2065,6 +2211,166 @@ class R1Setup:
 
         input("Press Enter to continue...")
 
+    def ensure_active_configuration(self) -> bool:
+        """Ensure there's an active configuration before proceeding to main menu"""
+        # Check if we have a valid active configuration
+        if self.check_hosts_config():
+            return True
+
+        self.print_header("Configuration Required")
+        self.print_colored("⚠️  No active configuration detected!", 'red', bold=True)
+        
+        # Check if we have saved configurations
+        configs = self._list_available_configs()
+        
+        if configs:
+            # If there's only one configuration, automatically select it
+            if len(configs) == 1:
+                config_name, metadata = configs[0]
+                display_name = config_name.replace('.yml', '')
+                
+                # Extract custom name for display
+                custom_name = display_name
+                if '_' in display_name:
+                    parts = display_name.split('_')
+                    if len(parts) >= 2:
+                        # Find where the timestamp starts (8 digits)
+                        for idx, part in enumerate(parts):
+                            if len(part) == 8 and part.isdigit():
+                                custom_name = '_'.join(parts[:idx])
+                                break
+                
+                env = metadata.get('environment', 'unknown')
+                nodes = metadata.get('nodes_count', 0)
+                
+                self.print_colored(f"\n📁 Found 1 saved configuration: {custom_name} ({env}, {nodes} node(s))", 'cyan')
+                self.print_colored("Automatically activating the only available configuration...", 'yellow')
+                
+                if self._load_config_by_name(display_name):
+                    self.print_colored(f"✅ Successfully activated configuration: {custom_name}", 'green')
+                    self.print_colored("Proceeding to main menu...", 'green')
+                    input("Press Enter to continue...")
+                    return True
+                else:
+                    self.print_colored(f"❌ Failed to activate configuration: {custom_name}", 'red')
+                    self.print_colored("The configuration file may be corrupted. Please create a new one.", 'red')
+                    self._create_new_configuration_with_management()
+                    return True
+            
+            # Multiple configurations - show selection menu
+            self.print_colored(f"\n📁 Found {len(configs)} saved configuration(s):", 'cyan')
+            self.print_colored("It looks like you have existing configurations but none are currently active.", 'yellow')
+            self.print_colored("This can happen after reinstalling or updating r1setup.", 'yellow')
+            
+            # Show available configurations
+            for i, (config_name, metadata) in enumerate(configs, 1):
+                display_name = config_name.replace('.yml', '')
+                env = metadata.get('environment', 'unknown')
+                nodes = metadata.get('nodes_count', 0)
+                created_at = metadata.get('created_at')
+                last_deployed_date = metadata.get('last_deployed_date')
+                deployment_status = metadata.get('deployment_status', 'never_deployed')
+                
+                # Extract custom name from the config name
+                custom_name = display_name
+                if '_' in display_name:
+                    parts = display_name.split('_')
+                    if len(parts) >= 2:
+                        # Find where the timestamp starts (8 digits)
+                        for idx, part in enumerate(parts):
+                            if len(part) == 8 and part.isdigit():
+                                custom_name = '_'.join(parts[:idx])
+                                break
+                
+                # Format creation date
+                created_str = "Unknown"
+                if created_at:
+                    try:
+                        if isinstance(created_at, str):
+                            created_dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                            created_str = created_dt.strftime('%Y-%m-%d %H:%M')
+                        else:
+                            created_str = datetime.fromtimestamp(created_at).strftime('%Y-%m-%d %H:%M')
+                    except:
+                        created_str = "Unknown"
+                
+                # Format deployment status
+                deployment_str = ""
+                if deployment_status == 'deployed' and last_deployed_date:
+                    try:
+                        deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
+                        deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
+                        deployment_str = f" | 🚀 Last deployed: {deployed_str}"
+                    except:
+                        deployment_str = " | 🚀 Deployed"
+                elif deployment_status == 'deleted':
+                    deployment_str = " | 🗑️ Deleted"
+                else:
+                    deployment_str = " | 📋 Never deployed"
+                
+                self.print_colored(f"  {i}. {custom_name}", 'cyan', bold=True)
+                self.print_colored(f"     {env} | {nodes} node(s) | Created: {created_str}{deployment_str}", 'white')
+            
+            self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
+            self.print_colored("  1) Select an existing configuration to activate")
+            self.print_colored("  2) Create a new configuration")
+            self.print_colored("  0) Exit")
+            
+            while True:
+                choice = self.get_input("\nSelect option (0-2)", "1")
+                
+                if choice == '0':
+                    self.print_colored("Exiting r1setup.", 'yellow')
+                    return False
+                elif choice == '1':
+                    # Let user select from existing configurations
+                    while True:
+                        try:
+                            selection = int(self.get_input(f"Select configuration number (1-{len(configs)})")) - 1
+                            if 0 <= selection < len(configs):
+                                selected_config = configs[selection][0].replace('.yml', '')
+                                break
+                            self.print_colored("Invalid selection", 'red')
+                        except ValueError:
+                            self.print_colored("Please enter a number", 'red')
+                    
+                    if self._load_config_by_name(selected_config):
+                        self.print_colored(f"✅ Successfully activated configuration: {selected_config}", 'green')
+                        self.print_colored("You can now access the main menu.", 'green')
+                        input("Press Enter to continue...")
+                        return True
+                    else:
+                        self.print_colored(f"❌ Failed to activate configuration: {selected_config}", 'red')
+                        self.print_colored("Please try another configuration or create a new one.", 'red')
+                        continue
+                elif choice == '2':
+                    # Create new configuration
+                    self._create_new_configuration_with_management()
+                    return True
+                else:
+                    self.print_colored("Invalid option. Please enter 0, 1, or 2.", 'red')
+        else:
+            # No saved configurations exist
+            self.print_colored("\n📝 No configurations found!", 'yellow')
+            self.print_colored("You need to create your first configuration to use r1setup.", 'white')
+            self.print_colored("A configuration contains your GPU node connection details and network settings.", 'white')
+            
+            self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
+            self.print_colored("  1) Create your first configuration")
+            self.print_colored("  0) Exit")
+            
+            while True:
+                choice = self.get_input("\nSelect option (0-1)", "1")
+                
+                if choice == '0':
+                    self.print_colored("Exiting r1setup.", 'yellow')
+                    return False
+                elif choice == '1':
+                    self._create_new_configuration_with_management()
+                    return True
+                else:
+                    self.print_colored("Invalid option. Please enter 0 or 1.", 'red')
+
     def run(self) -> None:
         """Main program loop"""
         # Handle version check
@@ -2077,10 +2383,14 @@ class R1Setup:
             self.print_colored("Please ensure Ansible and the required collection are installed.", 'red')
             sys.exit(1)
 
+        # Ensure we have an active configuration before proceeding
+        if not self.ensure_active_configuration():
+            sys.exit(0)
+
         while True:
             try:
                 self.show_main_menu()
-                choice = self.get_input("Select option (0-12)")
+                choice = self.get_input("Select option (0-13)")
 
                 if choice == '0':
                     self.print_colored("Thank you for using Ratio1 Multi-Node Launcher Setup!", 'green')
@@ -2100,14 +2410,16 @@ class R1Setup:
                 elif choice == '7':
                     self.delete_edge_node()
                 elif choice == '8':
-                    self.get_node_info()
+                    self.apply_node_names()
                 elif choice == '9':
-                    self.get_node_addresses()
+                    self.get_node_info()
                 elif choice == '10':
-                    self.export_addresses_csv()
+                    self.get_node_addresses()
                 elif choice == '11':
-                    self.change_network_environment()
+                    self.export_addresses_csv()
                 elif choice == '12':
+                    self.change_network_environment()
+                elif choice == '13':
                     self.update_cli()
                 else:
                     self.print_colored("Invalid option. Please try again.", 'red')
