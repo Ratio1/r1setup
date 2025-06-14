@@ -614,7 +614,7 @@ class R1Setup:
         print()
         self.print_colored("Settings:")
         self.print_colored(" 11) Change network environment - Switch between mainnet/testnet/devnet")
-        self.print_colored(" 12) Update CLI               - Check for and install CLI updates")
+        self.print_colored(" 12) Update CLI & Collection  - Check for and install CLI & Ansible collection updates")
         print()
         self.print_colored("  0) Exit")
         print()
@@ -1813,13 +1813,21 @@ class R1Setup:
                     return None, None
 
                 # Construct download URLs for the latest version
+                # First try release assets, fall back to raw content if needed
                 download_urls = {
                     'r1setup': f"{DOWNLOAD_BASE_URL}/v{latest_version}/r1setup",
                     'ver.py': f"{DOWNLOAD_BASE_URL}/v{latest_version}/ver.py",
                     'update.py': f"{DOWNLOAD_BASE_URL}/v{latest_version}/update.py"
                 }
+                
+                # Fallback URLs using raw GitHub content
+                fallback_urls = {
+                    'r1setup': "https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/r1setup",
+                    'ver.py': "https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/ver.py",
+                    'update.py': "https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/update.py"
+                }
 
-                return latest_version, download_urls
+                return latest_version, download_urls, fallback_urls
 
         except urllib.error.URLError as e:
             error_msg = str(e)
@@ -1831,10 +1839,10 @@ class R1Setup:
                 self.print_colored("3. Update macOS and Python to latest versions", 'white')
             else:
                 self.print_colored(f"Network error checking for updates: {e}", 'red')
-            return None, None
+            return None, None, None
         except Exception as e:
             self.print_colored(f"Error checking for updates: {e}", 'red')
-            return None, None
+            return None, None, None
 
     def _compare_versions(self, version1: str, version2: str) -> int:
         """Compare two version strings. Returns: 1 if v1 > v2, -1 if v1 < v2, 0 if equal"""
@@ -1867,7 +1875,7 @@ class R1Setup:
 
         return 0
 
-    def _perform_update(self, latest_version: str, download_urls: Dict[str, str]) -> bool:
+    def _perform_update(self, latest_version: str, download_urls: Dict[str, str], fallback_urls: Dict[str, str] = None) -> bool:
         """Download and install the update"""
         try:
             self.print_colored("Downloading update files...", 'yellow')
@@ -1909,6 +1917,31 @@ class R1Setup:
                         self.print_colored(f"✅ Downloaded {filename}", 'green')
 
                     except urllib.error.URLError as e:
+                        # Try fallback URL if available
+                        if fallback_urls and filename in fallback_urls:
+                            self.print_colored(f"Trying fallback URL for {filename}...", 'yellow')
+                            try:
+                                fallback_req = urllib.request.Request(fallback_urls[filename])
+                                fallback_req.add_header('User-Agent', f'Ratio1-CLI/{CLI_VERSION}')
+                                
+                                with urllib.request.urlopen(fallback_req, timeout=30, context=ssl_context) as response:
+                                    with open(temp_file, 'wb') as f:
+                                        shutil.copyfileobj(response, f)
+                                
+                                # Verify fallback download
+                                if not temp_file.exists() or temp_file.stat().st_size == 0:
+                                    self.print_colored(f"Fallback download failed - {filename} is empty", 'red')
+                                    if filename == 'r1setup':
+                                        return False  # r1setup is critical
+                                    continue  # Other files are optional
+                                
+                                downloaded_files[filename] = temp_file
+                                self.print_colored(f"✅ Downloaded {filename} (fallback)", 'green')
+                                continue  # Success with fallback, move to next file
+                                
+                            except urllib.error.URLError as fallback_error:
+                                self.print_colored(f"Fallback also failed for {filename}: {fallback_error}", 'red')
+                        
                         if filename == 'r1setup':
                             # r1setup is critical, fail the update
                             self.print_colored(f"Failed to download critical file {filename}: {e}", 'red')
@@ -1976,6 +2009,15 @@ class R1Setup:
 
                     self.print_colored("✅ Installation validated successfully", 'green')
 
+                    # Update Ansible collection
+                    self.print_colored("\nUpdating Ansible collection...", 'yellow')
+                    collection_updated = self._update_ansible_collection()
+                    
+                    if collection_updated:
+                        self.print_colored("✅ Ansible collection updated successfully", 'green')
+                    else:
+                        self.print_colored("⚠️  Ansible collection update failed, but CLI update succeeded", 'yellow')
+
                     # Show backup information
                     self.print_colored("\nBackup files created:", 'cyan')
                     for filename, backup_path in backup_files.items():
@@ -2010,16 +2052,101 @@ class R1Setup:
             self.print_colored(f"Update installation failed: {e}", 'red')
             return False
 
+    def _update_ansible_collection(self) -> bool:
+        """Update the Ansible collection to the latest version"""
+        try:
+            # Use the same collection path as the setup scripts
+            ansible_dir = self.ansible_config_root
+            collections_path = ansible_dir / 'collections'
+            
+            # Ensure collections directory exists
+            collections_path.mkdir(parents=True, exist_ok=True)
+            
+            # Update the collection using ansible-galaxy
+            self.print_colored("  Downloading latest collection from Ansible Galaxy...", 'yellow')
+            
+            cmd = [
+                'ansible-galaxy', 'collection', 'install', 
+                'ratio1.multi_node_launcher',
+                '--collections-path', str(collections_path),
+                '--force', '--upgrade'
+            ]
+            
+            # Set environment variables for the subprocess
+            env = os.environ.copy()
+            env['ANSIBLE_CONFIG'] = str(self.ansible_config_root / 'ansible.cfg')
+            env['ANSIBLE_COLLECTIONS_PATH'] = str(collections_path)
+            env['ANSIBLE_HOME'] = str(self.ansible_config_root)
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+                env=env
+            )
+            
+            if result.returncode == 0:
+                # Verify the collection was installed/updated
+                verify_cmd = [
+                    'ansible-galaxy', 'collection', 'list',
+                    '--collections-path', str(collections_path)
+                ]
+                
+                verify_result = subprocess.run(
+                    verify_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env=env
+                )
+                
+                if verify_result.returncode == 0 and 'ratio1.multi_node_launcher' in verify_result.stdout:
+                    # Extract version information if possible
+                    for line in verify_result.stdout.split('\n'):
+                        if 'ratio1.multi_node_launcher' in line:
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                version = parts[1]
+                                self.print_colored(f"  Updated to collection version: {version}", 'cyan')
+                            break
+                    return True
+                else:
+                    self.print_colored("  Warning: Collection update completed but verification failed", 'yellow')
+                    return False
+            else:
+                # Log the error but don't fail the entire update
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                self.print_colored(f"  ansible-galaxy command failed: {error_msg}", 'red')
+                
+                # Check if it's a common issue and provide helpful hints
+                if "timeout" in error_msg.lower() or "connection" in error_msg.lower():
+                    self.print_colored("  This might be a network connectivity issue. Try again later.", 'yellow')
+                elif "permission" in error_msg.lower():
+                    self.print_colored("  This might be a permissions issue. Check directory permissions.", 'yellow')
+                
+                return False
+                
+        except subprocess.TimeoutExpired:
+            self.print_colored("  Collection update timed out. This might be due to slow network.", 'yellow')
+            return False
+        except FileNotFoundError:
+            self.print_colored("  ansible-galaxy command not found. Please ensure Ansible is installed.", 'yellow')
+            return False
+        except Exception as e:
+            self.print_colored(f"  Unexpected error updating collection: {e}", 'red')
+            return False
+
     def update_cli(self) -> None:
-        """Check for and install CLI updates"""
-        self.print_header("CLI Update")
+        """Check for and install CLI and Ansible collection updates"""
+        self.print_header("CLI & Collection Update")
 
         self.print_colored(f"Current version: {CLI_VERSION}", 'cyan')
         self.print_colored("Checking for updates...", 'yellow')
 
         try:
             # Check for latest version
-            latest_version, download_urls = self._check_latest_version()
+            latest_version, download_urls, fallback_urls = self._check_latest_version()
 
             if not latest_version or not download_urls:
                 self.print_colored("Could not check for updates. Please try again later.", 'red')
@@ -2048,10 +2175,11 @@ class R1Setup:
                 return
 
             # Perform update
-            success = self._perform_update(latest_version, download_urls)
+            success = self._perform_update(latest_version, download_urls, fallback_urls)
 
             if success:
-                self.print_colored(f"\n✅ Successfully updated to version {latest_version}!", 'green')
+                self.print_colored(f"\n✅ Successfully updated CLI to version {latest_version}!", 'green')
+                self.print_colored("✅ Ansible collection has also been updated to the latest version!", 'green')
                 self.print_colored("The CLI will restart with the new version...", 'cyan')
                 input("Press Enter to restart...")
 
