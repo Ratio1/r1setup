@@ -646,15 +646,16 @@ class R1Setup:
         self.print_colored("  5) Deploy full setup        - Deploy Docker + NVIDIA drivers + GPU setup")
         self.print_colored("  6) Deploy Docker only       - Deploy only Docker without GPU setup")
         self.print_colored("  7) Delete edge node         - Completely remove deployed edge node")
+        self.print_colored("  8) Apply new nodes names    - Update node EE_ID configuration")
         print()
         self.print_colored("Information:")
-        self.print_colored("  8) Get node information     - Retrieve detailed node information")
-        self.print_colored("  9) Get node addresses       - Display node IP addresses")
-        self.print_colored(" 10) Export addresses to CSV  - Save node addresses to CSV file")
+        self.print_colored("  9) Get node information     - Retrieve detailed node information")
+        self.print_colored(" 10) Get node addresses       - Display node IP addresses")
+        self.print_colored(" 11) Export addresses to CSV  - Save node addresses to CSV file")
         print()
         self.print_colored("Settings:")
-        self.print_colored(" 11) Change network environment - Switch between mainnet/testnet/devnet")
-        self.print_colored(" 12) Update CLI               - Check for and install CLI updates")
+        self.print_colored(" 12) Change network environment - Switch between mainnet/testnet/devnet")
+        self.print_colored(" 13) Update CLI               - Check for and install CLI updates")
         print()
         self.print_colored("  0) Exit")
         print()
@@ -1520,6 +1521,68 @@ class R1Setup:
 
         input("Press Enter to continue...")
 
+    def apply_node_names(self) -> None:
+        """Apply new node names (Update EE_ID configuration)"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        self.print_header("Apply New Node Names")
+
+        # Load configuration to show rename details
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        env = self.get_mnl_app_env()
+
+        # Show rename details
+        self.print_colored(f"🏷️  Node Renaming Details:", 'cyan', bold=True)
+        self.print_colored(f"   • Action: Update EE_ID configuration for each node", 'white')
+        self.print_colored(f"   • Network: {env if env else 'Not set'}", 'green' if env else 'red')
+        self.print_colored(f"   • Target Nodes: {len(hosts)}", 'white')
+
+        self.print_colored(f"\n🖥️  Target Machines and Names:", 'cyan', bold=True)
+        for name, config in hosts.items():
+            ip = config.get('ansible_host', 'Unknown')
+            user = config.get('ansible_user', 'Unknown')
+            self.print_colored(f"   • {name}: {user}@{ip} → EE_ID will be set to '{name}'", 'white')
+
+        self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
+        self.print_colored("   • Update the startup configuration file with new EE_ID", 'yellow')
+        self.print_colored("   • Restart the edge node service", 'yellow')
+        self.print_colored("   • Wait for the service to start", 'yellow')
+        self.print_colored("   • Retrieve and display updated node information", 'yellow')
+
+        if not env:
+            self.print_colored("\n⚠️  WARNING: Network environment is not set!", 'red', bold=True)
+            self.print_colored("   The renaming will proceed, but please ensure network is configured properly.", 'red')
+
+        if self.get_input(f"\n🏷️  Continue with applying new node names to {len(hosts)} node(s)? (y/n)", "y").lower() != 'y':
+            self.print_colored("Node renaming cancelled.", 'yellow')
+            return
+
+        playbook_path = self.config_dir / 'playbooks/rename_nodes.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"Rename playbook not found: {playbook_path}", 'red')
+            input("Press Enter to continue...")
+            return
+
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+
+        self.print_colored("\nStarting node renaming process...", 'cyan')
+        success, _ = self.run_command(cmd, show_output=True)
+
+        if success:
+            self.print_colored("\nNode renaming completed successfully!", 'green')
+            self.print_colored("All nodes have been updated with their new EE_ID configuration.", 'green')
+        else:
+            self.print_colored("\nNode renaming encountered issues. Please check the output above.", 'red')
+
+        input("Press Enter to continue...")
+
     def _deploy_setup(self, playbook: str, title: str, description: str, extra_vars: str = "") -> None:
         """Common deployment logic"""
         if not self.check_hosts_config():
@@ -2291,7 +2354,7 @@ class R1Setup:
         while True:
             try:
                 self.show_main_menu()
-                choice = self.get_input("Select option (0-12)")
+                choice = self.get_input("Select option (0-13)")
 
                 if choice == '0':
                     self.print_colored("Thank you for using Ratio1 Multi-Node Launcher Setup!", 'green')
@@ -2311,14 +2374,16 @@ class R1Setup:
                 elif choice == '7':
                     self.delete_edge_node()
                 elif choice == '8':
-                    self.get_node_info()
+                    self.apply_node_names()
                 elif choice == '9':
-                    self.get_node_addresses()
+                    self.get_node_info()
                 elif choice == '10':
-                    self.export_addresses_csv()
+                    self.get_node_addresses()
                 elif choice == '11':
-                    self.change_network_environment()
+                    self.export_addresses_csv()
                 elif choice == '12':
+                    self.change_network_environment()
+                elif choice == '13':
                     self.update_cli()
                 else:
                     self.print_colored("Invalid option. Please try again.", 'red')

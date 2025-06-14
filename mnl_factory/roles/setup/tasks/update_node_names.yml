@@ -1,3 +1,4 @@
+---
 - name: Ensure config startup directory exists
   ansible.builtin.file:
     path: "{{ mnl_config_startup_path | dirname }}"
@@ -20,12 +21,30 @@
     mode: '0644'
   become: yes
   when: not config_file_stat.stat.exists
+  register: config_created
 
 - name: Read existing startup configuration
   ansible.builtin.slurp:
     src: "{{ mnl_config_startup_path }}"
   register: config_content
   when: config_file_stat.stat.exists
+
+- name: Parse current EE_ID from existing configuration
+  set_fact:
+    current_ee_id: "{{ (config_content.content | b64decode | from_json).EE_ID | default('') }}"
+  when: config_file_stat.stat.exists and config_content is defined
+
+- name: Check if EE_ID update is needed
+  set_fact:
+    ee_id_needs_update: "{{ not config_file_stat.stat.exists or config_created is changed or (current_ee_id | default('')) != inventory_hostname }}"
+
+- name: Display EE_ID status
+  debug:
+    msg: |
+      Node: {{ inventory_hostname }}
+      Current EE_ID: {{ current_ee_id | default('not set') }}
+      Target EE_ID: {{ inventory_hostname }}
+      Update needed: {{ ee_id_needs_update }}
 
 - name: Update EE_ID in existing startup configuration
   ansible.builtin.copy:
@@ -34,7 +53,16 @@
     backup: yes
     mode: '0644'
   become: yes
-  when: config_file_stat.stat.exists
+  when: 
+    - config_file_stat.stat.exists
+    - ee_id_needs_update | bool
+    - config_created is not changed
+  register: config_updated
+
+- name: Skip message when EE_ID is already correct
+  debug:
+    msg: "EE_ID is already set to '{{ inventory_hostname }}' - skipping update and restart"
+  when: not (ee_id_needs_update | bool)
 
 - name: Restart edge node service
   ansible.builtin.systemd:
@@ -42,22 +70,30 @@
     state: restarted
     enabled: yes
   become: yes
+  when: ee_id_needs_update | bool
 
 - name: Wait for 20 seconds, for node to start
   ansible.builtin.pause:
     seconds: 20
+  when: ee_id_needs_update | bool
 
 - name: Run get_node_info command
   ansible.builtin.shell: get_node_info
   register: node_info
   ignore_errors: true
+  when: ee_id_needs_update | bool
 
 - name: Display node information
   debug:
     var: node_info.stdout_lines
-  when: node_info.stdout_lines is defined
+  when: 
+    - ee_id_needs_update | bool
+    - node_info.stdout_lines is defined
 
 - name: Display error if command failed
   debug:
     var: node_info.stderr_lines
-  when: node_info.stderr_lines is defined and node_info.stderr_lines | length > 0
+  when: 
+    - ee_id_needs_update | bool
+    - node_info.stderr_lines is defined 
+    - node_info.stderr_lines | length > 0 
