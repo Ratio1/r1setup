@@ -2125,6 +2125,40 @@ class R1Setup:
         configs = self._list_available_configs()
         
         if configs:
+            # If there's only one configuration, automatically select it
+            if len(configs) == 1:
+                config_name, metadata = configs[0]
+                display_name = config_name.replace('.yml', '')
+                
+                # Extract custom name for display
+                custom_name = display_name
+                if '_' in display_name:
+                    parts = display_name.split('_')
+                    if len(parts) >= 2:
+                        # Find where the timestamp starts (8 digits)
+                        for idx, part in enumerate(parts):
+                            if len(part) == 8 and part.isdigit():
+                                custom_name = '_'.join(parts[:idx])
+                                break
+                
+                env = metadata.get('environment', 'unknown')
+                nodes = metadata.get('nodes_count', 0)
+                
+                self.print_colored(f"\n📁 Found 1 saved configuration: {custom_name} ({env}, {nodes} node(s))", 'cyan')
+                self.print_colored("Automatically activating the only available configuration...", 'yellow')
+                
+                if self._load_config_by_name(display_name):
+                    self.print_colored(f"✅ Successfully activated configuration: {custom_name}", 'green')
+                    self.print_colored("Proceeding to main menu...", 'green')
+                    input("Press Enter to continue...")
+                    return True
+                else:
+                    self.print_colored(f"❌ Failed to activate configuration: {custom_name}", 'red')
+                    self.print_colored("The configuration file may be corrupted. Please create a new one.", 'red')
+                    self._create_new_configuration_with_management()
+                    return True
+            
+            # Multiple configurations - show selection menu
             self.print_colored(f"\n📁 Found {len(configs)} saved configuration(s):", 'cyan')
             self.print_colored("It looks like you have existing configurations but none are currently active.", 'yellow')
             self.print_colored("This can happen after reinstalling or updating r1setup.", 'yellow')
