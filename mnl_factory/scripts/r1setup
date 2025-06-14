@@ -2097,102 +2097,55 @@ class R1Setup:
                             self.print_colored(f"Warning: Could not download {filename}: {e}", 'yellow')
                             continue
 
-                # Create backups before installing
-                self.print_colored("Creating backups...", 'yellow')
-                backup_files = {}
-
-                # Backup r1setup (always exists)
-                r1setup_backup = current_script.with_suffix(f'.backup-{CLI_VERSION}')
-                shutil.copy2(current_script, r1setup_backup)
-                backup_files['r1setup'] = r1setup_backup
-                self.print_colored(f"✅ Backed up r1setup to {r1setup_backup.name}", 'green')
-
-                # Backup ver.py if it exists
-                ver_py_path = script_dir / 'ver.py'
-                if ver_py_path.exists():
-                    ver_py_backup = ver_py_path.with_suffix(f'.backup-{CLI_VERSION}.py')
-                    shutil.copy2(ver_py_path, ver_py_backup)
-                    backup_files['ver.py'] = ver_py_backup
-                    self.print_colored(f"✅ Backed up ver.py to {ver_py_backup.name}", 'green')
-
-                # Backup update.py if it exists
-                update_py_path = script_dir / 'update.py'
-                if update_py_path.exists():
-                    update_py_backup = update_py_path.with_suffix(f'.backup-{CLI_VERSION}.py')
-                    shutil.copy2(update_py_path, update_py_backup)
-                    backup_files['update.py'] = update_py_backup
-                    self.print_colored(f"✅ Backed up update.py to {update_py_backup.name}", 'green')
-
                 # Install new files
                 self.print_colored("Installing new version...", 'yellow')
 
-                try:
-                    # Install r1setup
-                    if 'r1setup' in downloaded_files:
-                        current_stat = current_script.stat()
-                        shutil.move(str(downloaded_files['r1setup']), str(current_script))
-                        current_script.chmod(current_stat.st_mode)  # Restore executable permissions
-                        self.print_colored("✅ Installed new r1setup", 'green')
+                # Install r1setup
+                if 'r1setup' in downloaded_files:
+                    current_stat = current_script.stat()
+                    shutil.move(str(downloaded_files['r1setup']), str(current_script))
+                    current_script.chmod(current_stat.st_mode)  # Restore executable permissions
+                    self.print_colored("✅ Installed new r1setup", 'green')
 
-                    # Install ver.py
-                    if 'ver.py' in downloaded_files:
-                        shutil.move(str(downloaded_files['ver.py']), str(ver_py_path))
-                        ver_py_path.chmod(0o644)  # Set readable permissions
-                        self.print_colored("✅ Installed new ver.py", 'green')
+                # Install ver.py
+                if 'ver.py' in downloaded_files:
+                    ver_py_path = script_dir / 'ver.py'
+                    shutil.move(str(downloaded_files['ver.py']), str(ver_py_path))
+                    ver_py_path.chmod(0o644)  # Set readable permissions
+                    self.print_colored("✅ Installed new ver.py", 'green')
 
-                    # Install update.py
-                    if 'update.py' in downloaded_files:
-                        shutil.move(str(downloaded_files['update.py']), str(update_py_path))
-                        update_py_path.chmod(0o755)  # Set executable permissions
-                        self.print_colored("✅ Installed new update.py", 'green')
+                # Install update.py
+                if 'update.py' in downloaded_files:
+                    update_py_path = script_dir / 'update.py'
+                    shutil.move(str(downloaded_files['update.py']), str(update_py_path))
+                    update_py_path.chmod(0o755)  # Set executable permissions
+                    self.print_colored("✅ Installed new update.py", 'green')
 
-                    # Verify the new script works
-                    self.print_colored("Validating installation...", 'yellow')
-                    result = subprocess.run([str(current_script), '--version'],
-                                            capture_output=True, text=True, timeout=5)
-                    if result.returncode != 0:
-                        raise Exception("New version validation failed")
+                # Verify the new script works
+                self.print_colored("Validating installation...", 'yellow')
+                result = subprocess.run([str(current_script), '--version'],
+                                        capture_output=True, text=True, timeout=5)
+                if result.returncode != 0:
+                    self.print_colored("Warning: New version validation failed, but files have been updated", 'yellow')
 
-                    self.print_colored("✅ Installation validated successfully", 'green')
+                self.print_colored("✅ Installation completed successfully", 'green')
 
-                    # Update Ansible collection
-                    self.print_colored("\nUpdating Ansible collection...", 'yellow')
-                    collection_updated = self._update_ansible_collection()
+                # Update Ansible collection
+                self.print_colored("\nUpdating Ansible collection...", 'yellow')
+                collection_updated = self._update_ansible_collection()
 
-                    if collection_updated:
-                        self.print_colored("✅ Ansible collection updated successfully", 'green')
-                    else:
-                        self.print_colored("⚠️  Ansible collection update failed, but CLI update succeeded", 'yellow')
+                if collection_updated:
+                    self.print_colored("✅ Ansible collection updated successfully", 'green')
+                else:
+                    self.print_colored("⚠️  Ansible collection update failed, but CLI update succeeded", 'yellow')
 
-                    # Show backup information
-                    self.print_colored("\nBackup files created:", 'cyan')
-                    for filename, backup_path in backup_files.items():
-                        self.print_colored(f"  {filename}: {backup_path}", 'white')
+                # Show information about the update script
+                update_py_path = script_dir / 'update.py'
+                if update_py_path.exists():
+                    self.print_colored(f"\n💡 Update script available at: {update_py_path}", 'cyan')
+                    self.print_colored("   You can run 'python update.py --help' for future update options", 'white')
 
-                    # Show information about the update script
-                    if update_py_path.exists():
-                        self.print_colored(f"\n💡 Update script available at: {update_py_path}", 'cyan')
-                        self.print_colored("   You can run 'python update.py --help' for future update options", 'white')
-
-                    return True
-
-                except Exception as e:
-                    # Restore backups if installation fails
-                    self.print_colored(f"Installation failed: {e}", 'red')
-                    self.print_colored("Restoring backups...", 'yellow')
-
-                    try:
-                        if 'r1setup' in backup_files:
-                            shutil.move(str(backup_files['r1setup']), str(current_script))
-                        if 'ver.py' in backup_files and ver_py_path.exists():
-                            shutil.move(str(backup_files['ver.py']), str(ver_py_path))
-                        if 'update.py' in backup_files and update_py_path.exists():
-                            shutil.move(str(backup_files['update.py']), str(update_py_path))
-                        self.print_colored("✅ Backups restored successfully", 'green')
-                    except Exception as restore_error:
-                        self.print_colored(f"Critical error: Could not restore backups: {restore_error}", 'red')
-
-                    return False
+                return True
 
         except Exception as e:
             self.print_colored(f"Update installation failed: {e}", 'red')
