@@ -80,12 +80,4 @@ jobs:
           asset_name: update.py
           asset_content_type: text/x-python
 
-      - name: Upload Packaged Collection
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mnl_factory/ratio1-multi_node_launcher-*.tar.gz
-          asset_name: ratio1-multi_node_launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz
-          asset_content_type: application/gzip 
+ 
