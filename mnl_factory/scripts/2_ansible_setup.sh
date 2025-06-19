@@ -55,7 +55,7 @@ set_install_dirs() {
     ANSIBLE_DIR="$REAL_HOME/.ratio1/ansible_config"
 
     # Collection path that matches what 3_configure.py and 4_run_setup.sh expect
-    COLLECTION_PATH="$ANSIBLE_DIR/collections/ansible_collections/ratio1/multi_node_launcher"
+    COLLECTION_PATH="$ANSIBLE_DIR/collections/ansible_collections/ratio1/r1setup"
 }
 
 # Create required directories
@@ -80,7 +80,7 @@ create_ansible_cfg() {
 
     if [ ! -f "$cfg_path" ]; then
         cfg_content="[defaults]
-inventory = $ANSIBLE_DIR/collections/ansible_collections/ratio1/multi_node_launcher/hosts.yml
+inventory = $ANSIBLE_DIR/collections/ansible_collections/ratio1/r1setup/hosts.yml
 host_key_checking = False
 hash_behaviour = merge
 local_tmp = $ANSIBLE_DIR/tmp
@@ -108,10 +108,10 @@ install_collection() {
     print_message "Installing Multi Node Launcher collection..." "$YELLOW"
     
     # Install the collection
-    sudo -u "$REAL_USER" env HOME="$REAL_HOME" ansible-galaxy collection install ratio1.multi_node_launcher --collections-path "$ANSIBLE_DIR/collections" --force --upgrade
+    sudo -u "$REAL_USER" env HOME="$REAL_HOME" ansible-galaxy collection install ratio1.r1setup --collections-path "$ANSIBLE_DIR/collections" --force --upgrade
     
     # Verify collection installation
-    COLLECTION_INFO=$(sudo -u "$REAL_USER" env HOME="$REAL_HOME" ansible-galaxy collection list --collections-path "$ANSIBLE_DIR/collections" 2>/dev/null | grep "ratio1.multi_node_launcher" || true)
+    COLLECTION_INFO=$(sudo -u "$REAL_USER" env HOME="$REAL_HOME" ansible-galaxy collection list --collections-path "$ANSIBLE_DIR/collections" 2>/dev/null | grep "ratio1.r1setup" || true)
     if [ -z "$COLLECTION_INFO" ]; then
         print_message "Failed to detect installed collection" "$RED"
         exit 1
@@ -125,7 +125,7 @@ install_collection() {
         exit 1
     fi
     
-    print_message "Collection ratio1.multi_node_launcher v$COLLECTION_VER installed successfully" "$GREEN"
+    print_message "Collection ratio1.r1setup v$COLLECTION_VER installed successfully" "$GREEN"
     print_message "Collection path: $COLLECTION_PATH" "$GREEN"
 }
 

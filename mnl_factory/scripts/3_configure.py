@@ -31,7 +31,7 @@ class ConfigManager:
     self.ratio1_base_dir = self.real_home / '.ratio1'
     self.ansible_config_root = self.ratio1_base_dir / 'ansible_config'
     # self.config_dir is where the collection is, and thus where hosts.yml should reside within it.
-    self.config_dir = self.ansible_config_root / 'collections/ansible_collections/ratio1/multi_node_launcher'
+    self.config_dir = self.ansible_config_root / 'collections/ansible_collections/ratio1/r1setup'
     self.config_file = self.config_dir / 'hosts.yml'
 
     # Path to unified variables file where we will persist the selected network environment
