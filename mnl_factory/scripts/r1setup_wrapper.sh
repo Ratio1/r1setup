@@ -24,7 +24,7 @@ VENV_PYTHON="$REAL_HOME/.ratio1/r1_setup/.r1_venv/bin/python3"
 if [ ! -f "$R1SETUP_SCRIPT" ]; then
     echo "ERROR: r1setup script not found at: $R1SETUP_SCRIPT"
     echo "Please ensure the Ratio1 Multi-Node Launcher is properly installed."
-    echo "Run the install-factory script to install or reinstall."
+    echo "Run the setup script to install or reinstall."
     exit 1
 fi
 

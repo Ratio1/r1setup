@@ -5,7 +5,7 @@
 
 ## Installation
 ```bash
-curl -sSL https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/install-factory.sh | bash
+curl -sSL https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/install.sh | bash
 ```
 
 ## Usage
