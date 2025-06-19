@@ -31,7 +31,7 @@ Before you start, ensure that you have met the following requirements:
 You can quickly set up your GPU nodes by running the following one-liner:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/install.sh -o install-r1setup.sh && bash install-r1setup.sh
+curl -sL https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/install.sh -o install.sh && bash install.sh && rm install.sh
 ```
 
 This command will:
