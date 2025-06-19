@@ -64,7 +64,7 @@ except ImportError:
     CLI_VERSION = "1.1.6"
 
 # Version information
-UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/ver.py"
+UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/ver.py"
 DOWNLOAD_BASE_URL = "https://github.com/Ratio1/multi_node_launcher/releases/download"
 
 class R1Setup:
@@ -110,9 +110,9 @@ class R1Setup:
 
         # Set installation directories based on OS
         if self.os_type == "macos":
-            self.install_dir = self.real_home / "multi-node-launcher"
+            self.install_dir = self.real_home / "r1setup"
         else:
-            self.install_dir = Path("/opt/multi-node-launcher")
+            self.install_dir = Path("/opt/r1setup")
 
         # Set up Ansible environment
         self._setup_ansible_env()
@@ -1968,9 +1968,9 @@ class R1Setup:
 
                 # Fallback URLs using raw GitHub content
                 fallback_urls = {
-                    'r1setup': "https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/r1setup",
-                    'ver.py': "https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/ver.py",
-                    'update.py': "https://raw.githubusercontent.com/Ratio1/multi-node-launcher/refs/heads/main/mnl_factory/scripts/update.py"
+                    'r1setup': "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/r1setup",
+                    'ver.py': "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/ver.py",
+                    'update.py': "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/update.py"
                 }
 
                 return latest_version, download_urls, fallback_urls

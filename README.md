@@ -260,4 +260,4 @@ MIT
 - Andrei Damian
 - Vitalii Toderian
 
-curl -sSL https://raw.githubusercontent.com/YourUsername/multi-node-launcher/main/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/YourUsername/r1setup/main/install.sh | sudo bash

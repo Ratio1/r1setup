@@ -131,9 +131,9 @@ get_user_info() {
 # Set installation directories based on OS
 set_install_dirs() {
     if [ "$OS_TYPE" = "macos" ]; then
-        INSTALL_DIR="$REAL_HOME/multi-node-launcher"
+        INSTALL_DIR="$REAL_HOME/r1setup"
     else
-        INSTALL_DIR="/opt/multi-node-launcher"
+        INSTALL_DIR="/opt/r1setup"
     fi
     
     # Use the unified configuration root (created in 2_ansible_setup.sh)

@@ -1,6 +1,6 @@
 namespace: "ratio1"
 name: "multi_node_launcher"
-version: "1.1.16"
+version: "1.1.17"
 readme: "README.md"
 authors:
   - Andrei Damian <andrei.damian@me.com>
@@ -13,7 +13,7 @@ tags:
   - deployment
   - launcher
   - ratio1
-repository: "https://github.com/Ratio1/multi-node-launcher"
+repository: "https://github.com/Ratio1/r1setup"
 documentation: "http://docs.example.com"
 homepage: "http://example.com"
 issues: "https://github.com/yourusername/multi_node_launcher/issues"

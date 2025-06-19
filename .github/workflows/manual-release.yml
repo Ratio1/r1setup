@@ -20,7 +20,7 @@ on:
           - Bug fixes and improvements
           - Updated CLI components
           
-          **Full Changelog**: https://github.com/Ratio1/multi-node-launcher/commits/main
+          **Full Changelog**: https://github.com/Ratio1/r1setup/commits/main
       prerelease:
         description: 'Mark as pre-release'
         required: false
@@ -145,8 +145,8 @@ jobs:
         run: |
           echo "📦 Creating complete repository archive..."
           # Create a clean archive of the entire repository
-          git archive --format=tar.gz --prefix=multi-node-launcher-${{ inputs.version }}/ HEAD > multi-node-launcher-${{ inputs.version }}.tar.gz
-          echo "✅ Created repository archive: multi-node-launcher-${{ inputs.version }}.tar.gz"
+          git archive --format=tar.gz --prefix=r1setup-${{ inputs.version }}/ HEAD > r1setup-${{ inputs.version }}.tar.gz
+          echo "✅ Created repository archive: r1setup-${{ inputs.version }}.tar.gz"
           
           # Also create individual CLI files for direct download
           mkdir -p cli-files
@@ -160,8 +160,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./multi-node-launcher-${{ inputs.version }}.tar.gz
-          asset_name: multi-node-launcher-${{ inputs.version }}.tar.gz
+          asset_path: ./r1setup-${{ inputs.version }}.tar.gz
+          asset_name: r1setup-${{ inputs.version }}.tar.gz
           asset_content_type: application/gzip
 
       - name: Upload CLI Scripts (for direct update)
@@ -207,13 +207,13 @@ jobs:
           echo "- **Tag created:** ${{ inputs.create_tag }}"
           echo ""
           echo "📄 **Uploaded Assets:**"
-          echo "- **multi-node-launcher-${{ inputs.version }}.tar.gz** (complete repository archive)"
+          echo "- **r1setup-${{ inputs.version }}.tar.gz** (complete repository archive)"
           echo "- **r1setup** (CLI script for direct update)"
           echo "- **ver.py** (version file for direct update)"
           echo "- **update.py** (update script for direct update)"
           echo ""
           echo "💡 **Download Options:**"
-          echo "- **Full Repository**: Download multi-node-launcher-${{ inputs.version }}.tar.gz for complete codebase"
+          echo "- **Full Repository**: Download r1setup-${{ inputs.version }}.tar.gz for complete codebase"
           echo "- **CLI Only**: Download individual r1setup, ver.py, update.py files for updates"
           echo "- **Ansible Collection**: Available separately via Ansible Galaxy"
           echo ""
