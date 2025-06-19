@@ -1,11 +1,11 @@
 ---
 # Basic application configuration
-mnl_app_name: "edge_node_app"
+mnl_app_name: "edge_node"
 mnl_app_version: "1.0.0"
 mnl_dev_mode: false
 
 # Service configuration
-edge_node_service_name: "edge_node_service"
+edge_node_service_name: "edge_node"
 
 # File system configuration
 mnl_base_folder: "/var/cache/{{ mnl_app_name }}"
