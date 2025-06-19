@@ -79,7 +79,6 @@ print_message "2. Ansible setup..." "$YELLOW"
 print_message "\n3. Setup complete! You can now use the unified r1setup command:" "$GREEN"
 print_message "   • Run 'r1setup' from anywhere to configure nodes and deploy" "$GREEN"
 print_message "   • Or use: $SETUP_SCRIPTS_DIR/r1setup" "$GREEN"
-print_message "\nNote: The old individual scripts (3_configure.py, 4_run_setup.sh) have been" "$YELLOW"
 print_message "replaced by the unified r1setup command with a cleaner interface." "$YELLOW"
 
 # Cleanup temporary directory
