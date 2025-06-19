@@ -65,7 +65,7 @@ except ImportError:
 
 # Version information
 UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/ver.py"
-DOWNLOAD_BASE_URL = "https://github.com/Ratio1/r1setup/releases/download"
+DOWNLOAD_BASE_URL = "https://github.com/Ratio1/multi_node_launcher/releases/download"
 
 class R1Setup:
     def __init__(self):
@@ -97,7 +97,7 @@ class R1Setup:
         self.ratio1_base_dir = self.real_home / '.ratio1'
         self.r1_setup_dir = self.ratio1_base_dir / 'r1_setup'
         self.ansible_config_root = self.ratio1_base_dir / 'ansible_config'
-        self.config_dir = self.ansible_config_root / 'collections/ansible_collections/ratio1/r1setup'
+        self.config_dir = self.ansible_config_root / 'collections/ansible_collections/ratio1/multi_node_launcher'
 
         # Configuration management paths
         self.configs_dir = self.r1_setup_dir / 'configs'
@@ -523,7 +523,7 @@ class R1Setup:
             show_output=False
         )
 
-        if not success or "ratio1.r1setup" not in output:
+        if not success or "ratio1.multi_node_launcher" not in output:
             self.print_colored("Required Ansible collection is not installed!", 'red')
             return False
 
@@ -2157,7 +2157,7 @@ class R1Setup:
 
             cmd = [
                 'ansible-galaxy', 'collection', 'install',
-                'ratio1.r1setup',
+                'ratio1.multi_node_launcher',
                 '--collections-path', str(collections_path),
                 '--force', '--upgrade'
             ]
@@ -2191,10 +2191,10 @@ class R1Setup:
                     env=env
                 )
 
-                if verify_result.returncode == 0 and 'ratio1.r1setup' in verify_result.stdout:
+                if verify_result.returncode == 0 and 'ratio1.multi_node_launcher' in verify_result.stdout:
                     # Extract version information if possible
                     for line in verify_result.stdout.split('\n'):
-                        if 'ratio1.r1setup' in line:
+                        if 'ratio1.multi_node_launcher' in line:
                             parts = line.split()
                             if len(parts) >= 2:
                                 version = parts[1]
@@ -2252,7 +2252,7 @@ class R1Setup:
             current_version = None
             if result.returncode == 0:
                 for line in result.stdout.split('\n'):
-                    if 'ratio1.r1setup' in line:
+                    if 'ratio1.multi_node_launcher' in line:
                         parts = line.split()
                         if len(parts) >= 2:
                             current_version = parts[1]

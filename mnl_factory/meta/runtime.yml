@@ -4,8 +4,8 @@ requires_ansible: ">=2.9"
 #plugin_routing:
 #  modules:
 #    gpu_setup:
-#      redirect: ratio1.r1setup.gpu_setup
+#      redirect: ratio1.multi_node_launcher.gpu_setup
 #    nvidia_drivers:
-#      redirect: ratio1.r1setup.nvidia_drivers
+#      redirect: ratio1.multi_node_launcher.nvidia_drivers
 #    docker:
-#      redirect: ratio1.r1setup.docker
+#      redirect: ratio1.multi_node_launcher.docker

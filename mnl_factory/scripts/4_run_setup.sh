@@ -140,7 +140,7 @@ set_install_dirs() {
     ANSIBLE_DIR="$REAL_HOME/.ratio1/ansible_config"
     
     # Collection path will be the same regardless of OS but path may differ
-    COLLECTION_PATH="$ANSIBLE_DIR/collections/ansible_collections/ratio1/r1setup"
+    COLLECTION_PATH="$ANSIBLE_DIR/collections/ansible_collections/ratio1/multi_node_launcher"
     debug "Installation directory: $INSTALL_DIR"
     debug "Ansible directory: $ANSIBLE_DIR"
     debug "Collection path: $COLLECTION_PATH"
@@ -193,7 +193,7 @@ verify_ansible() {
     debug "Ansible is installed"
 
     debug "Verifying Ansible collection"
-    if ! ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-galaxy collection list | grep -q "ratio1.r1setup"; then
+    if ! ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-galaxy collection list | grep -q "ratio1.multi_node_launcher"; then
         error "Required Ansible collection is not installed!"
         exit 1
     fi
