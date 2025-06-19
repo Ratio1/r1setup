@@ -63,6 +63,9 @@ except ImportError:
     # Fallback to hardcoded version if ver.py is not available
     CLI_VERSION = "1.1.6"
 
+# Debug configuration
+DEBUG = False  # Set to True to enable debug output
+
 # Version information
 UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/ver.py"
 DOWNLOAD_BASE_URL = "https://github.com/Ratio1/multi_node_launcher/releases/download"
@@ -339,6 +342,11 @@ class R1Setup:
         if bold:
             color_code = '\033[1m' + color_code
         print(f"{color_code}{text}{self.colors['end']}", end=end)
+
+    def print_debug(self, text: str, color: str = 'cyan') -> None:
+        """Print debug text only when DEBUG is enabled"""
+        if DEBUG:
+            self.print_colored(f"[DEBUG] {text}", color)
 
     def print_header(self, title: str) -> None:
         """Print a formatted header"""
@@ -650,8 +658,8 @@ class R1Setup:
         print()
         self.print_colored("Information:")
         self.print_colored("  9) Get node information     - Retrieve detailed node information")
-        self.print_colored(" 10) Get node addresses       - Display node IP addresses")
-        self.print_colored(" 11) Export addresses to CSV  - Save node addresses to CSV file")
+        self.print_colored(" 10) Get node addresses       - Display nodes addresses")
+        self.print_colored(" 11) Export addresses to CSV  - Save addresses to CSV file")
         print()
         self.print_colored("Settings:")
         self.print_colored(" 12) Change network environment - Switch between mainnet/testnet/devnet")
@@ -1744,8 +1752,152 @@ class R1Setup:
 
         input("Press Enter to continue...")
 
+    def _get_node_info_data(self) -> Dict[str, Dict[str, Any]]:
+        """Get node information data by running the get_node_info playbook and parsing output"""
+        playbook_path = self.config_dir / 'playbooks/get_node_info.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"Node info playbook not found: {playbook_path}", 'red')
+            return {}
+
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+
+        self.print_colored("Retrieving node information...", 'yellow')
+        success, output = self.run_command(cmd, show_output=False)
+
+        if not success:
+            self.print_colored("Failed to run node info playbook", 'red')
+            return {}
+
+        # Debug: show first few lines of output
+        output_lines = output.split('\n')
+        self.print_debug(f"Parsing output with {len(output_lines)} lines...")
+
+        # Parse the output to extract JSON data using a more robust approach
+        node_info = {}
+        import re
+        
+        # Find all instances of node result blocks
+        # Look for pattern: ok: [node-name] => { ... "node_info.stdout_lines": [ ... ] }
+        
+        # Use a different approach: find each node result block
+        result_blocks = re.split(r'(?=ok: \[[^\]]+\] => \{)', output)
+        
+        self.print_debug(f"Split output into {len(result_blocks)} result blocks")
+        
+        for block in result_blocks:
+            if not block.strip():
+                continue
+                
+            # Extract node name from the block
+            node_match = re.search(r'ok: \[([^\]]+)\] => \{', block)
+            if not node_match:
+                continue
+                
+            node_name = node_match.group(1)
+            
+            # Check if this block contains node_info.stdout_lines
+            if '"node_info.stdout_lines":' not in block:
+                continue
+            
+            try:
+                # Extract the JSON lines from stdout_lines array
+                stdout_match = re.search(r'"node_info\.stdout_lines":\s*\[(.*?)\]', block, re.DOTALL)
+                if not stdout_match:
+                    self.print_debug(f"Could not find stdout_lines for {node_name}")
+                    continue
+                
+                stdout_content = stdout_match.group(1)
+                
+                # Extract all quoted strings from the stdout_lines array
+                quoted_lines = re.findall(r'"([^"]*)"', stdout_content)
+                
+                # Reconstruct the JSON string
+                json_str = ''
+                for line in quoted_lines:
+                    # Unescape the quotes and add to JSON string
+                    unescaped_line = line.replace('\\"', '"')
+                    json_str += unescaped_line + '\n'
+                
+                # Parse the JSON
+                if json_str.strip():
+                    node_data = json.loads(json_str.strip())
+                    node_info[node_name] = node_data
+                    self.print_debug(f"Successfully parsed JSON for {node_name}")
+                    
+            except (json.JSONDecodeError, Exception) as e:
+                self.print_debug(f"Failed to parse JSON for {node_name}: {e}")
+                # Continue with other nodes
+
+        # If no nodes found, try the line-by-line approach as fallback
+        if not node_info:
+            self.print_debug("Block parsing failed, trying line-by-line approach...")
+            node_info = self._parse_node_info_line_by_line(output)
+
+        return node_info
+
+    def _parse_node_info_line_by_line(self, output: str) -> Dict[str, Dict[str, Any]]:
+        """Fallback method to parse node info line by line"""
+        node_info = {}
+        lines = output.split('\n')
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Look for node output blocks
+            if line.startswith('ok: [') and '] => {' in line:
+                # Extract node name
+                start = line.find('[') + 1
+                end = line.find(']')
+                if start > 0 and end > start:
+                    node_name = line[start:end]
+                    
+                    # Find the JSON block for this node
+                    json_lines = []
+                    i += 1
+                    
+                    # Look for the start of node_info.stdout_lines
+                    while i < len(lines) and 'node_info.stdout_lines' not in lines[i]:
+                        i += 1
+                    
+                    if i < len(lines):
+                        i += 1  # Skip the stdout_lines line
+                        
+                        # Collect JSON lines
+                        while i < len(lines):
+                            current_line = lines[i].strip()
+                            
+                            if current_line == ']' or current_line == '}' or current_line.startswith('ok: ['):
+                                break
+                            
+                            # Clean up the JSON line
+                            if current_line.startswith('"') and current_line.endswith('",'):
+                                clean_line = current_line[1:-2].replace('\\"', '"')
+                                json_lines.append(clean_line)
+                            elif current_line.startswith('"') and current_line.endswith('"'):
+                                clean_line = current_line[1:-1].replace('\\"', '"')
+                                json_lines.append(clean_line)
+                            
+                            i += 1
+                        
+                        # Try to parse the collected JSON
+                        if json_lines:
+                            try:
+                                json_str = '\n'.join(json_lines)
+                                node_data = json.loads(json_str)
+                                node_info[node_name] = node_data
+                            except json.JSONDecodeError as e:
+                                self.print_debug(f"Failed to parse JSON for {node_name}: {e}")
+            else:
+                i += 1
+        
+        return node_info
+
     def get_node_addresses(self) -> None:
-        """Get and display node addresses in a formatted table"""
+        """Get and display node addresses from actual node information"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
             input("Press Enter to continue...")
@@ -1753,20 +1905,29 @@ class R1Setup:
 
         self.print_header("Node Addresses")
 
-        # This would need the parse_node_info functionality from the original script
-        # For now, we'll show the configured addresses
-        self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        # Get node information using the same playbook as option 9
+        node_info = self._get_node_info_data()
+        
+        if not node_info:
+            self.print_colored("Failed to retrieve node information!", 'red')
+            input("Press Enter to continue...")
+            return
 
-        if not hosts:
-            self.print_colored("No nodes configured!", 'red')
-        else:
-            self.print_colored(f"{'Host':<20} {'Address':<15} {'Username':<15}", 'cyan')
-            self.print_colored("-" * 50, 'cyan')
-            for name, config in hosts.items():
-                ip = config.get('ansible_host', 'Unknown')
-                user = config.get('ansible_user', 'Unknown')
-                self.print_colored(f"{name:<20} {ip:<15} {user:<15}")
+        # Display the addresses in a formatted table
+        self.print_colored(f"\nFound information for {len(node_info)} node(s):", 'green')
+        self.print_colored(f"{'Node Alias':<20} {'Address':<48} {'ETH Address':<42}", 'cyan')
+        self.print_colored("-" * 110, 'cyan')
+        
+        for node_name, info in node_info.items():
+            alias = info.get('alias', node_name)
+            address = info.get('address', 'N/A')
+            eth_address = info.get('eth_address', 'N/A')
+            
+            self.print_colored(f"{alias:<20} {address:<48} {eth_address:<42}")
+        
+        if len(node_info) == 0:
+            self.print_colored("No node information could be parsed from the playbook output.", 'yellow')
+            self.print_colored("This might be because the nodes are not running or not accessible.", 'yellow')
 
         input("\nPress Enter to continue...")
 
@@ -1779,26 +1940,42 @@ class R1Setup:
 
         self.print_header("Export Addresses to CSV")
 
-        self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
-
-        if not hosts:
-            self.print_colored("No nodes configured!", 'red')
+        # Get node information using the same playbook as option 9
+        node_info = self._get_node_info_data()
+        
+        if not node_info:
+            self.print_colored("Failed to retrieve node information!", 'red')
             input("Press Enter to continue...")
             return
 
+        self.print_colored(f"Found information for {len(node_info)} node(s)", 'green')
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         csv_file = f"node_addresses_{timestamp}.csv"
 
         try:
             with open(csv_file, 'w') as f:
-                f.write("Host,Address,Username\n")
-                for name, config in hosts.items():
-                    ip = config.get('ansible_host', 'Unknown')
-                    user = config.get('ansible_user', 'Unknown')
-                    f.write(f"{name},{ip},{user}\n")
+                f.write("Node_Alias,Address,ETH_Address,SSH_Host,SSH_User\n")
+                
+                # Load configuration to get SSH details
+                self.load_configuration()
+                hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+                
+                for node_name, info in node_info.items():
+                    alias = info.get('alias', node_name)
+                    address = info.get('address', 'N/A')
+                    eth_address = info.get('eth_address', 'N/A')
+                    
+                    # Get SSH info from configuration
+                    ssh_host = 'N/A'
+                    ssh_user = 'N/A'
+                    if node_name in hosts:
+                        ssh_host = hosts[node_name].get('ansible_host', 'N/A')
+                        ssh_user = hosts[node_name].get('ansible_user', 'N/A')
+                    
+                    f.write(f'"{alias}","{address}","{eth_address}","{ssh_host}","{ssh_user}"\n')
 
             self.print_colored(f"Addresses exported to: {csv_file}", 'green')
+            self.print_colored(f"CSV contains: Node Alias, Blockchain Address, ETH Address, SSH Host, SSH User", 'cyan')
         except Exception as e:
             self.print_colored(f"Error exporting to CSV: {e}", 'red')
 
@@ -2572,10 +2749,15 @@ class R1Setup:
 
     def run(self) -> None:
         """Main program loop"""
-        # Handle version check
-        if len(sys.argv) > 1 and sys.argv[1] == '--version':
-            print(f"r1setup version {CLI_VERSION}")
-            sys.exit(0)
+        # Handle command line arguments
+        global DEBUG
+        if len(sys.argv) > 1:
+            if sys.argv[1] == '--version':
+                print(f"r1setup version {CLI_VERSION}")
+                sys.exit(0)
+            elif sys.argv[1] == '--debug':
+                DEBUG = True
+                self.print_colored("Debug mode enabled", 'yellow')
 
         # Check prerequisites
         if not self.check_ansible_installation():
