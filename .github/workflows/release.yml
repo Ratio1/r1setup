@@ -31,8 +31,8 @@ jobs:
         run: |
           echo "📦 Creating complete repository archive..."
           # Create a clean archive of the entire repository
-          git archive --format=tar.gz --prefix=multi-node-launcher-${{ steps.get_version.outputs.VERSION }}/ HEAD > multi-node-launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz
-          echo "✅ Created repository archive: multi-node-launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz"
+          git archive --format=tar.gz --prefix=r1setup-${{ steps.get_version.outputs.VERSION }}/ HEAD > r1setup-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          echo "✅ Created repository archive: r1setup-${{ steps.get_version.outputs.VERSION }}.tar.gz"
           
           # Also create individual CLI files for direct download
           mkdir -p cli-files
@@ -46,8 +46,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./multi-node-launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz
-          asset_name: multi-node-launcher-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          asset_path: ./r1setup-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          asset_name: r1setup-${{ steps.get_version.outputs.VERSION }}.tar.gz
           asset_content_type: application/gzip
 
       - name: Upload CLI Scripts (for direct update)
