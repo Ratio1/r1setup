@@ -663,7 +663,6 @@ class R1Setup:
         print()
         self.print_colored("Settings:")
         self.print_colored(" 12) Change network environment - Switch between mainnet/testnet/devnet")
-        self.print_colored(" 13) Update CLI & Collection    - Check for and install CLI & Ansible collection updates")
         print()
         self.print_colored("  0) Exit")
         print()
@@ -2648,6 +2647,73 @@ class R1Setup:
             self.print_colored("\n❌ CLI update failed. Ansible collection may have been updated.", 'red')
             input("Press Enter to continue...")
 
+    def _auto_update_check(self) -> None:
+        """Automatically check for and install updates on startup"""
+        self.print_colored("🔍 Checking for updates...", 'cyan')
+        
+        # Check CLI version
+        latest_cli_version = None
+        cli_update_available = False
+        cli_download_urls = None
+        cli_fallback_urls = None
+
+        try:
+            latest_cli_version, cli_download_urls, cli_fallback_urls = self._check_latest_version()
+            if latest_cli_version:
+                cli_update_available = self._compare_versions(CLI_VERSION, latest_cli_version) < 0
+        except Exception as e:
+            self.print_colored(f"Could not check for CLI updates: {e}", 'yellow')
+
+        # Check Ansible collection version
+        current_collection_version, collection_update_available = self._check_ansible_collection_version()
+
+        # Show update status
+        if cli_update_available:
+            self.print_colored(f"🆕 CLI update available: {CLI_VERSION} → {latest_cli_version}", 'green')
+        else:
+            self.print_colored(f"✅ CLI is up to date ({CLI_VERSION})", 'green')
+
+        if collection_update_available:
+            self.print_colored("🆕 Ansible collection update available", 'green')
+        else:
+            self.print_colored("✅ Ansible collection is up to date", 'green')
+
+        # Perform auto-updates
+        updates_performed = False
+
+        if cli_update_available and latest_cli_version and cli_download_urls:
+            self.print_colored(f"\n🚀 Auto-updating CLI to version {latest_cli_version}...", 'cyan', bold=True)
+            success = self._perform_update(latest_cli_version, cli_download_urls, cli_fallback_urls)
+            
+            if success:
+                self.print_colored(f"✅ Successfully updated CLI to version {latest_cli_version}!", 'green')
+                self.print_colored("Restarting with the new version...", 'cyan')
+                # Give user a moment to see the message
+                import time
+                time.sleep(2)
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            else:
+                self.print_colored("❌ CLI auto-update failed. Continuing with current version.", 'red')
+
+        if collection_update_available:
+            self.print_colored("\n🚀 Auto-updating Ansible collection...", 'cyan', bold=True)
+            success = self._update_ansible_collection()
+            
+            if success:
+                self.print_colored("✅ Ansible collection updated successfully!", 'green')
+                updates_performed = True
+            else:
+                self.print_colored("❌ Ansible collection auto-update failed.", 'red')
+
+        if not cli_update_available and not collection_update_available:
+            self.print_colored("✅ All components are up to date!", 'green')
+        elif updates_performed:
+            self.print_colored("\n✅ Auto-update completed successfully!", 'green')
+            input("Press Enter to continue...")
+        
+        # Add a separator before main menu
+        print()
+
     def ensure_active_configuration(self) -> bool:
         """Ensure there's an active configuration before proceeding to main menu"""
         # Check if we have a valid active configuration
@@ -2825,6 +2891,9 @@ class R1Setup:
             self.print_colored("Please ensure Ansible and the required collection are installed.", 'red')
             sys.exit(1)
 
+        # Auto-update check - this runs first before everything else
+        self._auto_update_check()
+
         # Ensure we have an active configuration before proceeding
         if not self.ensure_active_configuration():
             sys.exit(0)
@@ -2832,7 +2901,7 @@ class R1Setup:
         while True:
             try:
                 self.show_main_menu()
-                choice = self.get_input("Select option (0-13)")
+                choice = self.get_input("Select option (0-12)")
 
                 if choice == '0':
                     self.print_colored("Thank you for using Ratio1 Multi-Node Launcher Setup!", 'green')
@@ -2861,8 +2930,6 @@ class R1Setup:
                     self.export_addresses_csv()
                 elif choice == '12':
                     self.change_network_environment()
-                elif choice == '13':
-                    self.update_cli()
                 else:
                     self.print_colored("Invalid option. Please try again.", 'red')
                     input("Press Enter to continue...")
