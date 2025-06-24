@@ -64,7 +64,7 @@ except ImportError:
     CLI_VERSION = "1.1.6"
 
 # Debug configuration
-DEBUG = True  # Set to True to enable debug output
+DEBUG = False  # Set to True to enable debug output, or use --debug flag
 
 # Version information
 UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/ver.py"
@@ -767,7 +767,7 @@ class R1Setup:
             self.print_colored("  0) Back to main menu")
             print()
 
-            choice = self.get_input("Select option")
+            choice = self.get_input("Select option", "0")
 
             if choice == '0':
                 break
@@ -853,7 +853,7 @@ class R1Setup:
 
         while True:
             try:
-                choice = int(self.get_input("Select configuration number")) - 1
+                choice = int(self.get_input("Select configuration number", "1")) - 1
                 if 0 <= choice < len(configs):
                     selected_config = configs[choice][0].replace('.yml', '')
                     break
@@ -880,7 +880,7 @@ class R1Setup:
 
         while True:
             try:
-                choice = int(self.get_input("Select configuration number to delete")) - 1
+                choice = int(self.get_input("Select configuration number to delete", "1")) - 1
                 if 0 <= choice < len(configs):
                     selected_config = configs[choice][0].replace('.yml', '')
                     break
@@ -936,7 +936,7 @@ class R1Setup:
 
         while True:
             try:
-                choice = int(self.get_input("Select configuration number to rename")) - 1
+                choice = int(self.get_input("Select configuration number to rename", "1")) - 1
                 if 0 <= choice < len(configs):
                     old_config_name = configs[choice][0].replace('.yml', '')
                     break
@@ -1034,7 +1034,7 @@ class R1Setup:
             self.print_colored("  0) Back to main menu")
             print()
 
-            choice = self.get_input("Select option")
+            choice = self.get_input("Select option", "0")
 
             if choice == '0':
                 break
@@ -1307,7 +1307,7 @@ class R1Setup:
 
         while True:
             try:
-                choice = int(self.get_input("Select node number")) - 1
+                choice = int(self.get_input("Select node number", "1")) - 1
                 if 0 <= choice < len(node_list):
                     original_name = node_list[choice]
                     break
@@ -1373,7 +1373,7 @@ class R1Setup:
 
         while True:
             try:
-                choice = int(self.get_input("Select node number")) - 1
+                choice = int(self.get_input("Select node number", "1")) - 1
                 if 0 <= choice < len(node_list):
                     name = node_list[choice]
                     break
@@ -2854,7 +2854,7 @@ except:
             self.print_colored(f"   {option}", 'white')
 
         while True:
-            choice = self.get_input("\nSelect update option")
+            choice = self.get_input("\nSelect update option", "0")
             
             if choice == '0':
                 self.print_colored("Update cancelled.", 'yellow')
@@ -3122,7 +3122,7 @@ except:
                     # Let user select from existing configurations
                     while True:
                         try:
-                            selection = int(self.get_input(f"Select configuration number (1-{len(configs)})")) - 1
+                            selection = int(self.get_input(f"Select configuration number (1-{len(configs)})", "1")) - 1
                             if 0 <= selection < len(configs):
                                 selected_config = configs[selection][0].replace('.yml', '')
                                 break
@@ -3194,7 +3194,7 @@ except:
         while True:
             try:
                 self.show_main_menu()
-                choice = self.get_input("Select option (0-12)")
+                choice = self.get_input("Select option (0-12)", "0")
 
                 if choice == '0':
                     self.print_colored("Thank you for using Ratio1 Multi-Node Launcher Setup!", 'green')
