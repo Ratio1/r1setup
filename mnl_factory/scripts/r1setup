@@ -64,7 +64,7 @@ except ImportError:
     CLI_VERSION = "1.1.6"
 
 # Debug configuration
-DEBUG = False  # Set to True to enable debug output
+DEBUG = True  # Set to True to enable debug output
 
 # Version information
 UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/ver.py"
@@ -2324,25 +2324,55 @@ class R1Setup:
             # Use the same collection path as the setup scripts
             ansible_dir = self.ansible_config_root
             collections_path = ansible_dir / 'collections'
+            collection_dir = collections_path / 'ansible_collections' / 'ratio1' / 'multi_node_launcher'
 
             # Ensure collections directory exists
             collections_path.mkdir(parents=True, exist_ok=True)
-
-            # Update the collection using ansible-galaxy
-            self.print_colored("  Downloading latest collection from Ansible Galaxy...", 'yellow')
-
-            cmd = [
-                'ansible-galaxy', 'collection', 'install',
-                'ratio1.multi_node_launcher',
-                '--collections-path', str(collections_path),
-                '--force', '--upgrade'
-            ]
 
             # Set environment variables for the subprocess
             env = os.environ.copy()
             env['ANSIBLE_CONFIG'] = str(self.ansible_config_root / 'ansible.cfg')
             env['ANSIBLE_COLLECTIONS_PATH'] = str(collections_path)
             env['ANSIBLE_HOME'] = str(self.ansible_config_root)
+
+            # Get current version if installed
+            current_version = None
+            if collection_dir.exists():
+                galaxy_yml = collection_dir / 'galaxy.yml'
+                if galaxy_yml.exists():
+                    try:
+                        with open(galaxy_yml, 'r') as f:
+                            import yaml
+                            galaxy_data = yaml.safe_load(f)
+                            current_version = galaxy_data.get('version', 'unknown')
+                            self.print_colored(f"  Current collection version: {current_version}", 'cyan')
+                    except Exception as e:
+                        self.print_debug(f"Could not read current version: {e}")
+
+            # The issue with ansible-galaxy is that --upgrade doesn't actually force update
+            # So we need to first uninstall and then reinstall to get the latest version
+            
+            # Method 1: Try to uninstall first, then reinstall (most reliable)
+            if collection_dir.exists():
+                self.print_colored("  Removing existing collection to force update...", 'yellow')
+                try:
+                    import shutil
+                    # Remove the entire collection directory
+                    shutil.rmtree(collection_dir)
+                    self.print_colored("  Existing collection removed successfully", 'green')
+                except Exception as e:
+                    self.print_colored(f"  Warning: Could not remove existing collection: {e}", 'yellow')
+                    # Continue anyway - maybe the install will work
+
+            # Now install the latest version
+            self.print_colored("  Installing latest collection from Ansible Galaxy...", 'yellow')
+
+            cmd = [
+                'ansible-galaxy', 'collection', 'install',
+                'ratio1.multi_node_launcher',
+                '--collections-path', str(collections_path),
+                '--force' 
+            ]
 
             result = subprocess.run(
                 cmd,
@@ -2355,102 +2385,79 @@ class R1Setup:
             if result.returncode == 0:
                 self.print_colored("  Collection installation completed successfully", 'green')
                 
-                # Verify the collection was installed/updated with multiple approaches
+                # Get the new version and verify the update
+                new_version = None
+                if collection_dir.exists():
+                    galaxy_yml = collection_dir / 'galaxy.yml'
+                    if galaxy_yml.exists():
+                        try:
+                            with open(galaxy_yml, 'r') as f:
+                                import yaml
+                                galaxy_data = yaml.safe_load(f)
+                                new_version = galaxy_data.get('version', 'unknown')
+                                self.print_colored(f"  Updated to collection version: {new_version}", 'cyan')
+                                
+                                # Show version change if we had a previous version
+                                if current_version and current_version != 'unknown' and new_version != current_version:
+                                    self.print_colored(f"  Version changed: {current_version} → {new_version}", 'green')
+                                elif current_version and current_version != 'unknown' and new_version == current_version:
+                                    self.print_colored(f"  Collection was already at the latest version", 'green')
+                        except Exception as e:
+                            self.print_debug(f"Could not read new version: {e}")
+
+                # Verify the collection exists and is functional
                 verification_success = False
                 
-                # Method 1: Check with ansible-galaxy list
-                verify_cmd = [
-                    'ansible-galaxy', 'collection', 'list',
-                    '--collections-path', str(collections_path)
-                ]
-
-                verify_result = subprocess.run(
-                    verify_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    env=env
-                )
-
-                if DEBUG:
-                    self.print_debug(f"Verification command output: {verify_result.stdout}")
-                    self.print_debug(f"Verification command stderr: {verify_result.stderr}")
-
-                if verify_result.returncode == 0:
-                    # Look for the collection in various possible formats
-                    output_lower = verify_result.stdout.lower()
-                    if any(pattern in output_lower for pattern in [
-                        'ratio1.multi_node_launcher',
-                        'ratio1/multi_node_launcher',
-                        'multi_node_launcher'
-                    ]):
-                        verification_success = True
-                        # Extract version information if possible
-                        for line in verify_result.stdout.split('\n'):
-                            if 'ratio1' in line.lower() and 'multi_node_launcher' in line.lower():
-                                parts = line.split()
-                                if len(parts) >= 2:
-                                    version = parts[1]
-                                    self.print_colored(f"  Updated to collection version: {version}", 'cyan')
-                                break
+                # Method 1: Check filesystem directly
+                if collection_dir.exists():
+                    verification_success = True
+                    self.print_colored("  Collection verified via filesystem check", 'cyan')
                 
-                # Method 2: Check filesystem directly if galaxy list failed
-                if not verification_success:
-                    collection_dir = collections_path / 'ansible_collections' / 'ratio1' / 'multi_node_launcher'
-                    if collection_dir.exists():
-                        verification_success = True
-                        self.print_colored("  Collection verified via filesystem check", 'cyan')
-                        
-                        # Try to get version from galaxy.yml
-                        galaxy_yml = collection_dir / 'galaxy.yml'
-                        if galaxy_yml.exists():
-                            try:
-                                with open(galaxy_yml, 'r') as f:
-                                    import yaml
-                                    galaxy_data = yaml.safe_load(f)
-                                    version = galaxy_data.get('version', 'unknown')
-                                    self.print_colored(f"  Collection version: {version}", 'cyan')
-                            except Exception:
-                                pass
-                
-                # Method 3: Try alternative list format
-                if not verification_success:
-                    alt_verify_cmd = [
-                        'ansible-galaxy', 'collection', 'list', 'ratio1.multi_node_launcher',
-                        '--collections-path', str(collections_path)
-                    ]
-                    
-                    alt_verify_result = subprocess.run(
-                        alt_verify_cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                        env=env
-                    )
-                    
-                    if alt_verify_result.returncode == 0 and 'ratio1' in alt_verify_result.stdout.lower():
-                        verification_success = True
-                        self.print_colored("  Collection verified via specific query", 'cyan')
-
+                # Method 2: Check with ansible-galaxy list as backup verification
                 if verification_success:
-                    return True
-                else:
-                    self.print_colored("  Warning: Collection installation completed but verification was inconclusive", 'yellow')
-                    self.print_colored("  The collection may still be properly installed and functional", 'yellow')
-                    if DEBUG:
-                        self.print_debug("Verification methods failed, but installation succeeded")
-                    # Return True since installation succeeded - verification failure doesn't mean the collection isn't working
-                    return True
+                    try:
+                        verify_cmd = [
+                            'ansible-galaxy', 'collection', 'list',
+                            'ratio1.multi_node_launcher',
+                            '--collections-path', str(collections_path)
+                        ]
+
+                        verify_result = subprocess.run(
+                            verify_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            env=env
+                        )
+
+                        if DEBUG:
+                            self.print_debug(f"Verification command output: {verify_result.stdout}")
+                            self.print_debug(f"Verification command stderr: {verify_result.stderr}")
+
+                        if verify_result.returncode == 0 and 'ratio1' in verify_result.stdout.lower():
+                            self.print_colored("  Collection verified via ansible-galaxy list", 'cyan')
+                        else:
+                            self.print_colored("  Warning: ansible-galaxy list verification failed, but filesystem check passed", 'yellow')
+                    except Exception as e:
+                        self.print_debug(f"Verification command failed: {e}")
+
+                return verification_success
             else:
-                # Log the error but don't fail the entire update
+                # Log the error details
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
                 self.print_colored(f"  ansible-galaxy command failed: {error_msg}", 'red')
+                
+                # Show command output for debugging
+                if DEBUG and result.stdout:
+                    self.print_debug(f"Command output: {result.stdout}")
 
                 # Check if it's a common issue and provide helpful hints
                 if "timeout" in error_msg.lower() or "connection" in error_msg.lower():
                     self.print_colored("  This might be a network connectivity issue. Try again later.", 'yellow')
                 elif "permission" in error_msg.lower():
                     self.print_colored("  This might be a permissions issue. Check directory permissions.", 'yellow')
+                elif "not found" in error_msg.lower():
+                    self.print_colored("  The collection might not exist on Galaxy. Check the collection name.", 'yellow')
 
                 return False
 
@@ -2462,6 +2469,9 @@ class R1Setup:
             return False
         except Exception as e:
             self.print_colored(f"  Unexpected error updating collection: {e}", 'red')
+            if DEBUG:
+                import traceback
+                self.print_debug(f"Full traceback: {traceback.format_exc()}")
             return False
 
     def _check_ansible_collection_version(self) -> Tuple[Optional[str], bool]:
@@ -2495,10 +2505,86 @@ class R1Setup:
                             current_version = parts[1]
                             break
 
-            # Check latest version from Ansible Galaxy
-            # For now, we'll just return the current version and assume updates are available
-            # In a real implementation, you might query the Ansible Galaxy API
-            return current_version, True  # Assume updates might be available
+            # Also try to get version from filesystem if galaxy list failed
+            if not current_version:
+                collection_dir = self.ansible_config_root / 'collections' / 'ansible_collections' / 'ratio1' / 'multi_node_launcher'
+                galaxy_yml = collection_dir / 'galaxy.yml'
+                if galaxy_yml.exists():
+                    try:
+                        with open(galaxy_yml, 'r') as f:
+                            import yaml
+                            galaxy_data = yaml.safe_load(f)
+                            current_version = galaxy_data.get('version', None)
+                    except Exception:
+                        pass
+
+            # Check latest available version from Galaxy
+            # We can't easily get the latest version without parsing HTML or using the API
+            # But we can try a different approach: attempt to get info about the collection
+            try:
+                info_cmd = [
+                    'ansible-galaxy', 'collection', 'info',
+                    'ratio1.multi_node_launcher',
+                    '--collections-path', str(self.ansible_config_root / 'collections')
+                ]
+
+                info_result = subprocess.run(
+                    info_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env=env
+                )
+
+                latest_version = None
+                if info_result.returncode == 0:
+                    # Parse the output to find the latest version
+                    for line in info_result.stdout.split('\n'):
+                        line = line.strip()
+                        if line.startswith('latest_version:') or line.startswith('version:'):
+                            latest_version = line.split(':', 1)[1].strip()
+                            break
+                
+                # Compare versions if we have both
+                if current_version and latest_version:
+                    try:
+                        # Simple version comparison - this could be improved
+                        current_parts = [int(x) for x in current_version.split('.')]
+                        latest_parts = [int(x) for x in latest_version.split('.')]
+                        
+                        # Pad shorter version with zeros
+                        max_len = max(len(current_parts), len(latest_parts))
+                        current_parts.extend([0] * (max_len - len(current_parts)))
+                        latest_parts.extend([0] * (max_len - len(latest_parts)))
+                        
+                        # Compare version parts
+                        update_available = False
+                        for i in range(max_len):
+                            if latest_parts[i] > current_parts[i]:
+                                update_available = True
+                                break
+                            elif latest_parts[i] < current_parts[i]:
+                                break  # Current is newer
+                        
+                        if DEBUG:
+                            self.print_debug(f"Version comparison: current={current_version}, latest={latest_version}, update_available={update_available}")
+                        
+                        return current_version, update_available
+                    except (ValueError, IndexError) as e:
+                        if DEBUG:
+                            self.print_debug(f"Version comparison failed: {e}")
+                        # Fallback: assume update might be available
+                        return current_version, True
+                else:
+                    # If we can't get latest version info, assume update might be available
+                    # This is safer than assuming no update is needed
+                    return current_version, True
+
+            except Exception as e:
+                if DEBUG:
+                    self.print_debug(f"Failed to get collection info: {e}")
+                # If we can't check, assume update might be available
+                return current_version, True
 
         except Exception as e:
             self.print_colored(f"Error checking Ansible collection version: {e}", 'yellow')
@@ -2940,6 +3026,169 @@ class R1Setup:
             except Exception as e:
                 self.print_colored(f"An error occurred: {e}", 'red')
                 input("Press Enter to continue...")
+
+    def debug_collection_update(self) -> None:
+        """Debug method to manually test collection updates with verbose output"""
+        self.print_header("Debug: Collection Update Test")
+        
+        collection_dir = self.ansible_config_root / 'collections' / 'ansible_collections' / 'ratio1' / 'multi_node_launcher'
+        
+        # Show current state
+        self.print_colored("🔍 Current Collection State:", 'cyan', bold=True)
+        
+        if collection_dir.exists():
+            self.print_colored(f"   Collection directory exists: {collection_dir}", 'green')
+            
+            # Check current version
+            galaxy_yml = collection_dir / 'galaxy.yml'
+            if galaxy_yml.exists():
+                try:
+                    with open(galaxy_yml, 'r') as f:
+                        import yaml
+                        galaxy_data = yaml.safe_load(f)
+                        current_version = galaxy_data.get('version', 'unknown')
+                        self.print_colored(f"   Current version: {current_version}", 'cyan')
+                except Exception as e:
+                    self.print_colored(f"   Error reading version: {e}", 'red')
+            else:
+                self.print_colored(f"   No galaxy.yml found", 'yellow')
+                
+            # Show directory contents
+            try:
+                contents = list(collection_dir.iterdir())
+                self.print_colored(f"   Directory contents ({len(contents)} items):", 'white')
+                for item in contents[:10]:  # Show first 10 items
+                    self.print_colored(f"     - {item.name}", 'white')
+                if len(contents) > 10:
+                    self.print_colored(f"     ... and {len(contents) - 10} more items", 'white')
+            except Exception as e:
+                self.print_colored(f"   Error listing directory: {e}", 'red')
+        else:
+            self.print_colored(f"   Collection directory does not exist: {collection_dir}", 'yellow')
+
+        # Test the update process
+        self.print_colored("\n🚀 Testing Collection Update Process:", 'cyan', bold=True)
+        
+        if self.get_input("Proceed with collection update test? (y/n)", "y").lower() == 'y':
+            # Enable debug mode temporarily
+            global DEBUG
+            original_debug = DEBUG
+            DEBUG = True
+            
+            try:
+                success = self._update_ansible_collection()
+                if success:
+                    self.print_colored("\n✅ Collection update test completed successfully!", 'green')
+                else:
+                    self.print_colored("\n❌ Collection update test failed!", 'red')
+            finally:
+                DEBUG = original_debug
+        
+        input("\nPress Enter to continue...")
+
+    def manual_collection_reinstall(self) -> None:
+        """Manually reinstall the collection by completely removing and reinstalling"""
+        self.print_header("Manual Collection Reinstall")
+        
+        collection_dir = self.ansible_config_root / 'collections' / 'ansible_collections' / 'ratio1' / 'multi_node_launcher'
+        
+        self.print_colored("⚠️  This will completely remove and reinstall the Ansible collection.", 'yellow', bold=True)
+        self.print_colored("This is a more aggressive approach that should force a fresh download.", 'white')
+        
+        if collection_dir.exists():
+            self.print_colored(f"\nTarget directory: {collection_dir}", 'cyan')
+            
+            # Show current version
+            galaxy_yml = collection_dir / 'galaxy.yml'
+            if galaxy_yml.exists():
+                try:
+                    with open(galaxy_yml, 'r') as f:
+                        import yaml
+                        galaxy_data = yaml.safe_load(f)
+                        current_version = galaxy_data.get('version', 'unknown')
+                        self.print_colored(f"Current version: {current_version}", 'cyan')
+                except Exception:
+                    pass
+        
+        if self.get_input("\nProceed with manual reinstall? (y/n)", "n").lower() != 'y':
+            self.print_colored("Manual reinstall cancelled.", 'yellow')
+            return
+
+        try:
+            # Remove existing collection completely
+            if collection_dir.exists():
+                self.print_colored("Removing existing collection...", 'yellow')
+                import shutil
+                shutil.rmtree(collection_dir)
+                self.print_colored("✅ Existing collection removed", 'green')
+            
+            # Remove any cached data that might interfere
+            cache_dirs = [
+                self.ansible_config_root / '.ansible_galaxy_cache',
+                Path.home() / '.ansible' / 'galaxy_cache',
+            ]
+            
+            for cache_dir in cache_dirs:
+                if cache_dir.exists():
+                    try:
+                        shutil.rmtree(cache_dir)
+                        self.print_colored(f"✅ Cleared cache: {cache_dir}", 'green')
+                    except Exception as e:
+                        self.print_colored(f"Warning: Could not clear cache {cache_dir}: {e}", 'yellow')
+
+            # Reinstall collection
+            self.print_colored("Reinstalling collection...", 'yellow')
+            
+            collections_path = self.ansible_config_root / 'collections'
+            collections_path.mkdir(parents=True, exist_ok=True)
+            
+            env = os.environ.copy()
+            env['ANSIBLE_CONFIG'] = str(self.ansible_config_root / 'ansible.cfg')
+            env['ANSIBLE_COLLECTIONS_PATH'] = str(collections_path)
+            env['ANSIBLE_HOME'] = str(self.ansible_config_root)
+            
+            cmd = [
+                'ansible-galaxy', 'collection', 'install',
+                'ratio1.multi_node_launcher',
+                '--collections-path', str(collections_path),
+                '--force', '--no-cache'  # Disable caching
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=env
+            )
+            
+            if result.returncode == 0:
+                self.print_colored("✅ Collection reinstalled successfully!", 'green')
+                
+                # Show new version
+                if collection_dir.exists():
+                    galaxy_yml = collection_dir / 'galaxy.yml'
+                    if galaxy_yml.exists():
+                        try:
+                            with open(galaxy_yml, 'r') as f:
+                                import yaml
+                                galaxy_data = yaml.safe_load(f)
+                                new_version = galaxy_data.get('version', 'unknown')
+                                self.print_colored(f"New version: {new_version}", 'cyan')
+                        except Exception:
+                            pass
+            else:
+                self.print_colored("❌ Collection reinstall failed!", 'red')
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                self.print_colored(f"Error: {error_msg}", 'red')
+                
+                if result.stdout:
+                    self.print_colored(f"Output: {result.stdout}", 'yellow')
+        
+        except Exception as e:
+            self.print_colored(f"❌ Manual reinstall failed: {e}", 'red')
+        
+        input("\nPress Enter to continue...")
 
 
 if __name__ == "__main__":
