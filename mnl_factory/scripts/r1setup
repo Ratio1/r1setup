@@ -64,7 +64,7 @@ except ImportError:
     CLI_VERSION = "1.1.6"
 
 # Debug configuration
-DEBUG = False  # Set to True to enable debug output
+DEBUG = False  # Set to True to enable debug output, or use --debug flag
 
 # Version information
 UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/ver.py"
@@ -130,6 +130,13 @@ class R1Setup:
                     }
                 }
             }
+        }
+
+        # Cache for version information to avoid duplicate checks
+        self._version_cache = {
+            'collection_version': None,
+            'collection_check_time': None,
+            'cache_duration': 300  # 5 minutes cache
         }
 
         # Load or initialize active configuration
@@ -607,7 +614,7 @@ class R1Setup:
         active_config_name = self.active_config.get('config_name', 'None')
 
         self.print_section("Current Status")
-        self.print_colored(f"CLI Version: {CLI_VERSION}", 'cyan')
+        
         self.print_colored(f"Active Config: {active_config_name if active_config_name != 'None' else '✗ No active config'}",
                            'green' if active_config_name != 'None' else 'red')
         self.print_colored(f"Configuration: {'✓ Configured' if has_config else '✗ Not configured'}",
@@ -663,7 +670,6 @@ class R1Setup:
         print()
         self.print_colored("Settings:")
         self.print_colored(" 12) Change network environment - Switch between mainnet/testnet/devnet")
-        self.print_colored(" 13) Update CLI & Collection    - Check for and install CLI & Ansible collection updates")
         print()
         self.print_colored("  0) Exit")
         print()
@@ -761,7 +767,7 @@ class R1Setup:
             self.print_colored("  0) Back to main menu")
             print()
 
-            choice = self.get_input("Select option")
+            choice = self.get_input("Select option", "0")
 
             if choice == '0':
                 break
@@ -847,7 +853,7 @@ class R1Setup:
 
         while True:
             try:
-                choice = int(self.get_input("Select configuration number")) - 1
+                choice = int(self.get_input("Select configuration number", "1")) - 1
                 if 0 <= choice < len(configs):
                     selected_config = configs[choice][0].replace('.yml', '')
                     break
@@ -874,7 +880,7 @@ class R1Setup:
 
         while True:
             try:
-                choice = int(self.get_input("Select configuration number to delete")) - 1
+                choice = int(self.get_input("Select configuration number to delete", "1")) - 1
                 if 0 <= choice < len(configs):
                     selected_config = configs[choice][0].replace('.yml', '')
                     break
@@ -930,7 +936,7 @@ class R1Setup:
 
         while True:
             try:
-                choice = int(self.get_input("Select configuration number to rename")) - 1
+                choice = int(self.get_input("Select configuration number to rename", "1")) - 1
                 if 0 <= choice < len(configs):
                     old_config_name = configs[choice][0].replace('.yml', '')
                     break
@@ -1028,7 +1034,7 @@ class R1Setup:
             self.print_colored("  0) Back to main menu")
             print()
 
-            choice = self.get_input("Select option")
+            choice = self.get_input("Select option", "0")
 
             if choice == '0':
                 break
@@ -1301,7 +1307,7 @@ class R1Setup:
 
         while True:
             try:
-                choice = int(self.get_input("Select node number")) - 1
+                choice = int(self.get_input("Select node number", "1")) - 1
                 if 0 <= choice < len(node_list):
                     original_name = node_list[choice]
                     break
@@ -1367,7 +1373,7 @@ class R1Setup:
 
         while True:
             try:
-                choice = int(self.get_input("Select node number")) - 1
+                choice = int(self.get_input("Select node number", "1")) - 1
                 if 0 <= choice < len(node_list):
                     name = node_list[choice]
                     break
@@ -2325,25 +2331,55 @@ class R1Setup:
             # Use the same collection path as the setup scripts
             ansible_dir = self.ansible_config_root
             collections_path = ansible_dir / 'collections'
+            collection_dir = collections_path / 'ansible_collections' / 'ratio1' / 'multi_node_launcher'
 
             # Ensure collections directory exists
             collections_path.mkdir(parents=True, exist_ok=True)
-
-            # Update the collection using ansible-galaxy
-            self.print_colored("  Downloading latest collection from Ansible Galaxy...", 'yellow')
-
-            cmd = [
-                'ansible-galaxy', 'collection', 'install',
-                'ratio1.multi_node_launcher',
-                '--collections-path', str(collections_path),
-                '--force', '--upgrade'
-            ]
 
             # Set environment variables for the subprocess
             env = os.environ.copy()
             env['ANSIBLE_CONFIG'] = str(self.ansible_config_root / 'ansible.cfg')
             env['ANSIBLE_COLLECTIONS_PATH'] = str(collections_path)
             env['ANSIBLE_HOME'] = str(self.ansible_config_root)
+
+            # Get current version if installed
+            current_version = None
+            if collection_dir.exists():
+                galaxy_yml = collection_dir / 'galaxy.yml'
+                if galaxy_yml.exists():
+                    try:
+                        with open(galaxy_yml, 'r') as f:
+                            import yaml
+                            galaxy_data = yaml.safe_load(f)
+                            current_version = galaxy_data.get('version', 'unknown')
+                            self.print_colored(f"  Current collection version: {current_version}", 'cyan')
+                    except Exception as e:
+                        self.print_debug(f"Could not read current version: {e}")
+
+            # The issue with ansible-galaxy is that --upgrade doesn't actually force update
+            # So we need to first uninstall and then reinstall to get the latest version
+            
+            # Method 1: Try to uninstall first, then reinstall (most reliable)
+            if collection_dir.exists():
+                self.print_colored("  Removing existing collection to force update...", 'yellow')
+                try:
+                    import shutil
+                    # Remove the entire collection directory
+                    shutil.rmtree(collection_dir)
+                    self.print_colored("  Existing collection removed successfully", 'green')
+                except Exception as e:
+                    self.print_colored(f"  Warning: Could not remove existing collection: {e}", 'yellow')
+                    # Continue anyway - maybe the install will work
+
+            # Now install the latest version
+            self.print_colored("  Installing latest collection from Ansible Galaxy...", 'yellow')
+
+            cmd = [
+                'ansible-galaxy', 'collection', 'install',
+                'ratio1.multi_node_launcher',
+                '--collections-path', str(collections_path),
+                '--force' 
+            ]
 
             result = subprocess.run(
                 cmd,
@@ -2354,43 +2390,81 @@ class R1Setup:
             )
 
             if result.returncode == 0:
-                # Verify the collection was installed/updated
-                verify_cmd = [
-                    'ansible-galaxy', 'collection', 'list',
-                    '--collections-path', str(collections_path)
-                ]
+                self.print_colored("  Collection installation completed successfully", 'green')
+                
+                # Get the new version and verify the update
+                new_version = None
+                if collection_dir.exists():
+                    galaxy_yml = collection_dir / 'galaxy.yml'
+                    if galaxy_yml.exists():
+                        try:
+                            with open(galaxy_yml, 'r') as f:
+                                import yaml
+                                galaxy_data = yaml.safe_load(f)
+                                new_version = galaxy_data.get('version', 'unknown')
+                                self.print_colored(f"  Updated to collection version: {new_version}", 'cyan')
+                                
+                                # Show version change if we had a previous version
+                                if current_version and current_version != 'unknown' and new_version != current_version:
+                                    self.print_colored(f"  Version changed: {current_version} → {new_version}", 'green')
+                                elif current_version and current_version != 'unknown' and new_version == current_version:
+                                    self.print_colored(f"  Collection was already at the latest version", 'green')
+                        except Exception as e:
+                            self.print_debug(f"Could not read new version: {e}")
 
-                verify_result = subprocess.run(
-                    verify_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    env=env
-                )
+                # Verify the collection exists and is functional
+                verification_success = False
+                
+                # Method 1: Check filesystem directly
+                if collection_dir.exists():
+                    verification_success = True
+                    self.print_colored("  Collection verified via filesystem check", 'cyan')
+                
+                # Method 2: Check with ansible-galaxy list as backup verification
+                if verification_success:
+                    try:
+                        verify_cmd = [
+                            'ansible-galaxy', 'collection', 'list',
+                            'ratio1.multi_node_launcher',
+                            '--collections-path', str(collections_path)
+                        ]
 
-                if verify_result.returncode == 0 and 'ratio1.multi_node_launcher' in verify_result.stdout:
-                    # Extract version information if possible
-                    for line in verify_result.stdout.split('\n'):
-                        if 'ratio1.multi_node_launcher' in line:
-                            parts = line.split()
-                            if len(parts) >= 2:
-                                version = parts[1]
-                                self.print_colored(f"  Updated to collection version: {version}", 'cyan')
-                            break
-                    return True
-                else:
-                    self.print_colored("  Warning: Collection update completed but verification failed", 'yellow')
-                    return False
+                        verify_result = subprocess.run(
+                            verify_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            env=env
+                        )
+
+                        if DEBUG:
+                            self.print_debug(f"Verification command output: {verify_result.stdout}")
+                            self.print_debug(f"Verification command stderr: {verify_result.stderr}")
+
+                        if verify_result.returncode == 0 and 'ratio1' in verify_result.stdout.lower():
+                            self.print_colored("  Collection verified via ansible-galaxy list", 'cyan')
+                        else:
+                            self.print_colored("  Warning: ansible-galaxy list verification failed, but filesystem check passed", 'yellow')
+                    except Exception as e:
+                        self.print_debug(f"Verification command failed: {e}")
+
+                return verification_success
             else:
-                # Log the error but don't fail the entire update
+                # Log the error details
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
                 self.print_colored(f"  ansible-galaxy command failed: {error_msg}", 'red')
+                
+                # Show command output for debugging
+                if DEBUG and result.stdout:
+                    self.print_debug(f"Command output: {result.stdout}")
 
                 # Check if it's a common issue and provide helpful hints
                 if "timeout" in error_msg.lower() or "connection" in error_msg.lower():
                     self.print_colored("  This might be a network connectivity issue. Try again later.", 'yellow')
                 elif "permission" in error_msg.lower():
                     self.print_colored("  This might be a permissions issue. Check directory permissions.", 'yellow')
+                elif "not found" in error_msg.lower():
+                    self.print_colored("  The collection might not exist on Galaxy. Check the collection name.", 'yellow')
 
                 return False
 
@@ -2402,47 +2476,306 @@ class R1Setup:
             return False
         except Exception as e:
             self.print_colored(f"  Unexpected error updating collection: {e}", 'red')
+            if DEBUG:
+                import traceback
+                self.print_debug(f"Full traceback: {traceback.format_exc()}")
             return False
 
-    def _check_ansible_collection_version(self) -> Tuple[Optional[str], bool]:
-        """Check the current Ansible collection version and if updates are available"""
+    def _get_current_collection_version(self, force_refresh: bool = False) -> Optional[str]:
+        """Get current collection version using multiple smart methods with caching"""
+        # Check cache first (unless force refresh)
+        if not force_refresh and self._version_cache['collection_version'] is not None:
+            import time
+            cache_time = self._version_cache.get('collection_check_time', 0)
+            current_time = time.time()
+            
+            # Use cached version if within cache duration
+            if current_time - cache_time < self._version_cache['cache_duration']:
+                if DEBUG:
+                    self.print_debug(f"Using cached collection version: {self._version_cache['collection_version']}")
+                return self._version_cache['collection_version']
+        
+        current_version = None
+        
+        # Set environment variables for consistency
+        env = os.environ.copy()
+        env['ANSIBLE_CONFIG'] = str(self.ansible_config_root / 'ansible.cfg')
+        env['ANSIBLE_COLLECTIONS_PATH'] = str(self.ansible_config_root / 'collections')
+        env['ANSIBLE_HOME'] = str(self.ansible_config_root)
+        
+        # Method 1: ansible-galaxy collection list with specific collection (most targeted)
         try:
-            # Check current installed version
             cmd = [
-                'ansible-galaxy', 'collection', 'list',
+                'ansible-galaxy', 'collection', 'list', 
+                'ratio1.multi_node_launcher',
                 '--collections-path', str(self.ansible_config_root / 'collections')
             ]
-
-            env = os.environ.copy()
-            env['ANSIBLE_CONFIG'] = str(self.ansible_config_root / 'ansible.cfg')
-            env['ANSIBLE_COLLECTIONS_PATH'] = str(self.ansible_config_root / 'collections')
-            env['ANSIBLE_HOME'] = str(self.ansible_config_root)
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=env
-            )
-
-            current_version = None
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=env)
+            
             if result.returncode == 0:
+                # Parse output more carefully
                 for line in result.stdout.split('\n'):
+                    line = line.strip()
                     if 'ratio1.multi_node_launcher' in line:
                         parts = line.split()
                         if len(parts) >= 2:
                             current_version = parts[1]
-                            break
+                            if DEBUG:
+                                self.print_debug(f"Method 1 (targeted list): Found version {current_version}")
+                            return current_version
+            elif DEBUG:
+                self.print_debug(f"Method 1 failed: {result.stderr}")
+        except Exception as e:
+            if DEBUG:
+                self.print_debug(f"Method 1 error: {e}")
 
-            # Check latest version from Ansible Galaxy
-            # For now, we'll just return the current version and assume updates are available
-            # In a real implementation, you might query the Ansible Galaxy API
-            return current_version, True  # Assume updates might be available
+        # Method 2: ansible-galaxy collection list (broad search)
+        if not current_version:
+            try:
+                cmd = [
+                    'ansible-galaxy', 'collection', 'list',
+                    '--collections-path', str(self.ansible_config_root / 'collections')
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=20, env=env)
+                
+                if result.returncode == 0:
+                    for line in result.stdout.split('\n'):
+                        if 'ratio1.multi_node_launcher' in line:
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                current_version = parts[1]
+                                if DEBUG:
+                                    self.print_debug(f"Method 2 (broad list): Found version {current_version}")
+                                break
+                elif DEBUG:
+                    self.print_debug(f"Method 2 failed: {result.stderr}")
+            except Exception as e:
+                if DEBUG:
+                    self.print_debug(f"Method 2 error: {e}")
+
+        # Method 3: Read galaxy.yml directly (filesystem approach)
+        if not current_version:
+            try:
+                collection_dir = self.ansible_config_root / 'collections' / 'ansible_collections' / 'ratio1' / 'multi_node_launcher'
+                galaxy_yml = collection_dir / 'galaxy.yml'
+                
+                if galaxy_yml.exists():
+                    with open(galaxy_yml, 'r') as f:
+                        import yaml
+                        galaxy_data = yaml.safe_load(f)
+                        current_version = galaxy_data.get('version')
+                        if current_version and DEBUG:
+                            self.print_debug(f"Method 3 (galaxy.yml): Found version {current_version}")
+            except Exception as e:
+                if DEBUG:
+                    self.print_debug(f"Method 3 error: {e}")
+
+        # Method 4: Read MANIFEST.json (alternative metadata file)
+        if not current_version:
+            try:
+                collection_dir = self.ansible_config_root / 'collections' / 'ansible_collections' / 'ratio1' / 'multi_node_launcher'
+                manifest_json = collection_dir / 'MANIFEST.json'
+                
+                if manifest_json.exists():
+                    with open(manifest_json, 'r') as f:
+                        import json
+                        manifest_data = json.load(f)
+                        # MANIFEST.json has different structure
+                        collection_info = manifest_data.get('collection_info', {})
+                        current_version = collection_info.get('version')
+                        if current_version and DEBUG:
+                            self.print_debug(f"Method 4 (MANIFEST.json): Found version {current_version}")
+            except Exception as e:
+                if DEBUG:
+                    self.print_debug(f"Method 4 error: {e}")
+
+        # Method 5: Test if collection modules are importable (Python approach)
+        if not current_version:
+            try:
+                # Try to use Python to check if collection is available
+                python_check = f"""
+import sys
+sys.path.insert(0, '{self.ansible_config_root / "collections"}')
+try:
+    from ansible_collections.ratio1.multi_node_launcher import __version__
+    print(__version__)
+except:
+    try:
+        import os
+        galaxy_path = '{self.ansible_config_root / "collections" / "ansible_collections" / "ratio1" / "multi_node_launcher" / "galaxy.yml"}'
+        if os.path.exists(galaxy_path):
+            import yaml
+            with open(galaxy_path) as f:
+                data = yaml.safe_load(f)
+                print(data.get('version', ''))
+    except:
+        pass
+"""
+                result = subprocess.run([sys.executable, '-c', python_check], 
+                                      capture_output=True, text=True, timeout=10)
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    current_version = result.stdout.strip()
+                    if DEBUG:
+                        self.print_debug(f"Method 5 (Python import): Found version {current_version}")
+            except Exception as e:
+                if DEBUG:
+                    self.print_debug(f"Method 5 error: {e}")
+
+        # Method 6: Use ansible-doc to check collection availability (functional test)
+        if not current_version:
+            try:
+                # Try to get documentation for a known module in the collection
+                cmd = [
+                    'ansible-doc', '--list', 
+                    '--type', 'module',
+                    'ratio1.multi_node_launcher'
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=env)
+                
+                if result.returncode == 0 and 'ratio1.multi_node_launcher' in result.stdout:
+                    # Collection is available, try to get version from filesystem
+                    collection_dir = self.ansible_config_root / 'collections' / 'ansible_collections' / 'ratio1' / 'multi_node_launcher'
+                    if collection_dir.exists():
+                        # If ansible-doc found it, collection exists, try galaxy.yml again
+                        galaxy_yml = collection_dir / 'galaxy.yml'
+                        if galaxy_yml.exists():
+                            with open(galaxy_yml, 'r') as f:
+                                import yaml
+                                galaxy_data = yaml.safe_load(f)
+                                current_version = galaxy_data.get('version', 'detected')
+                                if DEBUG:
+                                    self.print_debug(f"Method 6 (ansible-doc + filesystem): Found version {current_version}")
+            except Exception as e:
+                if DEBUG:
+                    self.print_debug(f"Method 6 error: {e}")
+
+        # Clean up version string
+        if current_version:
+            current_version = str(current_version).strip('\'"')
+            
+        # Cache the result
+        import time
+        self._version_cache['collection_version'] = current_version
+        self._version_cache['collection_check_time'] = time.time()
+            
+        if DEBUG:
+            self.print_debug(f"Final current version result: {current_version}")
+            
+        return current_version
+
+    def _check_ansible_collection_version(self) -> Tuple[Optional[str], Optional[str], bool]:
+        """Check the current Ansible collection version and if updates are available"""
+        try:
+            # Use the smart method to get current version
+            current_version = self._get_current_collection_version()
+            latest_version = None
+
+            # Check latest available version from Galaxy API
+            try:
+                import urllib.request
+                import json
+                
+                # Use the correct Galaxy API v3 endpoint format
+                api_url = "https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/index/ratio1/multi_node_launcher/"
+                req = urllib.request.Request(api_url)
+                req.add_header('User-Agent', f'Ratio1-CLI/{CLI_VERSION}')
+                
+                # Create SSL context for secure connection
+                ssl_context = self._create_ssl_context()
+                
+                with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                    # The API response has highest_version.version structure
+                    highest_version = data.get('highest_version', {})
+                    latest_version = highest_version.get('version')
+                    if DEBUG:
+                        self.print_debug(f"Found latest version via Galaxy API v3: {latest_version}")
+            except Exception as e:
+                if DEBUG:
+                    self.print_debug(f"Galaxy API v3 query failed: {e}")
+                
+                # Fallback: Try the older API format (keep as backup)
+                try:
+                    # Try the older API format as fallback
+                    api_url = "https://galaxy.ansible.com/api/v1/collections/ratio1/multi_node_launcher/"
+                    req = urllib.request.Request(api_url)
+                    req.add_header('User-Agent', f'Ratio1-CLI/{CLI_VERSION}')
+                    
+                    with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
+                        data = json.loads(response.read().decode('utf-8'))
+                        # Try different possible fields for v1 API
+                        latest_version = (data.get('latest_version') or 
+                                        data.get('version') or 
+                                        data.get('current_version'))
+                        if DEBUG:
+                            self.print_debug(f"Found latest version via fallback API v1: {latest_version}")
+                except Exception as e2:
+                    if DEBUG:
+                        self.print_debug(f"Fallback API v1 also failed: {e2}")
+                    # If all else fails, we can't determine the latest version
+                    latest_version = None
+
+            # Compare versions if we have both
+            update_available = False
+            if current_version and latest_version:
+                try:
+                    # Remove any extra quotes or whitespace
+                    current_version = current_version.strip('\'"')
+                    latest_version = latest_version.strip('\'"')
+                    
+                    # Simple version comparison
+                    current_parts = [int(x) for x in current_version.split('.')]
+                    latest_parts = [int(x) for x in latest_version.split('.')]
+                    
+                    # Pad shorter version with zeros
+                    max_len = max(len(current_parts), len(latest_parts))
+                    current_parts.extend([0] * (max_len - len(current_parts)))
+                    latest_parts.extend([0] * (max_len - len(latest_parts)))
+                    
+                    # Compare version parts
+                    for i in range(max_len):
+                        if latest_parts[i] > current_parts[i]:
+                            update_available = True
+                            break
+                        elif latest_parts[i] < current_parts[i]:
+                            break  # Current is newer
+                    
+                    if DEBUG:
+                        self.print_debug(f"Version comparison: current={current_version}, latest={latest_version}, update_available={update_available}")
+                    
+                except (ValueError, IndexError) as e:
+                    if DEBUG:
+                        self.print_debug(f"Version comparison failed: {e}")
+                    # If we can't compare, assume update might be available
+                    update_available = True
+            elif current_version and not latest_version:
+                # We have current but not latest - assume update might be available
+                update_available = True
+                if DEBUG:
+                    self.print_debug(f"Could not determine latest version, assuming update available")
+            elif not current_version and latest_version:
+                # No current version means collection is not installed
+                update_available = True
+                if DEBUG:
+                    self.print_debug(f"Collection not installed, update available")
+            else:
+                # Neither version available - can't determine
+                update_available = False
+                if DEBUG:
+                    self.print_debug(f"Could not determine any versions")
+
+            return current_version, latest_version, update_available
 
         except Exception as e:
             self.print_colored(f"Error checking Ansible collection version: {e}", 'yellow')
-            return None, False
+            if DEBUG:
+                import traceback
+                self.print_debug(f"Full traceback: {traceback.format_exc()}")
+            return None, None, False
 
     def update_cli(self) -> None:
         """Check for and install CLI and Ansible collection updates"""
@@ -2469,25 +2802,34 @@ class R1Setup:
 
         # Check Ansible collection version
         self.print_colored("\n🔍 Checking Ansible collection version...", 'yellow')
-        current_collection_version, collection_update_available = self._check_ansible_collection_version()
+        current_collection_version, latest_collection_version, collection_update_available = self._check_ansible_collection_version()
         
-        if current_collection_version:
-            self.print_colored(f"Current collection version: {current_collection_version}", 'cyan')
-        else:
-            self.print_colored("Collection version unknown or not installed", 'yellow')
-
         # Show update status
-        self.print_colored("\n📋 Update Status:", 'cyan', bold=True)
+        if current_collection_version:
+            self.print_colored(f"✅ Current collection version: {current_collection_version}", 'cyan')
+        else:
+            self.print_colored("⚠️  Collection: Not installed", 'yellow')
+            
+        if latest_collection_version:
+            self.print_colored(f"🔍 Latest collection version: {latest_collection_version}", 'cyan')
         
         if cli_update_available:
-            self.print_colored(f"   🆕 CLI: Update available ({CLI_VERSION} → {latest_cli_version})", 'green')
+            self.print_colored(f"🆕 CLI update available: {CLI_VERSION} → {latest_cli_version}", 'green')
         else:
-            self.print_colored(f"   ✅ CLI: Up to date ({CLI_VERSION})", 'green')
+            self.print_colored(f"✅ CLI is up to date ({CLI_VERSION})", 'green')
 
         if collection_update_available:
-            self.print_colored("   🆕 Collection: Update available", 'green')
+            if current_collection_version and latest_collection_version:
+                self.print_colored(f"🆕 Ansible collection update available: {current_collection_version} → {latest_collection_version}", 'green')
+            elif not current_collection_version:
+                self.print_colored("🆕 Ansible collection: Install available", 'green')
+            else:
+                self.print_colored("🆕 Ansible collection update available", 'green')
         else:
-            self.print_colored("   ✅ Collection: Up to date", 'green')
+            if current_collection_version:
+                self.print_colored(f"✅ Ansible collection is up to date ({current_collection_version})", 'green')
+            else:
+                self.print_colored("✅ Ansible collection is up to date", 'green')
 
         # If no updates available
         if not cli_update_available and not collection_update_available:
@@ -2512,7 +2854,7 @@ class R1Setup:
             self.print_colored(f"   {option}", 'white')
 
         while True:
-            choice = self.get_input("\nSelect update option")
+            choice = self.get_input("\nSelect update option", "0")
             
             if choice == '0':
                 self.print_colored("Update cancelled.", 'yellow')
@@ -2586,6 +2928,84 @@ class R1Setup:
         else:
             self.print_colored("\n❌ CLI update failed. Ansible collection may have been updated.", 'red')
             input("Press Enter to continue...")
+
+    def _auto_update_check(self) -> None:
+        """Automatically check for and install updates on startup"""
+        self.print_colored("🔍 Checking for updates...", 'cyan')
+        
+        # Check CLI version
+        latest_cli_version = None
+        cli_update_available = False
+        cli_download_urls = None
+        cli_fallback_urls = None
+
+        try:
+            latest_cli_version, cli_download_urls, cli_fallback_urls = self._check_latest_version()
+            if latest_cli_version:
+                cli_update_available = self._compare_versions(CLI_VERSION, latest_cli_version) < 0
+        except Exception as e:
+            self.print_colored(f"Could not check for CLI updates: {e}", 'yellow')
+
+        # Check Ansible collection version
+        current_collection_version, latest_collection_version, collection_update_available = self._check_ansible_collection_version()
+
+        # Show update status
+        if DEBUG:
+            self.print_debug(f"Auto-update check: current_collection_version={current_collection_version}, latest_collection_version={latest_collection_version}, collection_update_available={collection_update_available}")
+
+        if cli_update_available:
+            self.print_colored(f"🆕 CLI update available: {CLI_VERSION} → {latest_cli_version}", 'green')
+        else:
+            self.print_colored(f"✅ CLI is up to date ({CLI_VERSION})", 'green')
+
+        if collection_update_available:
+            self.print_colored("🆕 Ansible collection update available", 'green')
+        else:
+            if current_collection_version:
+                self.print_colored(f"✅ Ansible collection is up to date ({current_collection_version})", 'green')
+            else:
+                self.print_colored("✅ Ansible collection is up to date", 'green')
+
+        # Perform auto-updates
+        updates_performed = False
+
+        if cli_update_available and latest_cli_version and cli_download_urls:
+            self.print_colored(f"\n🚀 Auto-updating CLI to version {latest_cli_version}...", 'cyan', bold=True)
+            success = self._perform_update(latest_cli_version, cli_download_urls, cli_fallback_urls)
+            
+            if success:
+                self.print_colored(f"✅ Successfully updated CLI to version {latest_cli_version}!", 'green')
+                self.print_colored("Restarting with the new version...", 'cyan')
+                # Give user a moment to see the message
+                import time
+                time.sleep(2)
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            else:
+                self.print_colored("❌ CLI auto-update failed. Continuing with current version.", 'red')
+
+        if collection_update_available:
+            self.print_colored("\n🚀 Auto-updating Ansible collection...", 'cyan', bold=True)
+            if current_collection_version:
+                self.print_colored(f"  Current version: {current_collection_version}", 'cyan')
+            if latest_collection_version:
+                self.print_colored(f"  Updating to: {latest_collection_version}", 'cyan')
+            
+            success = self._update_ansible_collection()
+            
+            if success:
+                self.print_colored("✅ Ansible collection updated successfully!", 'green')
+                updates_performed = True
+            else:
+                self.print_colored("❌ Ansible collection auto-update failed.", 'red')
+
+        if not cli_update_available and not collection_update_available:
+            self.print_colored("✅ All components are up to date!", 'green')
+        elif updates_performed:
+            self.print_colored("\n✅ Auto-update completed successfully!", 'green')
+            input("Press Enter to continue...")
+        
+        # Add a separator before main menu
+        print()
 
     def ensure_active_configuration(self) -> bool:
         """Ensure there's an active configuration before proceeding to main menu"""
@@ -2702,7 +3122,7 @@ class R1Setup:
                     # Let user select from existing configurations
                     while True:
                         try:
-                            selection = int(self.get_input(f"Select configuration number (1-{len(configs)})")) - 1
+                            selection = int(self.get_input(f"Select configuration number (1-{len(configs)})", "1")) - 1
                             if 0 <= selection < len(configs):
                                 selected_config = configs[selection][0].replace('.yml', '')
                                 break
@@ -2764,6 +3184,9 @@ class R1Setup:
             self.print_colored("Please ensure Ansible and the required collection are installed.", 'red')
             sys.exit(1)
 
+        # Auto-update check - this runs first before everything else
+        self._auto_update_check()
+
         # Ensure we have an active configuration before proceeding
         if not self.ensure_active_configuration():
             sys.exit(0)
@@ -2771,7 +3194,7 @@ class R1Setup:
         while True:
             try:
                 self.show_main_menu()
-                choice = self.get_input("Select option (0-13)")
+                choice = self.get_input("Select option (0-12)", "0")
 
                 if choice == '0':
                     self.print_colored("Thank you for using Ratio1 Multi-Node Launcher Setup!", 'green')
@@ -2800,8 +3223,6 @@ class R1Setup:
                     self.export_addresses_csv()
                 elif choice == '12':
                     self.change_network_environment()
-                elif choice == '13':
-                    self.update_cli()
                 else:
                     self.print_colored("Invalid option. Please try again.", 'red')
                     input("Press Enter to continue...")
@@ -2814,6 +3235,7 @@ class R1Setup:
                 input("Press Enter to continue...")
 
 
+    
 if __name__ == "__main__":
     r1setup = R1Setup()
     r1setup.run()
