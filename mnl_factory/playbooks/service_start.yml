@@ -1,0 +1,92 @@
+---
+- name: Start Edge Node Services
+  hosts: gpu_nodes
+  become: true
+  gather_facts: true
+  vars:
+    ansible_roles_path: "{{ playbook_dir }}/../roles"
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+    - ../group_vars/mnl.yml
+    - ../group_vars/variables.yml
+  tasks:
+    - name: Check if service exists
+      ansible.builtin.systemd:
+        name: "{{ edge_node_service_name }}"
+      register: service_exists
+      ignore_errors: true
+
+    - name: Display service not found error
+      debug:
+        msg: |
+          ❌ ERROR: Service '{{ edge_node_service_name }}' not found on {{ inventory_hostname }}
+          This usually means the edge node has not been deployed yet.
+          Please run deployment first before starting services.
+      when: service_exists is failed
+
+    - name: Fail if service doesn't exist
+      fail:
+        msg: "Service {{ edge_node_service_name }} not found on {{ inventory_hostname }}"
+      when: service_exists is failed
+
+    - name: Enable the edge node service
+      ansible.builtin.systemd:
+        name: "{{ edge_node_service_name }}"
+        enabled: true
+        daemon_reload: true
+      when: service_exists is not failed
+
+    - name: Start the edge node service
+      ansible.builtin.systemd:
+        name: "{{ edge_node_service_name }}"
+        state: started
+      when: service_exists is not failed
+      register: service_start_result
+
+    - name: Wait for service to be active
+      ansible.builtin.systemd:
+        name: "{{ edge_node_service_name }}"
+      register: service_status
+      until: service_status.status.ActiveState == "active"
+      retries: 30
+      delay: 2
+      when: service_exists is not failed
+
+    - name: Verify Docker container is running
+      ansible.builtin.shell: |
+        docker ps --filter "name={{ mnl_docker_container_name }}" --format "{{.Names}}\t{{.Status}}"
+      register: container_check
+      ignore_errors: true
+      when: service_exists is not failed
+
+    - name: Display startup success
+      debug:
+        msg: |
+          ✅ SUCCESS: Edge node service started on {{ inventory_hostname }}
+          Service: {{ edge_node_service_name }}
+          Status: {{ service_status.status.ActiveState | default('unknown') }}
+          Container: {{ 'Running' if (mnl_docker_container_name in container_check.stdout) else 'Not running' }}
+      when: service_exists is not failed and service_status.status.ActiveState == "active"
+
+    - name: Show recent logs after startup
+      ansible.builtin.shell: |
+        journalctl -u {{ edge_node_service_name }} -n 5 --no-pager
+      register: startup_logs
+      ignore_errors: true
+      when: service_exists is not failed
+
+    - name: Display startup logs
+      debug:
+        msg: |
+          Recent startup logs:
+          {{ startup_logs.stdout }}
+      when: service_exists is not failed and startup_logs.stdout is defined
+
+    - name: Service start failure warning
+      debug:
+        msg: |
+          ⚠️  WARNING: Service may not have started properly on {{ inventory_hostname }}
+          Current status: {{ service_status.status.ActiveState | default('unknown') }}
+          Please check the logs for more details.
+      when: service_exists is not failed and service_status.status.ActiveState != "active" 

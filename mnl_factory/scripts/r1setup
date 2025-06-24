@@ -668,8 +668,14 @@ class R1Setup:
         self.print_colored(" 10) Get node addresses       - Display nodes addresses")
         self.print_colored(" 11) Export addresses to CSV  - Save addresses to CSV file")
         print()
+        self.print_colored("Service Management:")
+        self.print_colored(" 12) Start edge node service - Start the edge node service on all nodes")
+        self.print_colored(" 13) Stop edge node service  - Stop the edge node service on all nodes")
+        self.print_colored(" 14) Restart edge node service - Restart the edge node service on all nodes")
+        self.print_colored(" 15) Check service status    - Check edge node service status on all nodes")
+        print()
         self.print_colored("Settings:")
-        self.print_colored(" 12) Change network environment - Switch between mainnet/testnet/devnet")
+        self.print_colored(" 16) Change network environment - Switch between mainnet/testnet/devnet")
         print()
         self.print_colored("  0) Exit")
         print()
@@ -2001,6 +2007,121 @@ class R1Setup:
 
         input("Press Enter to continue...")
 
+    def start_edge_node_service(self) -> None:
+        """Start edge node service on all configured nodes"""
+        self._manage_service("service_start.yml", "Start Edge Node Service", "🚀 Starting edge node service")
+
+    def stop_edge_node_service(self) -> None:
+        """Stop edge node service on all configured nodes"""
+        self._manage_service("service_stop.yml", "Stop Edge Node Service", "🛑 Stopping edge node service")
+
+    def restart_edge_node_service(self) -> None:
+        """Restart edge node service on all configured nodes"""
+        self._manage_service("service_restart.yml", "Restart Edge Node Service", "🔄 Restarting edge node service")
+
+    def check_service_status(self) -> None:
+        """Check edge node service status on all configured nodes"""
+        self._manage_service("service_status.yml", "Check Service Status", "📊 Checking edge node service status")
+
+    def _manage_service(self, playbook_name: str, title: str, action_text: str) -> None:
+        """Common method to manage edge node services"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        self.print_header(title)
+
+        # Load configuration to show service management details
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        env = self.get_mnl_app_env()
+
+        # Show service management details
+        self.print_colored(f"🔧 Service Management Details:", 'cyan', bold=True)
+        self.print_colored(f"   • Action: {action_text}", 'white')
+        self.print_colored(f"   • Network: {env if env else 'Not set'}", 'green' if env else 'red')
+        self.print_colored(f"   • Target Nodes: {len(hosts)}", 'white')
+
+        self.print_colored(f"\n🖥️  Target Machines:", 'cyan', bold=True)
+        for name, config in hosts.items():
+            ip = config.get('ansible_host', 'Unknown')
+            user = config.get('ansible_user', 'Unknown')
+            self.print_colored(f"   • {name}: {user}@{ip}", 'white')
+
+        # Service-specific descriptions
+        if "start" in playbook_name:
+            self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
+            self.print_colored("   • Start the edge node systemd service on each node", 'yellow')
+            self.print_colored("   • Enable the service to start automatically on boot", 'yellow')
+            self.print_colored("   • Verify service startup status", 'yellow')
+        elif "stop" in playbook_name:
+            self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
+            self.print_colored("   • Stop the edge node systemd service on each node", 'yellow')
+            self.print_colored("   • Keep the service enabled for future startups", 'yellow')
+            self.print_colored("   • Verify service shutdown status", 'yellow')
+        elif "restart" in playbook_name:
+            self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
+            self.print_colored("   • Stop the current edge node service", 'yellow')
+            self.print_colored("   • Start the edge node service with fresh state", 'yellow')
+            self.print_colored("   • Verify service restart status", 'yellow')
+        elif "status" in playbook_name:
+            self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
+            self.print_colored("   • Check the current status of edge node service", 'yellow')
+            self.print_colored("   • Show service logs and runtime information", 'yellow')
+            self.print_colored("   • Display resource usage if available", 'yellow')
+
+        if not env:
+            self.print_colored("\n⚠️  WARNING: Network environment is not set!", 'red', bold=True)
+            self.print_colored("   Service operations will proceed, but network environment should be configured.", 'red')
+
+        # Confirmation for potentially disruptive operations
+        if "stop" in playbook_name or "restart" in playbook_name:
+            if self.get_input(f"\n⚠️  Continue with {action_text.lower()} on {len(hosts)} node(s)? (y/n)", "y").lower() != 'y':
+                self.print_colored("Service operation cancelled.", 'yellow')
+                return
+        else:
+            if self.get_input(f"\n🔧 Continue with {action_text.lower()} on {len(hosts)} node(s)? (y/n)", "y").lower() != 'y':
+                self.print_colored("Service operation cancelled.", 'yellow')
+                return
+
+        playbook_path = self.config_dir / f'playbooks/{playbook_name}'
+        if not playbook_path.exists():
+            self.print_colored(f"Service management playbook not found: {playbook_path}", 'red')
+            input("Press Enter to continue...")
+            return
+
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+
+        self.print_colored(f"\n{action_text}...", 'cyan')
+        success, _ = self.run_command(cmd, show_output=True)
+
+        if success:
+            self.print_colored(f"\n✅ {title} completed successfully!", 'green')
+            
+            # Additional success messages based on operation
+            if "start" in playbook_name:
+                self.print_colored("All edge node services have been started and are running.", 'green')
+            elif "stop" in playbook_name:
+                self.print_colored("All edge node services have been stopped.", 'green')
+            elif "restart" in playbook_name:
+                self.print_colored("All edge node services have been restarted with fresh state.", 'green')
+            elif "status" in playbook_name:
+                self.print_colored("Service status information has been retrieved for all nodes.", 'green')
+        else:
+            self.print_colored(f"\n❌ {title} encountered issues. Please check the output above.", 'red')
+            
+            # Additional error guidance based on operation
+            if "start" in playbook_name:
+                self.print_colored("Common issues: Service not deployed, network connectivity, or configuration errors.", 'yellow')
+            elif "stop" in playbook_name or "restart" in playbook_name:
+                self.print_colored("This might be normal if the service was not running on some nodes.", 'yellow')
+
+        input("Press Enter to continue...")
+
     def _update_deployment_metadata(self, deployment_type: str) -> None:
         """Update deployment metadata after successful deployment"""
         if not self.active_config.get('config_name'):
@@ -3194,7 +3315,7 @@ except:
         while True:
             try:
                 self.show_main_menu()
-                choice = self.get_input("Select option (0-12)", "0")
+                choice = self.get_input("Select option (0-16)", "0")
 
                 if choice == '0':
                     self.print_colored("Thank you for using Ratio1 Multi-Node Launcher Setup!", 'green')
@@ -3222,6 +3343,14 @@ except:
                 elif choice == '11':
                     self.export_addresses_csv()
                 elif choice == '12':
+                    self.start_edge_node_service()
+                elif choice == '13':
+                    self.stop_edge_node_service()
+                elif choice == '14':
+                    self.restart_edge_node_service()
+                elif choice == '15':
+                    self.check_service_status()
+                elif choice == '16':
                     self.change_network_environment()
                 else:
                     self.print_colored("Invalid option. Please try again.", 'red')

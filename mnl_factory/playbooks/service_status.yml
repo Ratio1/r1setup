@@ -1,0 +1,80 @@
+---
+- name: Check Edge Node Service Status
+  hosts: gpu_nodes
+  become: true
+  gather_facts: true
+  vars:
+    ansible_roles_path: "{{ playbook_dir }}/../roles"
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+    - ../group_vars/mnl.yml
+    - ../group_vars/variables.yml
+  tasks:
+    - name: Check if service exists
+      ansible.builtin.systemd:
+        name: "{{ edge_node_service_name }}"
+      register: service_exists
+      ignore_errors: true
+
+    - name: Get service status
+      ansible.builtin.systemd:
+        name: "{{ edge_node_service_name }}"
+      register: service_status
+      when: service_exists is not failed
+
+    - name: Get detailed service status
+      ansible.builtin.shell: |
+        systemctl status {{ edge_node_service_name }} --no-pager -l
+      register: detailed_status
+      ignore_errors: true
+      when: service_exists is not failed
+
+    - name: Check if Docker container is running
+      ansible.builtin.shell: |
+        docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" --filter "name={{ mnl_docker_container_name }}"
+      register: container_status
+      ignore_errors: true
+
+    - name: Display service status summary
+      debug:
+        msg: |
+          ==========================================
+          NODE: {{ inventory_hostname }}
+          ==========================================
+          Service Name: {{ edge_node_service_name }}
+          Service Status: {{ 'ACTIVE' if (service_status.status.ActiveState | default('')) == 'active' else 'INACTIVE/FAILED' if service_exists is not failed else 'NOT FOUND' }}
+          Service Enabled: {{ 'YES' if (service_status.status.UnitFileState | default('')) == 'enabled' else 'NO' if service_exists is not failed else 'N/A' }}
+          Container Status: {{ 'RUNNING' if (mnl_docker_container_name in container_status.stdout) and ('Up' in container_status.stdout) else 'NOT RUNNING' }}
+
+    - name: Display detailed service information
+      debug:
+        var: detailed_status.stdout_lines
+      when: service_exists is not failed and detailed_status is defined
+
+    - name: Display container information
+      debug:
+        var: container_status.stdout_lines
+      when: container_status.stdout_lines is defined and container_status.stdout_lines | length > 0
+
+    - name: Show recent service logs (last 10 lines)
+      ansible.builtin.shell: |
+        journalctl -u {{ edge_node_service_name }} -n 10 --no-pager
+      register: recent_logs
+      ignore_errors: true
+      when: service_exists is not failed
+
+    - name: Display recent logs
+      debug:
+        msg: |
+          Recent logs (last 10 lines):
+          {{ recent_logs.stdout }}
+      when: service_exists is not failed and recent_logs.stdout is defined
+
+    - name: Service not found warning
+      debug:
+        msg: |
+          ⚠️  WARNING: Service '{{ edge_node_service_name }}' not found on {{ inventory_hostname }}
+          This usually means the edge node has not been deployed yet.
+          Please run deployment first before checking service status.
+      when: service_exists is failed 
