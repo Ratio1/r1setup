@@ -799,7 +799,7 @@ class R1Setup:
         # Get number of nodes
         while True:
             try:
-                num_nodes = int(self.get_input("How many GPU nodes do you want to configure", "1"))
+                num_nodes = int(self.get_input("How many nodes do you want to configure", "1"))
                 if num_nodes <= 0:
                     self.print_colored("Please enter a positive number", 'red')
                     continue
@@ -1070,7 +1070,7 @@ class R1Setup:
         # Get number of nodes
         while True:
             try:
-                num_nodes = int(self.get_input("How many GPU nodes do you want to configure", "1"))
+                num_nodes = int(self.get_input("How many nodes do you want to configure", "1"))
                 if num_nodes <= 0:
                     self.print_colored("Please enter a positive number", 'red')
                     continue

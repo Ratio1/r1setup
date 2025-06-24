@@ -54,6 +54,14 @@
   when: docker_service_status.rc == 0
 
 
+- name: "Remove old service for legacy systems"
+  ansible.builtin.template:
+    src: edge_node.service.j2
+    dest: /etc/systemd/system/edge_node_service.service
+    mode: '0644'
+    force: true
+  notify: reload systemd
+
 - name: "Create service for {{ mnl_app_name }}"
   ansible.builtin.template:
     src: edge_node.service.j2
@@ -66,6 +74,12 @@
   ansible.builtin.systemd:
     name: "{{ edge_node_service_name }}"
     state: stopped
+
+- name: Reload systemd for edge node service
+  ansible.builtin.command:
+    cmd: systemctl daemon-reload
+  become: yes
+  ignore_errors: yes
 
 - name: Start the service
   ansible.builtin.systemd:

@@ -513,7 +513,7 @@ class ConfigManager:
 
     while True:
       try:
-        num_hosts = int(self.get_input("How many GPU nodes do you want to configure"))
+        num_hosts = int(self.get_input("How many nodes do you want to configure"))
         if num_hosts <= 0:
           self.print_colored("Please enter a positive number", 'red')
           continue
