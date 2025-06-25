@@ -32,7 +32,7 @@
 
     - name: Check if Docker container is running
       ansible.builtin.shell: |
-        docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" --filter "name={{ mnl_docker_container_name }}"
+        docker ps --format "table {{ '{{.Names}}' }}\t{{ '{{.Status}}' }}\t{{ '{{.Ports}}' }}" --filter "name={{ mnl_docker_container_name }}"
       register: container_status
       ignore_errors: true
 
@@ -45,7 +45,7 @@
           Service Name: {{ edge_node_service_name }}
           Service Status: {{ 'ACTIVE' if (service_status.status.ActiveState | default('')) == 'active' else 'INACTIVE/FAILED' if service_exists is not failed else 'NOT FOUND' }}
           Service Enabled: {{ 'YES' if (service_status.status.UnitFileState | default('')) == 'enabled' else 'NO' if service_exists is not failed else 'N/A' }}
-          Container Status: {{ 'RUNNING' if (mnl_docker_container_name in container_status.stdout) and ('Up' in container_status.stdout) else 'NOT RUNNING' }}
+          Container Status: {{ 'RUNNING' if (container_status is succeeded and mnl_docker_container_name in container_status.stdout and 'Up' in container_status.stdout) else 'NOT RUNNING' }}
 
     - name: Display detailed service information
       debug:

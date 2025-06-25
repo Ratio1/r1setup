@@ -55,7 +55,7 @@
 
     - name: Verify Docker container is running
       ansible.builtin.shell: |
-        docker ps --filter "name={{ mnl_docker_container_name }}" --format "{{.Names}}\t{{.Status}}"
+        docker ps --filter "name={{ mnl_docker_container_name }}" --format "{{ '{{.Names}}' }}\t{{ '{{.Status}}' }}"
       register: container_check
       ignore_errors: true
       when: service_exists is not failed
@@ -66,7 +66,7 @@
           ✅ SUCCESS: Edge node service started on {{ inventory_hostname }}
           Service: {{ edge_node_service_name }}
           Status: {{ service_status.status.ActiveState | default('unknown') }}
-          Container: {{ 'Running' if (mnl_docker_container_name in container_check.stdout) else 'Not running' }}
+          Container: {{ 'Running' if (container_check is succeeded and mnl_docker_container_name in container_check.stdout) else 'Not running' }}
       when: service_exists is not failed and service_status.status.ActiveState == "active"
 
     - name: Show recent logs after startup

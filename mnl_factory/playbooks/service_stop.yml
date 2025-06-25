@@ -64,7 +64,7 @@
 
     - name: Verify Docker container is stopped
       ansible.builtin.shell: |
-        docker ps --filter "name={{ mnl_docker_container_name }}" --format "{{.Names}}\t{{.Status}}"
+        docker ps --filter "name={{ mnl_docker_container_name }}" --format "{{ '{{.Names}}' }}\t{{ '{{.Status}}' }}"
       register: container_check
       ignore_errors: true
       when: service_exists is not failed
@@ -76,7 +76,7 @@
           Service: {{ edge_node_service_name }}
           Status: {{ service_status.status.ActiveState | default('unknown') }}
           Auto-start: Disabled
-          Container: {{ 'Stopped' if (mnl_docker_container_name not in container_check.stdout) else 'Still running' }}
+          Container: {{ 'Stopped' if (container_check is succeeded and mnl_docker_container_name not in container_check.stdout) else 'Still running' }}
       when: service_exists is not failed and service_status.status.ActiveState == "inactive"
 
     - name: Show final logs before stopping

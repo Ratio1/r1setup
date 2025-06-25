@@ -83,7 +83,7 @@
 
     - name: Verify Docker container is running after restart
       ansible.builtin.shell: |
-        docker ps --filter "name={{ mnl_docker_container_name }}" --format "{{.Names}}\t{{.Status}}"
+        docker ps --filter "name={{ mnl_docker_container_name }}" --format "{{ '{{.Names}}' }}\t{{ '{{.Status}}' }}"
       register: container_check
       ignore_errors: true
       when: service_exists is not failed
@@ -95,7 +95,7 @@
           Service: {{ edge_node_service_name }}
           Status: {{ service_status.status.ActiveState | default('unknown') }}
           Auto-start: Enabled
-          Container: {{ 'Running' if (mnl_docker_container_name in container_check.stdout) and ('Up' in container_check.stdout) else 'Not running properly' }}
+          Container: {{ 'Running' if (container_check is succeeded and mnl_docker_container_name in container_check.stdout and 'Up' in container_check.stdout) else 'Not running properly' }}
       when: service_exists is not failed and service_status.status.ActiveState == "active"
 
     - name: Show post-restart logs
