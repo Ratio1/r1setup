@@ -46,13 +46,6 @@
       when: service_exists is not failed
       register: service_stop_result
 
-    - name: Disable the edge node service from auto-start
-      ansible.builtin.systemd:
-        name: "{{ edge_node_service_name }}"
-        enabled: false
-        daemon_reload: true
-      when: service_exists is not failed
-
     - name: Wait for service to be inactive
       ansible.builtin.systemd:
         name: "{{ edge_node_service_name }}"
