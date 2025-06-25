@@ -2041,9 +2041,9 @@ class R1Setup:
         self.print_colored(f"🔧 Service Management Details:", 'cyan', bold=True)
         self.print_colored(f"   • Action: {action_text}", 'white')
         self.print_colored(f"   • Network: {env if env else 'Not set'}", 'green' if env else 'red')
-        self.print_colored(f"   • Target Nodes: {len(hosts)}", 'white')
+        self.print_colored(f"   • Available Nodes: {len(hosts)}", 'white')
 
-        self.print_colored(f"\n🖥️  Target Machines:", 'cyan', bold=True)
+        self.print_colored(f"\n🖥️  Available Machines:", 'cyan', bold=True)
         for name, config in hosts.items():
             ip = config.get('ansible_host', 'Unknown')
             user = config.get('ansible_user', 'Unknown')
@@ -2052,12 +2052,12 @@ class R1Setup:
         # Service-specific descriptions
         if "start" in playbook_name:
             self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
-            self.print_colored("   • Start the edge node systemd service on each node", 'yellow')
+            self.print_colored("   • Start the edge node systemd service on selected nodes", 'yellow')
             self.print_colored("   • Enable the service to start automatically on boot", 'yellow')
             self.print_colored("   • Verify service startup status", 'yellow')
         elif "stop" in playbook_name:
             self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
-            self.print_colored("   • Stop the edge node systemd service on each node", 'yellow')
+            self.print_colored("   • Stop the edge node systemd service on selected nodes", 'yellow')
             self.print_colored("   • Keep the service enabled for future startups", 'yellow')
             self.print_colored("   • Verify service shutdown status", 'yellow')
         elif "restart" in playbook_name:
@@ -2075,13 +2075,29 @@ class R1Setup:
             self.print_colored("\n⚠️  WARNING: Network environment is not set!", 'red', bold=True)
             self.print_colored("   Service operations will proceed, but network environment should be configured.", 'red')
 
+        # Interactive host selection
+        operation_name = action_text.lower()
+        selected_hosts = self._interactive_host_selection(hosts, operation_name)
+        
+        if not selected_hosts:
+            self.print_colored("No hosts selected. Operation cancelled.", 'yellow')
+            return
+
+        # Show final confirmation with selected hosts
+        self.print_colored(f"\n📋 Selected hosts for {operation_name}:", 'cyan', bold=True)
+        for host_name in selected_hosts:
+            host_config = hosts[host_name]
+            ip = host_config.get('ansible_host', 'Unknown')
+            user = host_config.get('ansible_user', 'Unknown')
+            self.print_colored(f"   ✓ {host_name}: {user}@{ip}", 'green')
+
         # Confirmation for potentially disruptive operations
         if "stop" in playbook_name or "restart" in playbook_name:
-            if self.get_input(f"\n⚠️  Continue with {action_text.lower()} on {len(hosts)} node(s)? (y/n)", "y").lower() != 'y':
+            if self.get_input(f"\n⚠️  Continue with {operation_name} on {len(selected_hosts)} selected node(s)? (y/n)", "y").lower() != 'y':
                 self.print_colored("Service operation cancelled.", 'yellow')
                 return
         else:
-            if self.get_input(f"\n🔧 Continue with {action_text.lower()} on {len(hosts)} node(s)? (y/n)", "y").lower() != 'y':
+            if self.get_input(f"\n🔧 Continue with {operation_name} on {len(selected_hosts)} selected node(s)? (y/n)", "y").lower() != 'y':
                 self.print_colored("Service operation cancelled.", 'yellow')
                 return
 
@@ -2091,12 +2107,18 @@ class R1Setup:
             input("Press Enter to continue...")
             return
 
+        # Build Ansible command with host limitation
         cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
                f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
                f"ansible-playbook -i {self.config_file} {playbook_path}")
 
-        self.print_colored(f"\n{action_text}...", 'cyan')
+        # Add --limit parameter to target only selected hosts
+        if len(selected_hosts) < len(hosts):
+            limit_hosts = ','.join(selected_hosts)
+            cmd += f" --limit '{limit_hosts}'"
+
+        self.print_colored(f"\n{action_text} on {len(selected_hosts)} node(s)...", 'cyan')
         success, _ = self.run_command(cmd, show_output=True)
 
         if success:
@@ -2104,13 +2126,13 @@ class R1Setup:
             
             # Additional success messages based on operation
             if "start" in playbook_name:
-                self.print_colored("All edge node services have been started and are running.", 'green')
+                self.print_colored(f"Edge node services have been started on {len(selected_hosts)} node(s).", 'green')
             elif "stop" in playbook_name:
-                self.print_colored("All edge node services have been stopped.", 'green')
+                self.print_colored(f"Edge node services have been stopped on {len(selected_hosts)} node(s).", 'green')
             elif "restart" in playbook_name:
-                self.print_colored("All edge node services have been restarted with fresh state.", 'green')
+                self.print_colored(f"Edge node services have been restarted on {len(selected_hosts)} node(s).", 'green')
             elif "status" in playbook_name:
-                self.print_colored("Service status information has been retrieved for all nodes.", 'green')
+                self.print_colored(f"Service status information retrieved for {len(selected_hosts)} node(s).", 'green')
         else:
             self.print_colored(f"\n❌ {title} encountered issues. Please check the output above.", 'red')
             
@@ -3362,6 +3384,273 @@ except:
             except Exception as e:
                 self.print_colored(f"An error occurred: {e}", 'red')
                 input("Press Enter to continue...")
+
+    def _interactive_host_selection(self, hosts: Dict[str, Dict[str, Any]], operation_name: str) -> List[str]:
+        """Interactive host selection with keyboard navigation (arrow keys + space)"""
+        if not hosts:
+            return []
+
+        try:
+            import sys
+            import tty
+            import termios
+        except ImportError:
+            # Fallback to the previous method if termios is not available (Windows)
+            return self._fallback_host_selection(hosts, operation_name)
+
+        host_list = ["All hosts"] + list(hosts.keys())
+        selected_hosts = set(hosts.keys())  # Start with all selected
+        current_index = 0
+        
+        def get_key():
+            """Get a single keypress from stdin"""
+            fd = sys.stdin.fileno()
+            old_settings = termios.tcgetattr(fd)
+            try:
+                tty.setraw(sys.stdin.fileno())
+                key = sys.stdin.read(1)
+                if key == '\x1b':  # ESC sequence
+                    key += sys.stdin.read(2)
+                return key
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+        def display_menu():
+            """Display the selection menu"""
+            # Clear screen and move cursor to top
+            print("\033[2J\033[H", end="")
+            
+            # Header
+            self.print_header(f"Select Hosts for {operation_name.title()}")
+            
+            # Instructions
+            self.print_colored("🎮 Navigation Controls:", 'cyan', bold=True)
+            self.print_colored("   ↑/↓ Arrow keys    - Navigate up/down", 'white')
+            self.print_colored("   Space bar        - Toggle selection", 'white')
+            self.print_colored("   Enter           - Confirm selection", 'white')
+            self.print_colored("   q/Esc           - Cancel operation", 'white')
+            print()
+            
+            # Status
+            all_selected = len(selected_hosts) == len(hosts)
+            if len(selected_hosts) == 0:
+                self.print_colored("⚠️  No hosts selected!", 'red', bold=True)
+            elif all_selected:
+                self.print_colored(f"✅ All {len(hosts)} hosts selected", 'green', bold=True)
+            else:
+                self.print_colored(f"📊 Selected: {len(selected_hosts)}/{len(hosts)} hosts", 'cyan', bold=True)
+            print()
+            
+            # Menu items
+            for i, item in enumerate(host_list):
+                is_current = (i == current_index)
+                
+                if item == "All hosts":
+                    # All hosts option
+                    all_selected = len(selected_hosts) == len(hosts)
+                    marker = "✓" if all_selected else " "
+                    prefix = "→ " if is_current else "  "
+                    color = 'yellow' if is_current else ('green' if all_selected else 'white')
+                    style = 'bold' if is_current else False
+                    
+                    self.print_colored(f"{prefix}[{marker}] {item} ({len(hosts)} total)", color, bold=style)
+                else:
+                    # Individual host
+                    host_name = item
+                    host_config = hosts[host_name]
+                    ip = host_config.get('ansible_host', 'Unknown')
+                    user = host_config.get('ansible_user', 'Unknown')
+                    
+                    is_selected = host_name in selected_hosts
+                    marker = "✓" if is_selected else " "
+                    prefix = "→ " if is_current else "  "
+                    
+                    if is_current and is_selected:
+                        color = 'yellow'
+                    elif is_current:
+                        color = 'yellow'
+                    elif is_selected:
+                        color = 'green'
+                    else:
+                        color = 'white'
+                    
+                    style = 'bold' if is_current else False
+                    
+                    self.print_colored(f"{prefix}[{marker}] {host_name}", color, bold=style)
+                    if is_current:
+                        self.print_colored(f"    └─ {user}@{ip}", 'cyan')
+                    else:
+                        self.print_colored(f"    └─ {user}@{ip}", 'white')
+            
+            print()
+            self.print_colored("─" * 60, 'blue')
+
+        while True:
+            display_menu()
+            
+            try:
+                key = get_key()
+                
+                if key == '\x1b[A':  # Up arrow
+                    current_index = (current_index - 1) % len(host_list)
+                elif key == '\x1b[B':  # Down arrow
+                    current_index = (current_index + 1) % len(host_list)
+                elif key == ' ':  # Space bar - toggle selection
+                    current_item = host_list[current_index]
+                    if current_item == "All hosts":
+                        # Toggle all
+                        if len(selected_hosts) == len(hosts):
+                            selected_hosts = set()
+                        else:
+                            selected_hosts = set(hosts.keys())
+                    else:
+                        # Toggle individual host
+                        host_name = current_item
+                        if host_name in selected_hosts:
+                            selected_hosts.remove(host_name)
+                        else:
+                            selected_hosts.add(host_name)
+                elif key == '\r' or key == '\n':  # Enter - confirm
+                    if len(selected_hosts) == 0:
+                        # Show error and continue
+                        print("\033[2J\033[H", end="")
+                        self.print_colored("❌ Cannot proceed without selecting any hosts!", 'red', bold=True)
+                        self.print_colored("Press any key to continue...", 'yellow')
+                        get_key()
+                        continue
+                    break
+                elif key == 'q' or key == '\x1b':  # q or Esc - cancel
+                    return []
+                
+            except KeyboardInterrupt:
+                return []
+        
+        return list(selected_hosts)
+
+    def _fallback_host_selection(self, hosts: Dict[str, Dict[str, Any]], operation_name: str) -> List[str]:
+        """Fallback host selection for systems without termios (like Windows)"""
+        if not hosts:
+            return []
+
+        host_list = list(hosts.keys())
+        selected_hosts = set(host_list)  # Start with all selected
+        
+        while True:
+            # Clear screen for better UX
+            print("\033[2J\033[H", end="")
+            
+            self.print_header(f"Host Selection for {operation_name.title()}")
+            
+            self.print_colored("📋 Instructions:", 'cyan', bold=True)
+            self.print_colored("   • Enter numbers to toggle selection (e.g., 1, 2, 3)", 'white')
+            self.print_colored("   • Use 'a' to select all hosts", 'white')
+            self.print_colored("   • Use 'n' to deselect all hosts", 'white')
+            self.print_colored("   • Use 'c' to cancel operation", 'white')
+            self.print_colored("   • Press Enter when ready to proceed", 'white')
+            print()
+            
+            # Show "all" option
+            all_selected = len(selected_hosts) == len(host_list)
+            all_marker = "✓" if all_selected else " "
+            all_color = 'green' if all_selected else 'white'
+            self.print_colored(f"  0) [{all_marker}] All hosts ({len(host_list)} total)", all_color, bold=all_selected)
+            
+            self.print_colored(f"\n🖥️  Individual Hosts:", 'cyan', bold=True)
+            
+            # Show individual hosts
+            for i, host_name in enumerate(host_list, 1):
+                host_config = hosts[host_name]
+                ip = host_config.get('ansible_host', 'Unknown')
+                user = host_config.get('ansible_user', 'Unknown')
+                
+                is_selected = host_name in selected_hosts
+                marker = "✓" if is_selected else " "
+                color = 'green' if is_selected else 'white'
+                
+                self.print_colored(f"  {i}) [{marker}] {host_name}", color, bold=is_selected)
+                self.print_colored(f"      └─ {user}@{ip}", 'white')
+            
+            print()
+            
+            # Status summary
+            if len(selected_hosts) == 0:
+                self.print_colored("⚠️  No hosts selected!", 'red', bold=True)
+                self.print_colored("   Please select at least one host to continue.", 'red')
+            elif len(selected_hosts) == len(host_list):
+                self.print_colored(f"✅ All {len(host_list)} hosts selected", 'green', bold=True)
+            else:
+                self.print_colored(f"📊 Selected: {len(selected_hosts)}/{len(host_list)} hosts", 'cyan', bold=True)
+                selected_names = ', '.join(sorted(selected_hosts))
+                self.print_colored(f"   Selected hosts: {selected_names}", 'cyan')
+            
+            print()
+            self.print_colored("─" * 60, 'blue')
+            
+            choice = self.get_input("Enter choice (number/a/n/c/Enter to proceed)", "").strip().lower()
+            
+            if choice == "":
+                # Proceed with current selection
+                if len(selected_hosts) == 0:
+                    self.print_colored("❌ Cannot proceed without selecting any hosts!", 'red')
+                    input("Press Enter to continue selection...")
+                    continue
+                break
+            elif choice == "c":
+                # Cancel operation
+                return []
+            elif choice == "a":
+                # Select all
+                selected_hosts = set(host_list)
+                self.print_colored("✅ All hosts selected", 'green')
+            elif choice == "n":
+                # Select none
+                selected_hosts = set()
+                self.print_colored("⚠️  All hosts deselected", 'yellow')
+            else:
+                # Try to parse as number or comma-separated numbers
+                try:
+                    # Handle multiple numbers separated by commas/spaces
+                    choices = []
+                    for part in choice.replace(',', ' ').split():
+                        try:
+                            choices.append(int(part))
+                        except ValueError:
+                            continue
+                    
+                    if not choices:
+                        # Try single number
+                        choices = [int(choice)]
+                    
+                    # Process each choice
+                    for choice_num in choices:
+                        if choice_num == 0:
+                            # Toggle all
+                            if all_selected:
+                                selected_hosts = set()
+                                self.print_colored("⚠️  All hosts deselected", 'yellow')
+                            else:
+                                selected_hosts = set(host_list)
+                                self.print_colored("✅ All hosts selected", 'green')
+                        elif 1 <= choice_num <= len(host_list):
+                            # Toggle individual host
+                            host_name = host_list[choice_num - 1]
+                            if host_name in selected_hosts:
+                                selected_hosts.remove(host_name)
+                                self.print_colored(f"➖ Deselected: {host_name}", 'yellow')
+                            else:
+                                selected_hosts.add(host_name)
+                                self.print_colored(f"➕ Selected: {host_name}", 'green')
+                        else:
+                            self.print_colored(f"❌ Invalid choice: {choice_num} (valid range: 0-{len(host_list)})", 'red')
+                    
+                except ValueError:
+                    self.print_colored("❌ Invalid input. Please enter numbers, 'a', 'n', 'c', or press Enter.", 'red')
+            
+            # Small delay to let user see the feedback
+            import time
+            time.sleep(0.8)
+        
+        return list(selected_hosts)
 
 
     
