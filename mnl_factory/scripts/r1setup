@@ -661,21 +661,20 @@ class R1Setup:
         self.print_colored("  5) Deploy full setup        - Deploy Docker + NVIDIA drivers + GPU setup")
         self.print_colored("  6) Deploy Docker only       - Deploy only Docker without GPU setup")
         self.print_colored("  7) Delete edge node         - Completely remove deployed edge node")
-        self.print_colored("  8) Apply new nodes names    - Update node aliases")
         print()
         self.print_colored("Information:")
-        self.print_colored("  9) Get node information     - Retrieve detailed node information")
-        self.print_colored(" 10) Get node addresses       - Display nodes addresses")
-        self.print_colored(" 11) Export addresses to CSV  - Save addresses to CSV file")
+        self.print_colored("  8) Get node information     - Retrieve detailed node information")
+        self.print_colored("  9) Get node addresses       - Display nodes addresses")
+        self.print_colored(" 10) Export addresses to CSV  - Save addresses to CSV file")
         print()
         self.print_colored("Service Management:")
-        self.print_colored(" 12) Start edge node service - Start the edge node service on all nodes")
-        self.print_colored(" 13) Stop edge node service  - Stop the edge node service on all nodes")
-        self.print_colored(" 14) Restart edge node service - Restart the edge node service on all nodes")
-        self.print_colored(" 15) Check service status    - Check edge node service status on all nodes")
+        self.print_colored(" 11) Start edge node          - Start the edge node on all nodes")
+        self.print_colored(" 12) Stop edge node           - Stop the edge node on all nodes")
+        self.print_colored(" 13) Restart edge node        - Restart the edge node on all nodes")
+        self.print_colored(" 14) Check service status     - Check edge node status on all nodes")
         print()
         self.print_colored("Settings:")
-        self.print_colored(" 16) Change network environment - Switch between mainnet/testnet/devnet")
+        self.print_colored(" 15) Change network environment - Switch between mainnet/testnet/devnet")
         print()
         self.print_colored("  0) Exit")
         print()
@@ -1358,9 +1357,11 @@ class R1Setup:
         if name_changed:
             self.print_colored(f"Node '{original_name}' updated and renamed to '{new_name}' successfully!", 'green')
             self.print_colored("\n💡 Recommendation:", 'cyan', bold=True)
-            self.print_colored("Since you changed the node name, consider running option 8 (Apply new node names)", 'yellow')
-            self.print_colored("from the main menu to update the node name on the network.", 'yellow')
-            self.print_colored("This will ensure your node is visible with the new name on the blockchain.", 'white')
+            self.print_colored("Since you changed the node name, consider restarting the edge node", 'yellow')
+            self.print_colored("using option 13 (Restart edge node) from the main menu.", 'yellow')
+            self.print_colored(f"When prompted, select ONLY the renamed node '{new_name}' to avoid", 'yellow')
+            self.print_colored("disturbing other running nodes. This will ensure the renamed node", 'yellow')
+            self.print_colored("starts with its updated configuration.", 'white')
         else:
             self.print_colored(f"Node '{original_name}' updated successfully!", 'green')
 
@@ -1577,67 +1578,7 @@ class R1Setup:
 
         input("Press Enter to continue...")
 
-    def apply_node_names(self) -> None:
-        """Apply new node names (Update node alias configuration)"""
-        if not self.check_hosts_config():
-            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
-            return
 
-        self.print_header("Apply New Node Names")
-
-        # Load configuration to show rename details
-        self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
-        env = self.get_mnl_app_env()
-
-        # Show rename details
-        self.print_colored(f"🏷️  Node Renaming Details:", 'cyan', bold=True)
-        self.print_colored(f"   • Action: Update node alias configuration for each node", 'white')
-        self.print_colored(f"   • Network: {env if env else 'Not set'}", 'green' if env else 'red')
-        self.print_colored(f"   • Target Nodes: {len(hosts)}", 'white')
-
-        self.print_colored(f"\n🖥️  Target Machines and Names:", 'cyan', bold=True)
-        for name, config in hosts.items():
-            ip = config.get('ansible_host', 'Unknown')
-            user = config.get('ansible_user', 'Unknown')
-            self.print_colored(f"   • {name}: {user}@{ip} → node alias will be set to '{name}'", 'white')
-
-        self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
-        self.print_colored("   • Update the startup configuration file with new node alias", 'yellow')
-        self.print_colored("   • Restart the edge node service", 'yellow')
-        self.print_colored("   • Wait for the service to start", 'yellow')
-        self.print_colored("   • Retrieve and display updated node information", 'yellow')
-
-        if not env:
-            self.print_colored("\n⚠️  WARNING: Network environment is not set!", 'red', bold=True)
-            self.print_colored("   The renaming will proceed, but please ensure network is configured properly.", 'red')
-
-        if self.get_input(f"\n🏷️  Continue with applying new node names to {len(hosts)} node(s)? (y/n)", "y").lower() != 'y':
-            self.print_colored("Node renaming cancelled.", 'yellow')
-            return
-
-        playbook_path = self.config_dir / 'playbooks/rename_nodes.yml'
-        if not playbook_path.exists():
-            self.print_colored(f"Rename playbook not found: {playbook_path}", 'red')
-            input("Press Enter to continue...")
-            return
-
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} {playbook_path}")
-
-        self.print_colored("\nStarting node renaming process...", 'cyan')
-        success, _ = self.run_command(cmd, show_output=True)
-
-        if success:
-            self.print_colored("\nNode renaming completed successfully!", 'green')
-            self.print_colored("All nodes have been updated with their new node alias configuration.", 'green')
-        else:
-            self.print_colored("\nNode renaming encountered issues. Please check the output above.", 'red')
-
-        input("Press Enter to continue...")
 
     def _deploy_setup(self, playbook: str, title: str, description: str, extra_vars: str = "") -> None:
         """Common deployment logic"""
@@ -1670,10 +1611,10 @@ class R1Setup:
             self.print_colored("   • Install Docker and Docker Compose", 'yellow')
             self.print_colored("   • Install NVIDIA drivers and CUDA toolkit", 'yellow')
             self.print_colored("   • Configure GPU access for containers", 'yellow')
-            self.print_colored("   • Deploy and start the edge node service", 'yellow')
+            self.print_colored("   • Deploy and start the edge node", 'yellow')
         elif "Docker only" in description:
             self.print_colored("   • Install Docker and Docker Compose", 'yellow')
-            self.print_colored("   • Deploy and start the edge node service (CPU mode)", 'yellow')
+            self.print_colored("   • Deploy and start the edge node (CPU mode)", 'yellow')
         else:
             self.print_colored(f"   • {description}", 'yellow')
 
@@ -2008,23 +1949,23 @@ class R1Setup:
         input("Press Enter to continue...")
 
     def start_edge_node_service(self) -> None:
-        """Start edge node service on all configured nodes"""
-        self._manage_service("service_start.yml", "Start Edge Node Service", "🚀 Starting edge node service")
+        """Start edge node on all configured nodes"""
+        self._manage_service("service_start.yml", "Start Edge Node", "🚀 Starting edge node")
 
     def stop_edge_node_service(self) -> None:
-        """Stop edge node service on all configured nodes"""
-        self._manage_service("service_stop.yml", "Stop Edge Node Service", "🛑 Stopping edge node service")
+        """Stop edge node on all configured nodes"""
+        self._manage_service("service_stop.yml", "Stop Edge Node", "🛑 Stopping edge node")
 
     def restart_edge_node_service(self) -> None:
-        """Restart edge node service on all configured nodes"""
-        self._manage_service("service_restart.yml", "Restart Edge Node Service", "🔄 Restarting edge node service")
+        """Restart edge node on all configured nodes"""
+        self._manage_service("service_restart.yml", "Restart Edge Node", "🔄 Restarting edge node")
 
     def check_service_status(self) -> None:
-        """Check edge node service status on all configured nodes"""
-        self._manage_service("service_status.yml", "Check Service Status", "📊 Checking edge node service status")
+        """Check edge node status on all configured nodes"""
+        self._manage_service("service_status.yml", "Check Service Status", "📊 Checking edge node status")
 
     def _manage_service(self, playbook_name: str, title: str, action_text: str) -> None:
-        """Common method to manage edge node services"""
+        """Common method to manage edge nodes"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
             input("Press Enter to continue...")
@@ -2062,12 +2003,12 @@ class R1Setup:
             self.print_colored("   • Verify service shutdown status", 'yellow')
         elif "restart" in playbook_name:
             self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
-            self.print_colored("   • Stop the current edge node service", 'yellow')
-            self.print_colored("   • Start the edge node service with fresh state", 'yellow')
+            self.print_colored("   • Stop the current edge node", 'yellow')
+            self.print_colored("   • Start the edge node with fresh state", 'yellow')
             self.print_colored("   • Verify service restart status", 'yellow')
         elif "status" in playbook_name:
             self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
-            self.print_colored("   • Check the current status of edge node service", 'yellow')
+            self.print_colored("   • Check the current status of edge node", 'yellow')
             self.print_colored("   • Show service logs and runtime information", 'yellow')
             self.print_colored("   • Display resource usage if available", 'yellow')
 
@@ -2126,11 +2067,11 @@ class R1Setup:
             
             # Additional success messages based on operation
             if "start" in playbook_name:
-                self.print_colored(f"Edge node services have been started on {len(selected_hosts)} node(s).", 'green')
+                self.print_colored(f"Edge nodes have been started on {len(selected_hosts)} node(s).", 'green')
             elif "stop" in playbook_name:
-                self.print_colored(f"Edge node services have been stopped on {len(selected_hosts)} node(s).", 'green')
+                self.print_colored(f"Edge nodes have been stopped on {len(selected_hosts)} node(s).", 'green')
             elif "restart" in playbook_name:
-                self.print_colored(f"Edge node services have been restarted on {len(selected_hosts)} node(s).", 'green')
+                self.print_colored(f"Edge nodes have been restarted on {len(selected_hosts)} node(s).", 'green')
             elif "status" in playbook_name:
                 self.print_colored(f"Service status information retrieved for {len(selected_hosts)} node(s).", 'green')
         else:
@@ -3337,7 +3278,7 @@ except:
         while True:
             try:
                 self.show_main_menu()
-                choice = self.get_input("Select option (0-16)", "0")
+                choice = self.get_input("Select option (0-15)", "0")
 
                 if choice == '0':
                     self.print_colored("Thank you for using Ratio1 Multi-Node Launcher Setup!", 'green')
@@ -3357,22 +3298,20 @@ except:
                 elif choice == '7':
                     self.delete_edge_node()
                 elif choice == '8':
-                    self.apply_node_names()
-                elif choice == '9':
                     self.get_node_info()
-                elif choice == '10':
+                elif choice == '9':
                     self.get_node_addresses()
-                elif choice == '11':
+                elif choice == '10':
                     self.export_addresses_csv()
-                elif choice == '12':
+                elif choice == '11':
                     self.start_edge_node_service()
-                elif choice == '13':
+                elif choice == '12':
                     self.stop_edge_node_service()
-                elif choice == '14':
+                elif choice == '13':
                     self.restart_edge_node_service()
-                elif choice == '15':
+                elif choice == '14':
                     self.check_service_status()
-                elif choice == '16':
+                elif choice == '15':
                     self.change_network_environment()
                 else:
                     self.print_colored("Invalid option. Please try again.", 'red')
