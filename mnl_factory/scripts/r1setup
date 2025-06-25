@@ -733,9 +733,10 @@ class R1Setup:
         self.print_colored(" 14) Check service status     - Check edge node status on all nodes")
         self.print_colored(" 15) View node statuses       - Show current node statuses and timestamp details")
         self.print_colored(" 16) Check & update node status - Verify actual service status and update")
+        self.print_colored(" 17) SSH into node's machine  - Connect to a selected node's machine via SSH")
         print()
         self.print_colored("Settings:")
-        self.print_colored(" 17) Change network environment - Switch between mainnet/testnet/devnet")
+        self.print_colored(" 18) Change network environment - Switch between mainnet/testnet/devnet")
         print()
         self.print_colored("  0) Exit")
         print()
@@ -2392,6 +2393,156 @@ class R1Setup:
         self.print_debug(f"  Status mapping: {actual_status} → {result}")
         return result
 
+    def ssh_into_node_machine(self) -> None:
+        """SSH into a selected node's machine"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        self.print_header("SSH Into Node's Machine")
+
+        # Load configuration
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        env = self.get_mnl_app_env()
+
+        # Show SSH connection details
+        self.print_colored(f"🔧 SSH Connection Details:", 'cyan', bold=True)
+        self.print_colored(f"   • Network: {env if env else 'Not set'}", 'green' if env else 'red')
+        self.print_colored(f"   • Available Nodes: {len(hosts)}", 'white')
+
+        self.print_colored(f"\n🖥️  Available Machines:", 'cyan', bold=True)
+        for name, config in hosts.items():
+            ip = config.get('ansible_host', 'Unknown')
+            user = config.get('ansible_user', 'Unknown')
+            auth_type = "Password" if 'ansible_ssh_pass' in config else "SSH Key"
+            status_info = self._get_node_status_info(name)
+            status = status_info['status']
+            last_check = status_info['last_check']
+            emoji, color, description = self._get_status_display_info(status)
+            last_check_str = self._format_timestamp_ago(last_check)
+            self.print_colored(f"   • {name}: {user}@{ip} ", 'white', end='')
+            self.print_colored(f"[{emoji} {description}]", color, end='')
+            self.print_colored(f" ({auth_type}) (Last check: {last_check_str})", 'white')
+
+        self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
+        self.print_colored("   • Connect you directly to the selected node via SSH", 'yellow')
+        self.print_colored("   • Use the same connection details as configured for deployment", 'yellow')
+        self.print_colored("   • Return you to r1setup when you exit the SSH session", 'yellow')
+        self.print_colored("   • Type 'exit' in the SSH session to return here", 'yellow')
+
+        # Node selection for SSH - only allow single selection
+        print(f"\n🔍 Select a node's machine to SSH into:")
+        host_list = list(hosts.keys())
+        
+        for i, host_name in enumerate(host_list, 1):
+            config = hosts[host_name]
+            ip = config.get('ansible_host', 'Unknown')
+            user = config.get('ansible_user', 'Unknown')
+            status_info = self._get_node_status_info(host_name)
+            status = status_info['status']
+            emoji, color, description = self._get_status_display_info(status)
+            
+            self.print_colored(f"  {i}) {host_name}", 'cyan')
+            self.print_colored(f"     └─ {user}@{ip} [{emoji} {description}]", 'white')
+        
+        self.print_colored(f"  0) Cancel")
+
+        while True:
+            try:
+                choice = input(f"\nSelect node (1-{len(host_list)}, 0 to cancel): ").strip()
+                
+                if choice == '0':
+                    self.print_colored("SSH connection cancelled.", 'yellow')
+                    return
+                
+                choice_num = int(choice)
+                if 1 <= choice_num <= len(host_list):
+                    selected_host = host_list[choice_num - 1]
+                    break
+                else:
+                    self.print_colored(f"Please enter a number between 1 and {len(host_list)}, or 0 to cancel.", 'red')
+            except ValueError:
+                self.print_colored("Please enter a valid number.", 'red')
+
+        # Get connection details for selected host
+        config = hosts[selected_host]
+        ip = config.get('ansible_host')
+        user = config.get('ansible_user')
+        ssh_port = config.get('ansible_port', 22)
+        
+        if not ip or not user:
+            self.print_colored(f"❌ Missing connection details for {selected_host}. Please reconfigure the node.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        # Build SSH command
+        ssh_cmd = ['ssh']
+        
+        # Add port if not default
+        if ssh_port != 22:
+            ssh_cmd.extend(['-p', str(ssh_port)])
+        
+        # Handle SSH key vs password authentication
+        if 'ansible_ssh_pass' in config:
+            # Password authentication - warn user
+            self.print_colored(f"\n⚠️  Password Authentication Required:", 'yellow', bold=True)
+            self.print_colored(f"   • This node uses password authentication", 'yellow')
+            self.print_colored(f"   • You'll be prompted for the password when connecting", 'yellow')
+            password = config.get('ansible_ssh_pass')
+            # We can't easily pass password to SSH, so just inform user
+            self.print_colored(f"   • Use the same password configured for this node", 'white')
+        else:
+            # SSH key authentication
+            if 'ansible_ssh_private_key_file' in config:
+                key_file = config['ansible_ssh_private_key_file']
+                # Expand user path if needed
+                if key_file.startswith('~'):
+                    key_file = os.path.expanduser(key_file)
+                ssh_cmd.extend(['-i', key_file])
+                self.print_colored(f"\n🔑 Using SSH key: {key_file}", 'green')
+            else:
+                self.print_colored(f"\n🔑 Using default SSH key authentication", 'green')
+        
+        # Add any additional SSH options for better connectivity
+        ssh_cmd.extend([
+            '-o', 'StrictHostKeyChecking=no',  # Don't prompt for host key verification
+            '-o', 'UserKnownHostsFile=/dev/null',  # Don't save host keys
+            '-o', 'ConnectTimeout=10',  # 10 second connection timeout
+        ])
+        
+        # Add user@host
+        ssh_cmd.append(f"{user}@{ip}")
+
+        self.print_colored(f"\n🚀 Connecting to {selected_host} ({user}@{ip})...", 'cyan', bold=True)
+        self.print_colored("   Type 'exit' to return to r1setup", 'white')
+        self.print_colored("   Press Enter to continue...", 'yellow')
+        input()
+
+        try:
+            # Execute SSH command
+            self.print_colored(f"Executing: {' '.join(ssh_cmd[:4])} ... {ssh_cmd[-1]}", 'cyan')
+            
+            # Use subprocess.run to execute SSH interactively
+            result = subprocess.run(ssh_cmd)
+            
+            # When SSH exits, we return here
+            self.print_colored(f"\n✅ SSH session to {selected_host} ended.", 'green')
+            self.print_colored("Returning to r1setup...", 'cyan')
+            
+        except KeyboardInterrupt:
+            self.print_colored(f"\n🛑 SSH connection interrupted.", 'yellow')
+        except Exception as e:
+            self.print_colored(f"\n❌ SSH connection failed: {e}", 'red')
+            self.print_colored("Common issues:", 'yellow')
+            self.print_colored("   • Network connectivity problems", 'white')
+            self.print_colored("   • Incorrect SSH credentials", 'white')
+            self.print_colored("   • Firewall blocking SSH port", 'white')
+            self.print_colored("   • Node is not reachable", 'white')
+        
+        input("\nPress Enter to continue...")
+
     def start_edge_node_service(self) -> None:
         """Start edge node on all configured nodes"""
         self._manage_service("service_start.yml", "Start Edge Node", "🚀 Starting edge node")
@@ -3925,6 +4076,8 @@ except:
                 elif choice == '16':
                     self.check_and_update_node_status()
                 elif choice == '17':
+                    self.ssh_into_node_machine()
+                elif choice == '18':
                     self.change_network_environment()
                 else:
                     self.print_colored("Invalid option. Please try again.", 'red')
