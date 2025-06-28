@@ -711,15 +711,15 @@ class R1Setup:
         self.print_section("Available Options")
         print()
         self.print_colored("Configuration Management:")
-        self.print_colored("  1) Configure nodes          - Set up GPU nodes for deployment")
+        self.print_colored("  1) Nodes Fleet Config       - Configure Fleet information for deployment")
         self.print_colored("  2) Manage configurations    - List, switch, or delete saved configurations")
         self.print_colored("  3) View configuration       - Display current node configuration")
         self.print_colored("  4) Test node connectivity   - Verify connection to configured nodes")
         print()
         self.print_colored("Deployment:")
-        self.print_colored("  5) Deploy full setup        - Deploy Docker + NVIDIA drivers + GPU setup")
-        self.print_colored("  6) Deploy Docker only       - Deploy only Docker without GPU setup")
-        self.print_colored("  7) Delete edge node         - Completely remove deployed edge node")
+        self.print_colored("  5) Deploy full node         - Deploy Edge Node including GPU support")
+        self.print_colored("  6) Deploy non-GPU           - Deploy Edge Node without GPU support ")
+        self.print_colored("  7) Delete Edge Node         - Completely remove deployed Edge Node")
         print()
         self.print_colored("Information:")
         self.print_colored("  8) Get node information     - Retrieve detailed node information")
@@ -727,10 +727,10 @@ class R1Setup:
         self.print_colored(" 10) Export addresses to CSV  - Save addresses to CSV file")
         print()
         self.print_colored("Service Management:")
-        self.print_colored(" 11) Start edge node          - Start the edge node on all nodes")
-        self.print_colored(" 12) Stop edge node           - Stop the edge node on all nodes")
-        self.print_colored(" 13) Restart edge node        - Restart the edge node on all nodes")
-        self.print_colored(" 14) Check service status     - Check edge node status on all nodes")
+        self.print_colored(" 11) Start Edge Node          - Start the Edge Node on all nodes")
+        self.print_colored(" 12) Stop Edge Node           - Stop the Edge Node on all nodes")
+        self.print_colored(" 13) Restart Edge Node        - Restart the Edge Node on all nodes")
+        self.print_colored(" 14) Check service status     - Check Edge Node status on all nodes")
         self.print_colored(" 15) View node statuses       - Show current node statuses and timestamp details")
         self.print_colored(" 16) Check & update node status - Verify actual service status and update")
         self.print_colored(" 17) SSH into node's machine  - Connect to a selected node's machine via SSH")
@@ -1363,11 +1363,22 @@ class R1Setup:
 
             self.print_colored("Let's reconfigure this node...", 'yellow')
 
+    def _should_preserve_node_status(self, node_name: str) -> bool:
+        """Check if a node's status should be preserved (e.g., deleted nodes)"""
+        current_status = self._get_node_status_info(node_name)['status']
+        return current_status == 'deleted'
+
     def _update_node_status(self, node_name: str, status: str) -> None:
         """Update the status of a specific node"""
         hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
         if node_name in hosts:
             old_status = hosts[node_name].get('node_status', 'unknown')
+            
+            # Preserve certain statuses (e.g., deleted nodes)
+            if self._should_preserve_node_status(node_name) and status not in ['deploying', 'error']:
+                self.print_debug(f"Preserving {node_name} status: {old_status} (requested: {status})")
+                return
+            
             old_update = hosts[node_name].get('last_status_update', 'never')
             new_update = datetime.now().isoformat()
             
@@ -1412,7 +1423,8 @@ class R1Setup:
             'unknown': ('❓', 'white', 'Unknown'),
             'deploying': ('🔄', 'cyan', 'Deploying'),
             'error': ('❌', 'red', 'Error'),
-            'never_deployed': ('⚪', 'white', 'Never Deployed')
+            'never_deployed': ('⚪', 'white', 'Never Deployed'),
+            'deleted': ('🗑️', 'red', 'Deleted')
         }
         return status_info.get(status, ('❓', 'white', 'Unknown'))
 
@@ -1509,7 +1521,7 @@ class R1Setup:
             print()  # New line after status
             self.print_colored("\n💡 Recommendation:", 'cyan', bold=True)
             self.print_colored("Since you changed the node name, the node status is now 'Pending Restart'.", 'yellow')
-            self.print_colored("Use option 13 (Restart edge node) from the main menu to update the status.", 'yellow')
+            self.print_colored("Use option 13 (Restart Edge Node) from the main menu to update the status.", 'yellow')
             self.print_colored(f"When prompted, select ONLY the renamed node '{new_name}' to avoid", 'yellow')
             self.print_colored("disturbing other running nodes. This will ensure the renamed node", 'yellow')
             self.print_colored("starts with its updated configuration.", 'white')
@@ -1677,7 +1689,7 @@ class R1Setup:
         self._deploy_setup("site.yml", "Docker-Only Deployment", "Docker without GPU setup", extra_vars="skip_gpu=true")
 
     def delete_edge_node(self) -> None:
-        """Delete deployed edge node"""
+        """Delete deployed Edge Node with host selection"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
             input("Press Enter to continue...")
@@ -1687,51 +1699,68 @@ class R1Setup:
 
         # Load configuration to show target hosts
         self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        all_hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
         env = self.get_mnl_app_env()
+
+        # Interactive host selection for deletion
+        selected_host_names = self._interactive_host_selection(all_hosts, "Edge Node deletion")
+        
+        if not selected_host_names:
+            self.print_colored("Deletion cancelled - no hosts selected.", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Filter hosts to only include selected ones
+        selected_hosts = {name: config for name, config in all_hosts.items() if name in selected_host_names}
 
         # Show deletion details
         self.print_colored(f"🗑️  Deletion Details:", 'cyan', bold=True)
         self.print_colored(f"   • Network: {env if env else 'Not set'}", 'white')
-        self.print_colored(f"   • Target Nodes: {len(hosts)}", 'white')
+        self.print_colored(f"   • Selected Nodes: {len(selected_hosts)}/{len(all_hosts)}", 'white')
 
-        self.print_colored(f"\n🖥️  Edge nodes will be deleted from these machines:", 'cyan', bold=True)
-        for name, config in hosts.items():
+        self.print_colored(f"\n🖥️  Edge nodes will be deleted from these selected machines:", 'cyan', bold=True)
+        for name in selected_host_names:
+            config = all_hosts[name]
             ip = config.get('ansible_host', 'Unknown')
             user = config.get('ansible_user', 'Unknown')
-            self.print_colored(f"   • {name}: {user}@{ip}", 'white')
+            # Show current status
+            status_info = self._get_node_status_info(name)
+            status_emoji, _, status_desc = self._get_status_display_info(status_info['status'])
+            self.print_colored(f"   • {name}: {user}@{ip} [{status_emoji} {status_desc}]", 'white')
 
-        self.print_colored("\n⚠️  WARNING: This will completely remove the edge node deployment including:", 'red', bold=True)
+        self.print_colored("\n⚠️  WARNING: This will completely remove the Edge Node deployment including:", 'red', bold=True)
         self.print_colored("   • Systemd service and Docker containers", 'yellow')
         self.print_colored("   • Docker images and application data", 'yellow')
         self.print_colored("   • Created command scripts", 'yellow')
         self.print_colored("   • Docker daemon configuration", 'yellow')
 
-        if self.get_input(f"\n⚠️  Are you sure you want to delete edge node deployment from {len(hosts)} machine(s)? (y/n)", "n").lower() != 'y':
+        if self.get_input(f"\n⚠️  Are you sure you want to delete Edge Node deployment from {len(selected_hosts)} selected machine(s)? (y/n)", "n").lower() != 'y':
             self.print_colored("Deletion cancelled.", 'yellow')
             return
 
         # Final confirmation
-        if self.get_input(f"⚠️  Type 'DELETE' to confirm deletion from {len(hosts)} node(s)", "").upper() != 'DELETE':
+        if self.get_input(f"⚠️  Type 'DELETE' to confirm deletion from {len(selected_hosts)} selected node(s)", "").upper() != 'DELETE':
             self.print_colored("Deletion cancelled - confirmation not received.", 'yellow')
             return
 
         playbook_path = self.config_dir / 'playbooks/delete_edge_node.yml'
         if not playbook_path.exists():
-            self.print_colored(f"Delete edge node playbook not found: {playbook_path}", 'red')
+            self.print_colored(f"Delete Edge Node playbook not found: {playbook_path}", 'red')
             input("Press Enter to continue...")
             return
 
+        # Create host limit for selected hosts
+        host_limit = ','.join(selected_host_names)
         cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
                f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} {playbook_path}")
+               f"ansible-playbook -i {self.config_file} --limit {host_limit} {playbook_path}")
 
-        # Update all node statuses to deploying (deletion is a deployment operation)
-        for host_name in hosts.keys():
+        # Update selected node statuses to deploying (deletion is a deployment operation)
+        for host_name in selected_host_names:
             self._update_node_status(host_name, 'deploying')
 
-        self.print_colored("\nStarting edge node deletion...", 'cyan')
+        self.print_colored("\nStarting Edge Node deletion on selected nodes...", 'cyan')
         success, _ = self.run_command(cmd, show_output=True)
 
         if success:
@@ -1739,29 +1768,32 @@ class R1Setup:
             # Update deployment metadata after successful deletion
             self._update_deletion_metadata()
             
-            # Update all node statuses to never_deployed after successful deletion
-            for host_name in hosts.keys():
-                self._update_node_status(host_name, 'never_deployed')
+            # Update selected node statuses to deleted after successful deletion
+            for host_name in selected_host_names:
+                self._update_node_status(host_name, 'deleted')
             
             # Show updated statuses
             self.print_colored(f"\n📊 Node Deletion Status:", 'cyan', bold=True)
-            for host_name in hosts.keys():
+            for host_name in selected_host_names:
                 self.print_colored(f"   • {host_name}: ", 'white', end='')
                 self._display_node_status(host_name, compact=True)
                 print()  # New line after each status
+            
+            self.print_colored(f"\n💡 Note: Deleted nodes will maintain their 'deleted' status.", 'cyan')
+            self.print_colored("   This status will not change automatically to preserve the deletion history.", 'white')
         else:
             self.print_colored("\nEdge node deletion encountered issues. Please check the output above.", 'red')
-            # Update all node statuses to error after failed deletion
-            for host_name in hosts.keys():
+            # Update selected node statuses to error after failed deletion
+            for host_name in selected_host_names:
                 self._update_node_status(host_name, 'error')
-            self.print_colored(f"\n📊 Node statuses updated to Error due to deletion failure.", 'yellow')
+            self.print_colored(f"\n📊 Selected node statuses updated to Error due to deletion failure.", 'yellow')
 
         input("Press Enter to continue...")
 
 
 
     def _deploy_setup(self, playbook: str, title: str, description: str, extra_vars: str = "") -> None:
-        """Common deployment logic"""
+        """Common deployment logic with host selection"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
             input("Press Enter to continue...")
@@ -1771,34 +1803,55 @@ class R1Setup:
 
         # Load configuration to show deployment details
         self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        all_hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
         env = self.get_mnl_app_env()
+
+        if not env:
+            self.print_colored("\n⚠️  WARNING: Network environment is not set!", 'red', bold=True)
+            self.print_colored("   Please set the network environment before deploying.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        # Interactive host selection with preselection of never-deployed nodes
+        selected_host_names = self._interactive_deployment_host_selection(all_hosts, title.lower())
+        
+        if not selected_host_names:
+            self.print_colored("Deployment cancelled - no hosts selected.", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Filter hosts to only include selected ones
+        selected_hosts = {name: config for name, config in all_hosts.items() if name in selected_host_names}
 
         # Show deployment details
         self.print_colored(f"📋 Deployment Details:", 'cyan', bold=True)
         self.print_colored(f"   • Action: {description}", 'white')
-        self.print_colored(f"   • Network: {env if env else 'Not set'}", 'green' if env else 'red')
-        self.print_colored(f"   • Target Nodes: {len(hosts)}", 'white')
+        self.print_colored(f"   • Network: {env}", 'green')
+        self.print_colored(f"   • Selected Nodes: {len(selected_hosts)}/{len(all_hosts)}", 'white')
 
-        self.print_colored(f"\n🖥️  Target Machines:", 'cyan', bold=True)
-        for name, config in hosts.items():
+        self.print_colored(f"\n🖥️  Selected Target Machines:", 'cyan', bold=True)
+        for name in selected_host_names:
+            config = all_hosts[name]
             ip = config.get('ansible_host', 'Unknown')
             user = config.get('ansible_user', 'Unknown')
-            self.print_colored(f"   • {name}: {user}@{ip}", 'white')
+            # Show status
+            status_info = self._get_node_status_info(name)
+            status_emoji, _, status_desc = self._get_status_display_info(status_info['status'])
+            self.print_colored(f"   • {name}: {user}@{ip} [{status_emoji} {status_desc}]", 'white')
 
         self.print_colored(f"\n⚠️  This will:", 'yellow', bold=True)
         if "Docker + NVIDIA" in description:
             self.print_colored("   • Install Docker and Docker Compose", 'yellow')
             self.print_colored("   • Install NVIDIA drivers and CUDA toolkit", 'yellow')
             self.print_colored("   • Configure GPU access for containers", 'yellow')
-            self.print_colored("   • Deploy and start the edge node", 'yellow')
+            self.print_colored("   • Deploy and start the Edge Node", 'yellow')
         elif "Docker only" in description:
             self.print_colored("   • Install Docker and Docker Compose", 'yellow')
-            self.print_colored("   • Deploy and start the edge node (CPU mode)", 'yellow')
+            self.print_colored("   • Deploy and start the Edge Node (CPU mode)", 'yellow')
         else:
             self.print_colored(f"   • {description}", 'yellow')
 
-        # Check for network change warning
+        # Check for network change warning for selected hosts
         deployment_status = self.active_config.get('deployment_status', 'never_deployed')
         last_deployed_network = self.active_config.get('last_deployed_network')
 
@@ -1807,9 +1860,10 @@ class R1Setup:
             self.print_colored(f"   This configuration was previously deployed on: {last_deployed_network}", 'yellow')
             self.print_colored(f"   You are now deploying to: {env}", 'cyan')
             self.print_colored(f"\n⚠️  Important Information:", 'yellow', bold=True)
-            self.print_colored(f"   • The edge node will run on the NEW network: {env}", 'white')
-            self.print_colored(f"   • The same node addresses will be used:", 'white')
-            for name, config in hosts.items():
+            self.print_colored(f"   • The Edge Node will run on the NEW network: {env}", 'white')
+            self.print_colored(f"   • Selected node addresses will be used:", 'white')
+            for name in selected_host_names:
+                config = all_hosts[name]
                 ip = config.get('ansible_host', 'Unknown')
                 self.print_colored(f"     - {name}: {ip}", 'white')
             self.print_colored(f"   • Node configuration and credentials remain the same", 'white')
@@ -1819,13 +1873,7 @@ class R1Setup:
                 self.print_colored("Deployment cancelled due to network change.", 'yellow')
                 return
 
-        if not env:
-            self.print_colored("\n⚠️  WARNING: Network environment is not set!", 'red', bold=True)
-            self.print_colored("   Please set the network environment before deploying.", 'red')
-            input("Press Enter to continue...")
-            return
-
-        if self.get_input(f"\n🚀 Continue with deployment to {len(hosts)} node(s) on {env}? (y/n)", "y").lower() != 'y':
+        if self.get_input(f"\n🚀 Continue with deployment to {len(selected_hosts)} selected node(s) on {env}? (y/n)", "y").lower() != 'y':
             self.print_colored("Deployment cancelled.", 'yellow')
             return
 
@@ -1835,20 +1883,21 @@ class R1Setup:
             input("Press Enter to continue...")
             return
 
+        # Create host limit for selected hosts
+        host_limit = ','.join(selected_host_names)
         cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
                f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} {playbook_path}")
+               f"ansible-playbook -i {self.config_file} --limit {host_limit} {playbook_path}")
 
         if extra_vars:
             cmd += f' --extra-vars "{extra_vars}"'
 
-        # Update all node statuses to deploying
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
-        for host_name in hosts.keys():
+        # Update selected node statuses to deploying
+        for host_name in selected_host_names:
             self._update_node_status(host_name, 'deploying')
 
-        self.print_colored(f"\nStarting {title.lower()}...", 'cyan')
+        self.print_colored(f"\nStarting {title.lower()} on selected nodes...", 'cyan')
         success, _ = self.run_command(cmd, show_output=True)
 
         if success:
@@ -1857,22 +1906,22 @@ class R1Setup:
             deployment_type = "full" if "NVIDIA" in description else "docker_only"
             self._update_deployment_metadata(deployment_type)
             
-            # Update all node statuses to running after successful deployment
-            for host_name in hosts.keys():
+            # Update selected node statuses to running after successful deployment
+            for host_name in selected_host_names:
                 self._update_node_status(host_name, 'running')
             
             # Show updated statuses
             self.print_colored(f"\n📊 Node Deployment Status:", 'cyan', bold=True)
-            for host_name in hosts.keys():
+            for host_name in selected_host_names:
                 self.print_colored(f"   • {host_name}: ", 'white', end='')
                 self._display_node_status(host_name, compact=True)
                 print()  # New line after each status
         else:
             self.print_colored(f"\n{title} encountered issues. Please check the output above.", 'red')
-            # Update all node statuses to error after failed deployment
-            for host_name in hosts.keys():
+            # Update selected node statuses to error after failed deployment
+            for host_name in selected_host_names:
                 self._update_node_status(host_name, 'error')
-            self.print_colored(f"\n📊 Node statuses updated to Error due to deployment failure.", 'yellow')
+            self.print_colored(f"\n📊 Selected node statuses updated to Error due to deployment failure.", 'yellow')
 
         input("Press Enter to continue...")
 
@@ -2544,20 +2593,20 @@ class R1Setup:
         input("\nPress Enter to continue...")
 
     def start_edge_node_service(self) -> None:
-        """Start edge node on all configured nodes"""
-        self._manage_service("service_start.yml", "Start Edge Node", "🚀 Starting edge node")
+        """Start Edge Node on all configured nodes"""
+        self._manage_service("service_start.yml", "Start Edge Node", "🚀 Starting Edge Node")
 
     def stop_edge_node_service(self) -> None:
-        """Stop edge node on all configured nodes"""
-        self._manage_service("service_stop.yml", "Stop Edge Node", "🛑 Stopping edge node")
+        """Stop Edge Node on all configured nodes"""
+        self._manage_service("service_stop.yml", "Stop Edge Node", "🛑 Stopping Edge Node")
 
     def restart_edge_node_service(self) -> None:
-        """Restart edge node on all configured nodes"""
-        self._manage_service("service_restart.yml", "Restart Edge Node", "🔄 Restarting edge node")
+        """Restart Edge Node on all configured nodes"""
+        self._manage_service("service_restart.yml", "Restart Edge Node", "🔄 Restarting Edge Node")
 
     def check_service_status(self) -> None:
-        """Check edge node status on all configured nodes"""
-        self._manage_service("service_status.yml", "Check Service Status", "📊 Checking edge node status")
+        """Check Edge Node status on all configured nodes"""
+        self._manage_service("service_status.yml", "Check Service Status", "📊 Checking Edge Node status")
 
     def view_node_statuses(self) -> None:
         """View current node statuses with last update information"""
@@ -2677,7 +2726,7 @@ class R1Setup:
             self.print_colored(f"   • {len(pending_restart_nodes)} node(s) marked as 'Pending Restart':", 'yellow')
             for node in pending_restart_nodes:
                 self.print_colored(f"     - {node}", 'yellow')
-            self.print_colored(f"   • Use option 13 (Restart edge node) to clear pending restart status", 'white')
+            self.print_colored(f"   • Use option 13 (Restart Edge Node) to clear pending restart status", 'white')
             self.print_colored(f"   • Or use option 16 (Check & update node status) to verify current state", 'white')
 
         # Show additional helpful information
@@ -2689,7 +2738,7 @@ class R1Setup:
         input("\nPress Enter to continue...")
 
     def _manage_service(self, playbook_name: str, title: str, action_text: str) -> None:
-        """Common method to manage edge nodes"""
+        """Common method to manage Edge Nodes"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
             input("Press Enter to continue...")
@@ -2724,22 +2773,22 @@ class R1Setup:
         # Service-specific descriptions
         if "start" in playbook_name:
             self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
-            self.print_colored("   • Start the edge node systemd service on selected nodes", 'yellow')
+            self.print_colored("   • Start the Edge Node systemd service on selected nodes", 'yellow')
             self.print_colored("   • Enable the service to start automatically on boot", 'yellow')
             self.print_colored("   • Verify service startup status", 'yellow')
         elif "stop" in playbook_name:
             self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
-            self.print_colored("   • Stop the edge node systemd service on selected nodes", 'yellow')
+            self.print_colored("   • Stop the Edge Node systemd service on selected nodes", 'yellow')
             self.print_colored("   • Keep the service enabled for future startups", 'yellow')
             self.print_colored("   • Verify service shutdown status", 'yellow')
         elif "restart" in playbook_name:
             self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
-            self.print_colored("   • Stop the current edge node", 'yellow')
-            self.print_colored("   • Start the edge node with fresh state", 'yellow')
+            self.print_colored("   • Stop the current Edge Node", 'yellow')
+            self.print_colored("   • Start the Edge Node with fresh state", 'yellow')
             self.print_colored("   • Verify service restart status", 'yellow')
         elif "status" in playbook_name:
             self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
-            self.print_colored("   • Check the current status of edge node", 'yellow')
+            self.print_colored("   • Check the current status of Edge Node", 'yellow')
             self.print_colored("   • Show service logs and runtime information", 'yellow')
             self.print_colored("   • Display resource usage if available", 'yellow')
 
@@ -4090,6 +4139,175 @@ except:
                 self.print_colored(f"An error occurred: {e}", 'red')
                 input("Press Enter to continue...")
 
+    def _interactive_deployment_host_selection(self, hosts: Dict[str, Dict[str, Any]], operation_name: str) -> List[str]:
+        """Interactive host selection for deployments with never-deployed nodes preselected"""
+        if not hosts:
+            return []
+
+        # Preselect never-deployed nodes
+        never_deployed_hosts = set()
+        for host_name in hosts.keys():
+            status_info = self._get_node_status_info(host_name)
+            if status_info['status'] in ['never_deployed', 'deleted']:
+                never_deployed_hosts.add(host_name)
+
+        try:
+            import sys
+            import tty
+            import termios
+        except ImportError:
+            # Fallback to the previous method if termios is not available (Windows)
+            return self._fallback_deployment_host_selection(hosts, operation_name, never_deployed_hosts)
+
+        host_list = ["All hosts"] + list(hosts.keys())
+        selected_hosts = never_deployed_hosts.copy()  # Start with never-deployed selected
+        current_index = 0
+        
+        def get_key():
+            """Get a single keypress from stdin"""
+            fd = sys.stdin.fileno()
+            old_settings = termios.tcgetattr(fd)
+            try:
+                tty.setraw(sys.stdin.fileno())
+                key = sys.stdin.read(1)
+                if key == '\x1b':  # ESC sequence
+                    key += sys.stdin.read(2)
+                return key
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+        def display_menu():
+            """Display the selection menu"""
+            # Clear screen and move cursor to top
+            print("\033[2J\033[H", end="")
+            
+            # Header
+            self.print_header(f"Select Hosts for {operation_name.title()}")
+            
+            # Instructions
+            self.print_colored("🎮 Navigation Controls:", 'cyan', bold=True)
+            self.print_colored("   ↑/↓ Arrow keys    - Navigate up/down", 'white')
+            self.print_colored("   Space bar        - Toggle selection", 'white')
+            self.print_colored("   Enter           - Confirm selection", 'white')
+            self.print_colored("   q/Esc           - Cancel operation", 'white')
+            print()
+            
+            # Show preselection info
+            if never_deployed_hosts:
+                self.print_colored("💡 Pre-selected nodes that were never deployed or deleted:", 'cyan', bold=True)
+                for host_name in sorted(never_deployed_hosts):
+                    status_info = self._get_node_status_info(host_name)
+                    status_emoji, _, status_desc = self._get_status_display_info(status_info['status'])
+                    self.print_colored(f"   • {host_name} [{status_emoji} {status_desc}]", 'green')
+                print()
+            
+            # Status
+            all_selected = len(selected_hosts) == len(hosts)
+            if len(selected_hosts) == 0:
+                self.print_colored("⚠️  No hosts selected!", 'red', bold=True)
+            elif all_selected:
+                self.print_colored(f"✅ All {len(hosts)} hosts selected", 'green', bold=True)
+            else:
+                self.print_colored(f"📊 Selected: {len(selected_hosts)}/{len(hosts)} hosts", 'cyan', bold=True)
+            print()
+            
+            # Menu items
+            for i, item in enumerate(host_list):
+                is_current = (i == current_index)
+                
+                if item == "All hosts":
+                    # All hosts option
+                    all_selected = len(selected_hosts) == len(hosts)
+                    marker = "✓" if all_selected else " "
+                    prefix = "→ " if is_current else "  "
+                    color = 'yellow' if is_current else ('green' if all_selected else 'white')
+                    style = 'bold' if is_current else False
+                    
+                    self.print_colored(f"{prefix}[{marker}] {item} ({len(hosts)} total)", color, bold=style)
+                else:
+                    # Individual host
+                    host_name = item
+                    host_config = hosts[host_name]
+                    ip = host_config.get('ansible_host', 'Unknown')
+                    user = host_config.get('ansible_user', 'Unknown')
+                    
+                    # Get status information
+                    status_info = self._get_node_status_info(host_name)
+                    status = status_info['status']
+                    status_emoji, status_color, status_desc = self._get_status_display_info(status)
+                    
+                    is_selected = host_name in selected_hosts
+                    is_preselected = host_name in never_deployed_hosts
+                    marker = "✓" if is_selected else " "
+                    prefix = "→ " if is_current else "  "
+                    
+                    if is_current and is_selected:
+                        color = 'yellow'
+                    elif is_current:
+                        color = 'yellow'
+                    elif is_selected:
+                        color = 'green'
+                    else:
+                        color = 'white'
+                    
+                    style = 'bold' if is_current else False
+                    
+                    # Get last check timestamp
+                    last_check = status_info['last_check']
+                    last_check_str = self._format_timestamp_ago(last_check)
+                    
+                    preselect_indicator = " (pre-selected)" if is_preselected else ""
+                    self.print_colored(f"{prefix}[{marker}] {host_name}{preselect_indicator}", color, bold=style)
+                    if is_current:
+                        self.print_colored(f"    └─ {user}@{ip} [{status_emoji} {status_desc}] (Last check: {last_check_str})", 'cyan')
+                    else:
+                        self.print_colored(f"    └─ {user}@{ip} [{status_emoji} {status_desc}] (Last check: {last_check_str})", 'white')
+            
+            print()
+            self.print_colored("─" * 60, 'blue')
+
+        while True:
+            display_menu()
+            
+            try:
+                key = get_key()
+                
+                if key == '\x1b[A':  # Up arrow
+                    current_index = (current_index - 1) % len(host_list)
+                elif key == '\x1b[B':  # Down arrow
+                    current_index = (current_index + 1) % len(host_list)
+                elif key == ' ':  # Space bar - toggle selection
+                    current_item = host_list[current_index]
+                    if current_item == "All hosts":
+                        # Toggle all
+                        if len(selected_hosts) == len(hosts):
+                            selected_hosts = set()
+                        else:
+                            selected_hosts = set(hosts.keys())
+                    else:
+                        # Toggle individual host
+                        host_name = current_item
+                        if host_name in selected_hosts:
+                            selected_hosts.remove(host_name)
+                        else:
+                            selected_hosts.add(host_name)
+                elif key == '\r' or key == '\n':  # Enter - confirm
+                    if len(selected_hosts) == 0:
+                        # Show error and continue
+                        print("\033[2J\033[H", end="")
+                        self.print_colored("❌ Cannot proceed without selecting any hosts!", 'red', bold=True)
+                        self.print_colored("Press any key to continue...", 'yellow')
+                        get_key()
+                        continue
+                    break
+                elif key == 'q' or key == '\x1b':  # q or Esc - cancel
+                    return []
+                
+            except KeyboardInterrupt:
+                return []
+        
+        return list(selected_hosts)
+
     def _interactive_host_selection(self, hosts: Dict[str, Dict[str, Any]], operation_name: str) -> List[str]:
         """Interactive host selection with keyboard navigation (arrow keys + space)"""
         if not hosts:
@@ -4238,6 +4456,148 @@ except:
                 
             except KeyboardInterrupt:
                 return []
+        
+        return list(selected_hosts)
+
+    def _fallback_deployment_host_selection(self, hosts: Dict[str, Dict[str, Any]], operation_name: str, never_deployed_hosts: set) -> List[str]:
+        """Fallback deployment host selection for systems without termios (like Windows)"""
+        if not hosts:
+            return []
+
+        host_list = list(hosts.keys())
+        selected_hosts = never_deployed_hosts.copy()  # Start with never-deployed selected
+        
+        while True:
+            # Clear screen for better UX
+            print("\033[2J\033[H", end="")
+            
+            self.print_header(f"Host Selection for {operation_name.title()}")
+            
+            if never_deployed_hosts:
+                self.print_colored("💡 Pre-selected nodes that were never deployed or deleted:", 'cyan', bold=True)
+                for host_name in sorted(never_deployed_hosts):
+                    status_info = self._get_node_status_info(host_name)
+                    status_emoji, _, status_desc = self._get_status_display_info(status_info['status'])
+                    self.print_colored(f"   • {host_name} [{status_emoji} {status_desc}]", 'green')
+                print()
+            
+            self.print_colored("📋 Instructions:", 'cyan', bold=True)
+            self.print_colored("   • Enter numbers to toggle selection (e.g., 1, 2, 3)", 'white')
+            self.print_colored("   • Use 'a' to select all hosts", 'white')
+            self.print_colored("   • Use 'n' to deselect all hosts", 'white')
+            self.print_colored("   • Use 'c' to cancel operation", 'white')
+            self.print_colored("   • Press Enter when ready to proceed", 'white')
+            print()
+            
+            # Show "all" option
+            all_selected = len(selected_hosts) == len(host_list)
+            all_marker = "✓" if all_selected else " "
+            all_color = 'green' if all_selected else 'white'
+            self.print_colored(f"  0) [{all_marker}] All hosts ({len(host_list)} total)", all_color, bold=all_selected)
+            
+            self.print_colored(f"\n🖥️  Individual Hosts:", 'cyan', bold=True)
+            
+            # Show individual hosts
+            for i, host_name in enumerate(host_list, 1):
+                host_config = hosts[host_name]
+                ip = host_config.get('ansible_host', 'Unknown')
+                user = host_config.get('ansible_user', 'Unknown')
+                
+                # Get status information
+                status_info = self._get_node_status_info(host_name)
+                status = status_info['status']
+                last_check = status_info['last_check']
+                status_emoji, status_color, status_desc = self._get_status_display_info(status)
+                last_check_str = self._format_timestamp_ago(last_check)
+                
+                is_selected = host_name in selected_hosts
+                is_preselected = host_name in never_deployed_hosts
+                marker = "✓" if is_selected else " "
+                color = 'green' if is_selected else 'white'
+                
+                preselect_indicator = " (pre-selected)" if is_preselected else ""
+                self.print_colored(f"  {i}) [{marker}] {host_name}{preselect_indicator}", color, bold=is_selected)
+                self.print_colored(f"      └─ {user}@{ip} [{status_emoji} {status_desc}] (Last check: {last_check_str})", 'white')
+            
+            print()
+            
+            # Status summary
+            if len(selected_hosts) == 0:
+                self.print_colored("⚠️  No hosts selected!", 'red', bold=True)
+                self.print_colored("   Please select at least one host to continue.", 'red')
+            elif len(selected_hosts) == len(host_list):
+                self.print_colored(f"✅ All {len(host_list)} hosts selected", 'green', bold=True)
+            else:
+                self.print_colored(f"📊 Selected: {len(selected_hosts)}/{len(host_list)} hosts", 'cyan', bold=True)
+                selected_names = ', '.join(sorted(selected_hosts))
+                self.print_colored(f"   Selected hosts: {selected_names}", 'cyan')
+            
+            print()
+            self.print_colored("─" * 60, 'blue')
+            
+            choice = self.get_input("Enter choice (number/a/n/c/Enter to proceed)", "").strip().lower()
+            
+            if choice == "":
+                # Proceed with current selection
+                if len(selected_hosts) == 0:
+                    self.print_colored("❌ Cannot proceed without selecting any hosts!", 'red')
+                    input("Press Enter to continue selection...")
+                    continue
+                break
+            elif choice == "c":
+                # Cancel operation
+                return []
+            elif choice == "a":
+                # Select all
+                selected_hosts = set(host_list)
+                self.print_colored("✅ All hosts selected", 'green')
+            elif choice == "n":
+                # Select none
+                selected_hosts = set()
+                self.print_colored("⚠️  All hosts deselected", 'yellow')
+            else:
+                # Try to parse as number or comma-separated numbers
+                try:
+                    # Handle multiple numbers separated by commas/spaces
+                    choices = []
+                    for part in choice.replace(',', ' ').split():
+                        try:
+                            choices.append(int(part))
+                        except ValueError:
+                            continue
+                    
+                    if not choices:
+                        # Try single number
+                        choices = [int(choice)]
+                    
+                    # Process each choice
+                    for choice_num in choices:
+                        if choice_num == 0:
+                            # Toggle all
+                            if all_selected:
+                                selected_hosts = set()
+                                self.print_colored("⚠️  All hosts deselected", 'yellow')
+                            else:
+                                selected_hosts = set(host_list)
+                                self.print_colored("✅ All hosts selected", 'green')
+                        elif 1 <= choice_num <= len(host_list):
+                            # Toggle individual host
+                            host_name = host_list[choice_num - 1]
+                            if host_name in selected_hosts:
+                                selected_hosts.remove(host_name)
+                                self.print_colored(f"➖ Deselected: {host_name}", 'yellow')
+                            else:
+                                selected_hosts.add(host_name)
+                                self.print_colored(f"➕ Selected: {host_name}", 'green')
+                        else:
+                            self.print_colored(f"❌ Invalid choice: {choice_num} (valid range: 0-{len(host_list)})", 'red')
+                    
+                except ValueError:
+                    self.print_colored("❌ Invalid input. Please enter numbers, 'a', 'n', 'c', or press Enter.", 'red')
+            
+            # Small delay to let user see the feedback
+            import time
+            time.sleep(0.8)
         
         return list(selected_hosts)
 
