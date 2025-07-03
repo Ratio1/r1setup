@@ -47,11 +47,28 @@
   changed_when: false
   failed_when: false
 
-- name: Restart docker
+- name: Force restart docker
   ansible.builtin.command:
     cmd: systemctl restart docker
+  become: yes
   ignore_errors: yes
-  when: docker_service_status.rc == 0
+
+- name: Reset SSH connection to refresh group membership
+  meta: reset_connection
+  ignore_errors: yes
+
+- name: Test docker access without sudo
+  ansible.builtin.command:
+    cmd: docker info
+  register: docker_test_result
+  changed_when: false
+  failed_when: false
+  ignore_errors: yes
+
+- name: Debug docker access test
+  debug:
+    msg: "Docker access test {{ 'passed' if docker_test_result.rc == 0 else 'failed' }}. Group membership {{ 'active' if docker_test_result.rc == 0 else 'may require logout/login or reboot' }}"
+  when: docker_test_result is defined
 
 
 - name: "Remove old service for legacy systems"
