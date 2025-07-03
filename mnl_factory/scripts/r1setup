@@ -177,6 +177,12 @@ class R1Setup:
             try:
                 with open(self.active_config_file) as f:
                     self.active_config.update(json.load(f))
+                
+                # Ensure network environment is synchronized after loading active config
+                env = self.active_config.get('environment')
+                if env:
+                    self.set_mnl_app_env(env)
+                    self.print_debug(f"Network environment synchronized after loading active config: {env}")
             except Exception as e:
                 self.print_colored(f"Warning: Could not load active config: {e}", 'yellow')
 
@@ -571,6 +577,12 @@ class R1Setup:
             with open(self.config_file) as f:
                 self.inventory = yaml.safe_load(f) or self.inventory
             
+            # Ensure network environment is synchronized with active configuration
+            env = self.active_config.get('environment')
+            if env:
+                self.set_mnl_app_env(env)
+                self.print_debug(f"Network environment synchronized to: {env}")
+            
             # Initialize status fields for existing nodes that don't have them
             hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
             updated = False
@@ -735,9 +747,6 @@ class R1Setup:
         self.print_colored(" 16) Check & update node status - Verify actual service status and update")
         self.print_colored(" 17) SSH into node's machine  - Connect to a selected node's machine via SSH")
         print()
-        self.print_colored("Settings:")
-        self.print_colored(" 18) Change network environment - Switch between mainnet/testnet/devnet")
-        print()
         self.print_colored("  0) Exit")
         print()
 
@@ -831,6 +840,7 @@ class R1Setup:
                 self.print_colored("  2) Switch configuration      - Activate a different configuration")
                 self.print_colored("  3) Delete configuration      - Remove a saved configuration")
                 self.print_colored("  4) Rename configuration      - Change configuration name")
+            self.print_colored("  5) Change network environment - Switch between mainnet/testnet/devnet")
             self.print_colored("  0) Back to main menu")
             print()
 
@@ -846,6 +856,8 @@ class R1Setup:
                 self._delete_configuration(configs)
             elif choice == '4' and configs:
                 self._rename_configuration(configs)
+            elif choice == '5':
+                self.change_network_environment()
             else:
                 self.print_colored("Invalid option. Please try again.", 'red')
                 input("Press Enter to continue...")
@@ -4126,8 +4138,6 @@ except:
                     self.check_and_update_node_status()
                 elif choice == '17':
                     self.ssh_into_node_machine()
-                elif choice == '18':
-                    self.change_network_environment()
                 else:
                     self.print_colored("Invalid option. Please try again.", 'red')
                     input("Press Enter to continue...")
