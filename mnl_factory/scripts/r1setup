@@ -3431,13 +3431,21 @@ class R1Setup:
 
     def _update_deployment_metadata(self, deployment_type: str) -> None:
         """Update deployment metadata after successful deployment"""
+        self.print_debug(f"Updating deployment metadata with type: {deployment_type}")
+        self.print_debug(f"Active config: {self.active_config}")
+        
         if not self.active_config.get('config_name'):
+            self.print_debug("No config_name in active_config, cannot update deployment metadata")
+            self.print_colored("Warning: No configuration name found, cannot update deployment tracking", 'yellow')
             return
 
         config_name = self.active_config['config_name']
         metadata_path = self.configs_dir / f"{config_name}.json"
+        self.print_debug(f"Looking for metadata file: {metadata_path}")
 
         if not metadata_path.exists():
+            self.print_debug(f"Metadata file does not exist: {metadata_path}")
+            self.print_colored(f"Warning: Metadata file not found: {metadata_path}", 'yellow')
             return
 
         try:
@@ -3445,12 +3453,16 @@ class R1Setup:
             with open(metadata_path) as f:
                 metadata = json.load(f)
 
+            self.print_debug(f"Loaded existing metadata: {metadata}")
+
             # Update deployment info
             current_network = self.get_mnl_app_env()
             metadata['last_deployed_date'] = datetime.now().isoformat()
             metadata['last_deployed_network'] = current_network
             metadata['deployment_status'] = 'deployed'
             metadata['last_deployment_type'] = deployment_type
+
+            self.print_debug(f"Updated metadata: {metadata}")
 
             # Save updated metadata
             with open(metadata_path, 'w') as f:
@@ -3461,8 +3473,10 @@ class R1Setup:
             self._save_active_config()
 
             self.print_colored(f"✅ Deployment tracking updated for configuration: {config_name}", 'green')
+            self.print_debug(f"Successfully updated deployment metadata for {config_name}")
         except Exception as e:
             self.print_colored(f"Warning: Could not update deployment metadata: {e}", 'yellow')
+            self.print_debug(f"Error updating deployment metadata: {e}")
 
     def _update_deletion_metadata(self) -> None:
         """Update deployment metadata after successful deletion"""
