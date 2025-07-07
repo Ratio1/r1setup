@@ -507,24 +507,53 @@ class R1Setup:
                 self.print_colored("Invalid choice. Please select 1 or 2.", 'red')
                 continue
 
-    def run_command(self, cmd: str, show_output: bool = True, shell: bool = True) -> tuple:
+    def run_command(self, cmd: str, show_output: bool = True, shell: bool = True, timeout: int = None) -> tuple:
         """Run a shell command and return success status and output"""
         try:
             if show_output:
                 self.print_colored(f"Running: {cmd}", 'cyan')
 
-            result = subprocess.run(
-                cmd,
-                shell=shell,
-                capture_output=not show_output,
-                text=True,
-                check=False
-            )
-
-            if show_output:
-                return result.returncode == 0, ""
+            if timeout and not show_output:
+                # Use Popen for timeout cases where we want to capture partial output
+                process = subprocess.Popen(
+                    cmd,
+                    shell=shell,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True
+                )
+                
+                try:
+                    stdout, _ = process.communicate(timeout=timeout)
+                    return process.returncode == 0, stdout
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    # Try to get any partial output
+                    try:
+                        stdout, _ = process.communicate(timeout=5)
+                        self.print_colored(f"Command timed out after {timeout} seconds but captured partial output", 'yellow')
+                        return False, stdout  # Return partial output even though it timed out
+                    except subprocess.TimeoutExpired:
+                        self.print_colored(f"Command timed out after {timeout} seconds: {cmd}", 'red')
+                        return False, f"Command timed out after {timeout} seconds"
             else:
-                return result.returncode == 0, result.stdout
+                # Use regular subprocess.run for other cases
+                result = subprocess.run(
+                    cmd,
+                    shell=shell,
+                    capture_output=not show_output,
+                    text=True,
+                    check=False,
+                    timeout=timeout
+                )
+
+                if show_output:
+                    return result.returncode == 0, ""
+                else:
+                    return result.returncode == 0, result.stdout
+        except subprocess.TimeoutExpired:
+            self.print_colored(f"Command timed out after {timeout} seconds: {cmd}", 'red')
+            return False, f"Command timed out after {timeout} seconds"
         except Exception as e:
             self.print_colored(f"Error running command: {e}", 'red')
             return False, str(e)
@@ -1764,7 +1793,8 @@ class R1Setup:
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
                f"ansible-playbook -i {self.config_file} {playbook_path}")
 
-        success, output = self.run_command(cmd, show_output=False)
+        # Use a reasonable timeout for status checking (30 seconds should be enough for most cases)
+        success, output = self.run_command(cmd, show_output=False, timeout=30)
         
         # Process results for real-time status
         node_status_data = {}
@@ -1777,6 +1807,25 @@ class R1Setup:
             
             # Parse the output for service status information
             lines = output.split('\n')
+            current_host = None
+            
+            # Use regex to find all task result blocks
+            import re
+        else:
+            # Handle timeout or other failure cases
+            self.print_debug(f"Status check failed with output length: {len(output) if output else 0}")
+            if "timed out" in output.lower():
+                self.print_debug("Status check timed out - some hosts may be offline")
+            else:
+                self.print_debug(f"Status check failed with error: {output}")
+            
+            # We'll still try to parse whatever output we got - partial output is valuable
+            if output:
+                self.print_debug("=== PARTIAL PLAYBOOK OUTPUT ===")
+                self.print_debug(output)
+                self.print_debug("=== END PARTIAL OUTPUT ===")
+            
+            lines = output.split('\n') if output else []
             current_host = None
             
             # Use regex to find all task result blocks
@@ -4729,7 +4778,7 @@ except:
         
         # Individual node status - check in real-time
         self.print_section(f"Node Status Overview ({len(hosts)} nodes)")
-        self.print_colored("🔍 Checking current status...", 'cyan')
+        self.print_colored("🔍 Checking current status (max 30s timeout)...", 'cyan')
         
         # Get real-time status for each node
         real_time_status = self._get_real_time_node_status()

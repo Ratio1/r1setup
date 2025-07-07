@@ -3,6 +3,8 @@
   hosts: gpu_nodes
   become: true
   gather_facts: true
+  ignore_unreachable: true
+  any_errors_fatal: false
   vars:
     ansible_roles_path: "{{ playbook_dir }}/../roles"
   vars_files:
