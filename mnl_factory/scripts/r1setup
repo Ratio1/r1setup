@@ -1751,6 +1751,202 @@ class R1Setup:
         self.print_debug(f"Node {node_name} not found in hosts configuration")
         return {'status': 'unknown', 'last_update': '', 'last_check': ''}
 
+    def _get_real_time_node_status(self) -> Dict[str, Dict[str, str]]:
+        """Get real-time status for all nodes by running the service status playbook"""
+        # Run service status playbook
+        playbook_path = self.config_dir / 'playbooks/service_status.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"❌ Service status playbook not found: {playbook_path}", 'red')
+            return {}
+
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+
+        success, output = self.run_command(cmd, show_output=False)
+        
+        # Process results for real-time status
+        node_status_data = {}
+        
+        if success:
+            self.print_debug(f"Playbook output length: {len(output)} characters")
+            self.print_debug("=== PLAYBOOK OUTPUT ===")
+            self.print_debug(output)
+            self.print_debug("=== END OUTPUT ===")
+            
+            # Parse the output for service status information
+            lines = output.split('\n')
+            current_host = None
+            
+            # Use regex to find all task result blocks
+            import re
+            
+            # Look for pattern: ok: [hostname] => {
+            task_pattern = re.compile(r'ok: \[([^\]]+)\] => \{')
+            
+            for i, line in enumerate(lines):
+                line = line.strip()
+                
+                # Track current host being processed from task results
+                task_match = task_pattern.match(line)
+                if task_match:
+                    current_host = task_match.group(1)
+                    self.print_debug(f"Found task result for host: {current_host}")
+                    continue
+                
+                # Handle unreachable nodes
+                if 'unreachable:' in line and '[' in line and ']' in line:
+                    unreachable_match = re.search(r'unreachable: \[([^\]]+)\]', line)
+                    if unreachable_match:
+                        hostname = unreachable_match.group(1)
+                        node_status_data[hostname] = {
+                            'status': 'unreachable',
+                            'result': 'Node unreachable'
+                        }
+                        self.print_debug(f"Set {hostname} to unreachable")
+                        continue
+                
+                # Look for the structured message output from the playbook
+                if current_host and '"msg":' in line:
+                    self.print_debug(f"Processing message line for {current_host}: {line}")
+                    
+                    # Extract the message content - it contains the status information
+                    msg_match = re.search(r'"msg":\s*"([^"]*(?:\\.[^"]*)*)"', line)
+                    if msg_match:
+                        msg_content = msg_match.group(1)
+                        # Decode escaped characters (like \n)
+                        msg_content = msg_content.replace('\\n', '\n').replace('\\"', '"')
+                        self.print_debug(f"Extracted message for {current_host}: {msg_content}")
+                        
+                        # Parse the decoded message content for status information
+                        service_status = None
+                        container_status = None
+                        
+                        # Look for Service Status in the message
+                        if 'Service Status: ACTIVE' in msg_content:
+                            service_status = 'ACTIVE'
+                        elif 'Service Status: INACTIVE' in msg_content:
+                            service_status = 'INACTIVE'
+                        elif 'Service Status: FAILED' in msg_content:
+                            service_status = 'FAILED'
+                        elif 'Service Status: NOT FOUND' in msg_content:
+                            service_status = 'NOT_FOUND'
+                        
+                        # Look for Container Status in the message
+                        if 'Container Status: RUNNING' in msg_content:
+                            container_status = 'RUNNING'
+                        elif 'Container Status: NOT RUNNING' in msg_content:
+                            container_status = 'NOT_RUNNING'
+                        
+                        self.print_debug(f"Parsed {current_host}: service={service_status}, container={container_status}")
+                        
+                        # Determine overall status based on service and container status
+                        if container_status == 'RUNNING':
+                            node_status_data[current_host] = {
+                                'status': 'running',
+                                'result': 'Container is running'
+                            }
+                            self.print_debug(f"Set {current_host} to running (container running)")
+                        elif container_status == 'NOT_RUNNING':
+                            if service_status == 'ACTIVE':
+                                node_status_data[current_host] = {
+                                    'status': 'stopped',
+                                    'result': 'Service active but container not running'
+                                }
+                                self.print_debug(f"Set {current_host} to stopped (service active, container not running)")
+                            elif service_status == 'NOT_FOUND':
+                                node_status_data[current_host] = {
+                                    'status': 'not_deployed',
+                                    'result': 'Service not found - not deployed'
+                                }
+                                self.print_debug(f"Set {current_host} to not_deployed (service not found)")
+                            else:
+                                node_status_data[current_host] = {
+                                    'status': 'stopped',
+                                    'result': 'Container not running'
+                                }
+                                self.print_debug(f"Set {current_host} to stopped (container not running)")
+                        elif service_status == 'ACTIVE' and current_host not in node_status_data:
+                            node_status_data[current_host] = {
+                                'status': 'running',
+                                'result': 'Service is active'
+                            }
+                            self.print_debug(f"Set {current_host} to running (service active)")
+                        elif service_status in ['INACTIVE', 'FAILED'] and current_host not in node_status_data:
+                            node_status_data[current_host] = {
+                                'status': 'stopped',
+                                'result': 'Service is inactive/failed'
+                            }
+                            self.print_debug(f"Set {current_host} to stopped (service inactive/failed)")
+                        elif service_status == 'NOT_FOUND' and current_host not in node_status_data:
+                            node_status_data[current_host] = {
+                                'status': 'not_deployed',
+                                'result': 'Service not found - not deployed'
+                            }
+                            self.print_debug(f"Set {current_host} to not_deployed (service not found)")
+                
+                # Fallback: Look for debug output with container and service status (legacy format)
+                elif current_host and ('Container Status:' in line or 'Service Status:' in line):
+                    # Parse container status
+                    if 'Container Status: RUNNING' in line:
+                        node_status_data[current_host] = {
+                            'status': 'running',
+                            'result': 'Container is running'
+                        }
+                        self.print_debug(f"Set {current_host} to running (legacy format)")
+                    elif 'Container Status: NOT RUNNING' in line:
+                        # Check if we have service status info
+                        if 'Service Status: ACTIVE' in line:
+                            node_status_data[current_host] = {
+                                'status': 'stopped',
+                                'result': 'Service active but container not running'
+                            }
+                        elif 'Service Status: NOT FOUND' in line:
+                            node_status_data[current_host] = {
+                                'status': 'not_deployed',
+                                'result': 'Service not found - not deployed'
+                            }
+                        else:
+                            node_status_data[current_host] = {
+                                'status': 'stopped',
+                                'result': 'Container not running'
+                            }
+                        self.print_debug(f"Set {current_host} to stopped (legacy format)")
+                    
+                    # Parse service status when container info is not available
+                    elif 'Service Status: ACTIVE' in line and current_host not in node_status_data:
+                        node_status_data[current_host] = {
+                            'status': 'running',
+                            'result': 'Service is active'
+                        }
+                        self.print_debug(f"Set {current_host} to running (service active, legacy format)")
+                    elif 'Service Status: INACTIVE' in line or 'Service Status: FAILED' in line:
+                        node_status_data[current_host] = {
+                            'status': 'stopped',
+                            'result': 'Service is inactive/failed'
+                        }
+                        self.print_debug(f"Set {current_host} to stopped (service inactive/failed, legacy format)")
+                    elif 'Service Status: NOT FOUND' in line:
+                        node_status_data[current_host] = {
+                            'status': 'not_deployed',
+                            'result': 'Service not found - not deployed'
+                        }
+                        self.print_debug(f"Set {current_host} to not_deployed (service not found, legacy format)")
+        
+        self.print_debug(f"Final node status data: {node_status_data}")
+        
+        # Fill in any missing hosts with unknown status
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        for hostname in hosts.keys():
+            if hostname not in node_status_data:
+                node_status_data[hostname] = {
+                    'status': 'unknown',
+                    'result': 'Unable to determine status'
+                }
+        
+        return node_status_data
+
     def _get_status_display_info(self, status: str) -> Tuple[str, str, str]:
         """Get display information for a status (emoji, color, description)"""
         status_info = {
@@ -1761,7 +1957,9 @@ class R1Setup:
             'deploying': ('🔄', 'cyan', 'Deploying'),
             'error': ('❌', 'red', 'Error'),
             'never_deployed': ('⚪', 'white', 'Never Deployed'),
-            'deleted': ('🗑️', 'red', 'Deleted')
+            'deleted': ('🗑️', 'red', 'Deleted'),
+            'unreachable': ('🔌', 'red', 'Unreachable'),
+            'not_deployed': ('📦', 'yellow', 'Not Deployed')
         }
         return status_info.get(status, ('❓', 'white', 'Unknown'))
 
@@ -4515,18 +4713,26 @@ except:
         else:
             self.print_colored("📋 Status: Never deployed", 'yellow')
         
-        # Individual node status
+        # Individual node status - check in real-time
         self.print_section(f"Node Status Overview ({len(hosts)} nodes)")
+        self.print_colored("🔍 Checking current status...", 'cyan')
+        
+        # Get real-time status for each node
+        real_time_status = self._get_real_time_node_status()
+        
+        print()  # Add a blank line after the checking message
         
         for host_name in hosts.keys():
-            status_info = self._get_node_status_info(host_name)
-            status = status_info['status']
-            last_check = status_info['last_check']
-            emoji, color, description = self._get_status_display_info(status)
-            last_check_str = self._format_timestamp_ago(last_check)
-            
-            self.print_colored(f"  • {host_name}: {emoji} {description}", color, end='')
-            self.print_colored(f" (Last check: {last_check_str})", 'white')
+            if host_name in real_time_status:
+                status = real_time_status[host_name]['status']
+                result = real_time_status[host_name]['result']
+                emoji, color, description = self._get_status_display_info(status)
+                
+                self.print_colored(f"  • {host_name}: {emoji} {description}", color, end='')
+                self.print_colored(f" (Current status)", 'white')
+            else:
+                self.print_colored(f"  • {host_name}: ❓ Unable to check", 'yellow', end='')
+                self.print_colored(f" (Current status)", 'white')
         
         input("\nPress Enter to continue...")
 
@@ -5402,18 +5608,6 @@ except:
         except Exception as e:
             self.print_debug(f"Error parsing timestamp '{timestamp}': {e}")
             return "Unknown"
-
-    def _get_node_status_info(self, node_name: str) -> Dict[str, str]:
-        """Get status information for a node"""
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
-        if node_name in hosts:
-            status = hosts[node_name].get('node_status', 'unknown')
-            last_update = hosts[node_name].get('last_status_update', '')
-            last_check = hosts[node_name].get('last_status_check', '')
-            self.print_debug(f"Retrieved {node_name} status: {status} (updated: {last_update}, checked: {last_check})")
-            return {'status': status, 'last_update': last_update, 'last_check': last_check}
-        self.print_debug(f"Node {node_name} not found in hosts configuration")
-        return {'status': 'unknown', 'last_update': '', 'last_check': ''}
 
     def combined_node_status_and_info(self) -> None:
         """Display beautiful live container status overview - checks if edge node containers are running"""
