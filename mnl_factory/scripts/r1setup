@@ -258,7 +258,7 @@ class R1Setup:
         configs.sort(key=lambda x: x[1]['created_at'], reverse=True)
         return configs
 
-    def _save_config_with_metadata(self, config_name: str, environment: str, nodes_count: int) -> None:
+    def _save_config_with_metadata(self, config_name: str, environment: str, nodes_count: int, update_symlink: bool = True) -> None:
         """Save configuration with metadata"""
         config_path = self.configs_dir / f"{config_name}.yml"
         metadata_path = self.configs_dir / f"{config_name}.json"
@@ -297,8 +297,9 @@ class R1Setup:
         self.active_config.update(metadata)
         self._save_active_config()
 
-        # Create/update symlink to active configuration
-        self._update_hosts_symlink(config_path)
+        # Create/update symlink to active configuration only if requested
+        if update_symlink:
+            self._update_hosts_symlink(config_path)
 
     def _update_hosts_symlink(self, config_path: Path) -> None:
         """Update the hosts.yml symlink to point to the active configuration"""
@@ -1927,11 +1928,11 @@ class R1Setup:
         # Generate config name if not set
         if not self.active_config.get('config_name'):
             config_name = self._generate_config_name(nodes_count)
-            self._save_config_with_metadata(config_name, env, nodes_count)
+            self._save_config_with_metadata(config_name, env, nodes_count, update_symlink=True)
         else:
-            # Update existing config
+            # Update existing config - no need to update symlink since we're not switching configs
             config_name = self.active_config['config_name']
-            self._save_config_with_metadata(config_name, env, nodes_count)
+            self._save_config_with_metadata(config_name, env, nodes_count, update_symlink=False)
 
     def view_configuration(self) -> None:
         """View current configuration"""
