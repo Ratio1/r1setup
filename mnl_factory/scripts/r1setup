@@ -2294,9 +2294,26 @@ class R1Setup:
 
         self.print_header("Testing Node Connectivity")
 
+        # Load configuration to show nodes being tested
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        env = self.get_mnl_app_env()
+
+        # Show pre-test information
+        self.print_colored(f"🔧 Connectivity Test Details:", 'cyan', bold=True)
+        self.print_colored(f"   • Network: {env if env else 'Not set'}", 'green' if env else 'red')
+        self.print_colored(f"   • Nodes to test: {len(hosts)}", 'white')
+
+        self.print_colored(f"\n🖥️  Testing connectivity to:", 'cyan', bold=True)
+        for name, config in hosts.items():
+            ip = config.get('ansible_host', 'Unknown')
+            user = config.get('ansible_user', 'Unknown')
+            auth_type = "Password" if 'ansible_ssh_pass' in config else "SSH Key"
+            self.print_colored(f"   • {name}: {user}@{ip} ({auth_type})", 'white')
+
         playbook_path = self.config_dir / 'playbooks/test_connection.yml'
         if not playbook_path.exists():
-            self.print_colored(f"Test playbook not found: {playbook_path}", 'red')
+            self.print_colored(f"❌ Test playbook not found: {playbook_path}", 'red')
             input("Press Enter to continue...")
             return
 
@@ -2305,14 +2322,16 @@ class R1Setup:
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
                f"ansible-playbook -i {self.config_file} {playbook_path}")
 
-        success, _ = self.run_command(cmd, show_output=True)
+        self.print_colored(f"\n🔍 Running connectivity test...", 'yellow')
+        success, output = self.run_command(cmd, show_output=False)
 
-        if success:
-            self.print_colored("\nConnectivity test completed successfully!", 'green')
-        else:
-            self.print_colored("\nConnectivity test failed. Please check your configuration.", 'red')
+        # Parse the results
+        connectivity_results = self._parse_connectivity_output(output)
+        
+        # Display formatted results
+        self._display_connectivity_results(connectivity_results, hosts)
 
-        input("Press Enter to continue...")
+        input("\nPress Enter to continue...")
 
     def deploy_full(self) -> None:
         """Deploy full setup (Docker + NVIDIA + GPU)"""
@@ -3365,6 +3384,150 @@ class R1Setup:
         result = status_mapping.get(actual_status, 'unknown')
         self.print_debug(f"  Status mapping: {actual_status} → {result}")
         return result
+
+    def _parse_connectivity_output(self, output: str) -> Dict[str, Dict[str, Any]]:
+        """Parse ansible connectivity test output to extract connection results"""
+        node_results = {}
+        
+        try:
+            lines = output.split('\n')
+            self.print_debug(f"Parsing connectivity output with {len(lines)} lines")
+            
+            # Look for PLAY RECAP section which contains the summary
+            recap_started = False
+            for line in lines:
+                line = line.strip()
+                
+                if 'PLAY RECAP' in line:
+                    recap_started = True
+                    continue
+                
+                if recap_started and line:
+                    # Parse lines like: "node-name : ok=5 changed=1 unreachable=0 failed=0 skipped=0 rescued=0 ignored=0"
+                    if ':' in line and 'ok=' in line:
+                        parts = line.split(':', 1)
+                        if len(parts) == 2:
+                            node_name = parts[0].strip()
+                            stats = parts[1].strip()
+                            
+                            # Parse the statistics
+                            stats_dict = {}
+                            for stat_pair in stats.split():
+                                if '=' in stat_pair:
+                                    key, value = stat_pair.split('=', 1)
+                                    try:
+                                        stats_dict[key] = int(value)
+                                    except ValueError:
+                                        stats_dict[key] = value
+                            
+                            # Determine connection status
+                            if stats_dict.get('unreachable', 0) > 0:
+                                status = 'unreachable'
+                                message = 'Connection failed - node is unreachable'
+                            elif stats_dict.get('failed', 0) > 0:
+                                status = 'failed'
+                                message = 'Connection failed - authentication or other error'
+                            elif stats_dict.get('ok', 0) > 0:
+                                status = 'connected'
+                                message = 'Connection successful'
+                            else:
+                                status = 'unknown'
+                                message = 'Unknown connection status'
+                            
+                            node_results[node_name] = {
+                                'status': status,
+                                'message': message,
+                                'stats': stats_dict
+                            }
+                            
+                            self.print_debug(f"Parsed {node_name}: {status} - {message}")
+                            
+        except Exception as e:
+            self.print_debug(f"Error parsing connectivity output: {e}")
+            
+        self.print_debug(f"Final connectivity results: {node_results}")
+        return node_results
+
+    def _display_connectivity_results(self, connectivity_results: Dict[str, Dict[str, Any]], hosts: Dict[str, Dict[str, Any]]) -> None:
+        """Display formatted connectivity test results"""
+        
+        if not connectivity_results:
+            self.print_colored("\n❌ No connectivity results could be parsed from the test output.", 'red')
+            self.print_colored("   This might indicate a configuration or network issue.", 'yellow')
+            return
+        
+        # Count results by status
+        connected_count = sum(1 for result in connectivity_results.values() if result['status'] == 'connected')
+        unreachable_count = sum(1 for result in connectivity_results.values() if result['status'] == 'unreachable')
+        failed_count = sum(1 for result in connectivity_results.values() if result['status'] == 'failed')
+        total_count = len(connectivity_results)
+        
+        # Display overall summary
+        self.print_colored(f"\n📊 Connectivity Test Results", 'cyan', bold=True)
+        self.print_colored(f"   • Total nodes tested: {total_count}", 'white')
+        self.print_colored(f"   • Connected: {connected_count}", 'green' if connected_count > 0 else 'white')
+        self.print_colored(f"   • Unreachable: {unreachable_count}", 'red' if unreachable_count > 0 else 'white')
+        self.print_colored(f"   • Failed: {failed_count}", 'red' if failed_count > 0 else 'white')
+        
+        # Display detailed results for each node
+        self.print_colored(f"\n🔍 Detailed Node Results:", 'cyan', bold=True)
+        
+        for node_name, result in connectivity_results.items():
+            status = result['status']
+            message = result['message']
+            stats = result.get('stats', {})
+            
+            # Get node configuration details
+            node_config = hosts.get(node_name, {})
+            ip = node_config.get('ansible_host', 'Unknown')
+            user = node_config.get('ansible_user', 'Unknown')
+            
+            # Choose appropriate emoji and color
+            if status == 'connected':
+                emoji = '✅'
+                color = 'green'
+            elif status == 'unreachable':
+                emoji = '🔴'
+                color = 'red'
+            elif status == 'failed':
+                emoji = '❌'
+                color = 'red'
+            else:
+                emoji = '❓'
+                color = 'yellow'
+            
+            # Display node result
+            self.print_colored(f"\n   {emoji} {node_name} ({user}@{ip})", color, bold=True)
+            self.print_colored(f"      Status: {message}", color)
+            
+            # Show statistics if available
+            if stats:
+                ok_count = stats.get('ok', 0)
+                changed_count = stats.get('changed', 0)
+                unreachable_count = stats.get('unreachable', 0)
+                failed_count = stats.get('failed', 0)
+                
+                self.print_colored(f"      Tasks: {ok_count} successful, {changed_count} changed, {unreachable_count} unreachable, {failed_count} failed", 'white')
+        
+        # Overall result and recommendations
+        if connected_count == total_count:
+            self.print_colored(f"\n✅ All {total_count} node(s) are reachable and ready for deployment!", 'green', bold=True)
+        elif connected_count > 0:
+            self.print_colored(f"\n⚠️  {connected_count} of {total_count} node(s) are reachable", 'yellow', bold=True)
+            self.print_colored("   Some nodes have connectivity issues that need to be resolved.", 'yellow')
+        else:
+            self.print_colored(f"\n❌ All {total_count} node(s) are unreachable", 'red', bold=True)
+            self.print_colored("   Please check your network configuration and node settings.", 'red')
+        
+        # Show troubleshooting tips if there are issues
+        if unreachable_count > 0 or failed_count > 0:
+            self.print_colored(f"\n💡 Troubleshooting Tips:", 'cyan', bold=True)
+            self.print_colored("   • Verify network connectivity (ping the IP addresses)", 'white')
+            self.print_colored("   • Check SSH credentials and authentication method", 'white')
+            self.print_colored("   • Ensure SSH service is running on target nodes", 'white')
+            self.print_colored("   • Verify firewall settings allow SSH connections", 'white')
+            self.print_colored("   • Use option 1 → 3 to view and verify your configuration", 'white')
+            self.print_colored("   • Use option 10 → 2 to test SSH connection manually", 'white')
 
     def ssh_into_node_machine(self) -> None:
         """SSH into a selected node's machine"""
