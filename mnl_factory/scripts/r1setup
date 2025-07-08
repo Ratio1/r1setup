@@ -2602,8 +2602,25 @@ class R1Setup:
                f"ansible-playbook -i {self.config_file} {playbook_path}")
 
         self.print_colored("Retrieving node information...", 'yellow')
+        
+        # Enable debug output for troubleshooting parsing issues
+        original_debug = globals().get('DEBUG', False)
+        globals()['DEBUG'] = True
+        
+        # Always capture output for parsing, but show it if debug is enabled
         success, output = self.run_command(cmd, show_output=False)
+        
+        # Show output if debug was originally enabled
+        if original_debug:
+            self.print_colored("=== COMMAND OUTPUT ===", 'cyan')
+            print(output)
+            self.print_colored("=== END COMMAND OUTPUT ===", 'cyan')
 
+        if DEBUG and output:
+            self.print_debug("=== ANSIBLE OUTPUT ===")
+            self.print_debug(output)
+            self.print_debug("=== END ANSIBLE OUTPUT ===")
+            
         if not success:
             self.print_colored("Failed to run node info playbook", 'red')
             return {}
@@ -2634,22 +2651,49 @@ class R1Setup:
                 continue
                 
             node_name = node_match.group(1)
+            self.print_debug(f"Processing block for node: {node_name}")
             
             # Check if this block contains node_info.stdout_lines
             if '"node_info.stdout_lines":' not in block:
+                self.print_debug(f"No node_info.stdout_lines found for {node_name}")
                 continue
             
             try:
-                # Extract the JSON lines from stdout_lines array
-                stdout_match = re.search(r'"node_info\.stdout_lines":\s*\[(.*?)\]', block, re.DOTALL)
-                if not stdout_match:
-                    self.print_debug(f"Could not find stdout_lines for {node_name}")
+                # Extract the JSON lines from stdout_lines array using a more flexible approach
+                # Look for the start of the array after "node_info.stdout_lines":
+                stdout_start = block.find('"node_info.stdout_lines":')
+                if stdout_start == -1:
+                    self.print_debug(f"Could not find stdout_lines start for {node_name}")
                     continue
                 
-                stdout_content = stdout_match.group(1)
+                # Find the opening bracket for the array
+                array_start = block.find('[', stdout_start)
+                if array_start == -1:
+                    self.print_debug(f"Could not find array start for {node_name}")
+                    continue
                 
-                # Extract all quoted strings from the stdout_lines array
-                quoted_lines = re.findall(r'"([^"]*)"', stdout_content)
+                # Count brackets to find the matching closing bracket
+                bracket_count = 0
+                array_end = array_start
+                for i in range(array_start, len(block)):
+                    if block[i] == '[':
+                        bracket_count += 1
+                    elif block[i] == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            array_end = i
+                            break
+                
+                if bracket_count != 0:
+                    self.print_debug(f"Could not find matching bracket for {node_name}")
+                    continue
+                
+                # Extract the array content
+                array_content = block[array_start+1:array_end]
+                self.print_debug(f"Raw array content for {node_name}: {array_content[:200]}...")
+                
+                # Extract all quoted strings from the array content
+                quoted_lines = re.findall(r'"([^"]*(?:\\"[^"]*)*)"', array_content)
                 
                 # Reconstruct the JSON string
                 json_str = ''
@@ -2658,11 +2702,15 @@ class R1Setup:
                     unescaped_line = line.replace('\\"', '"')
                     json_str += unescaped_line + '\n'
                 
+                self.print_debug(f"Reconstructed JSON for {node_name}: {json_str[:200]}...")
+                
                 # Parse the JSON
                 if json_str.strip():
                     node_data = json.loads(json_str.strip())
                     node_info[node_name] = node_data
                     self.print_debug(f"Successfully parsed JSON for {node_name}")
+                else:
+                    self.print_debug(f"Empty JSON string for {node_name}")
                     
             except (json.JSONDecodeError, Exception) as e:
                 self.print_debug(f"Failed to parse JSON for {node_name}: {e}")
@@ -2673,6 +2721,11 @@ class R1Setup:
             self.print_debug("Block parsing failed, trying line-by-line approach...")
             node_info = self._parse_node_info_line_by_line(output)
 
+        self.print_debug(f"Final parsing result: {len(node_info)} nodes found")
+        
+        # Restore original debug state
+        globals()['DEBUG'] = original_debug
+        
         return node_info
 
     def _parse_node_info_line_by_line(self, output: str) -> Dict[str, Dict[str, Any]]:
@@ -2691,6 +2744,7 @@ class R1Setup:
                 end = line.find(']')
                 if start > 0 and end > start:
                     node_name = line[start:end]
+                    self.print_debug(f"Line-by-line parsing for node: {node_name}")
                     
                     # Find the JSON block for this node
                     json_lines = []
@@ -2701,22 +2755,36 @@ class R1Setup:
                         i += 1
                     
                     if i < len(lines):
+                        self.print_debug(f"Found stdout_lines at line {i}")
                         i += 1  # Skip the stdout_lines line
                         
-                        # Collect JSON lines
+                        # Collect JSON lines until we hit the end
+                        json_started = False
                         while i < len(lines):
                             current_line = lines[i].strip()
                             
+                            # Stop if we hit the end of the array or next node
                             if current_line == ']' or current_line == '}' or current_line.startswith('ok: ['):
                                 break
                             
-                            # Clean up the JSON line
-                            if current_line.startswith('"') and current_line.endswith('",'):
-                                clean_line = current_line[1:-2].replace('\\"', '"')
+                            # Skip empty lines and array markers
+                            if not current_line or current_line == '[':
+                                i += 1
+                                continue
+                            
+                            # Clean up the JSON line - handle various formats
+                            if current_line.startswith('"') and (current_line.endswith('",') or current_line.endswith('"')):
+                                # Remove quotes and trailing comma
+                                clean_line = current_line[1:]
+                                if clean_line.endswith('",'):
+                                    clean_line = clean_line[:-2]
+                                elif clean_line.endswith('"'):
+                                    clean_line = clean_line[:-1]
+                                
+                                # Unescape quotes
+                                clean_line = clean_line.replace('\\"', '"')
                                 json_lines.append(clean_line)
-                            elif current_line.startswith('"') and current_line.endswith('"'):
-                                clean_line = current_line[1:-1].replace('\\"', '"')
-                                json_lines.append(clean_line)
+                                json_started = True
                             
                             i += 1
                         
@@ -2724,13 +2792,18 @@ class R1Setup:
                         if json_lines:
                             try:
                                 json_str = '\n'.join(json_lines)
+                                self.print_debug(f"Line-by-line JSON for {node_name}: {json_str[:200]}...")
                                 node_data = json.loads(json_str)
                                 node_info[node_name] = node_data
+                                self.print_debug(f"Line-by-line parsing successful for {node_name}")
                             except json.JSONDecodeError as e:
-                                self.print_debug(f"Failed to parse JSON for {node_name}: {e}")
+                                self.print_debug(f"Line-by-line JSON parsing failed for {node_name}: {e}")
+                        else:
+                            self.print_debug(f"No JSON lines collected for {node_name}")
             else:
                 i += 1
         
+        self.print_debug(f"Line-by-line parsing result: {len(node_info)} nodes found")
         return node_info
 
     def get_node_addresses(self) -> None:
