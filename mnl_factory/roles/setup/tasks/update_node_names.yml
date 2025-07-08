@@ -64,7 +64,7 @@
     msg: "EE_ID is already set to '{{ inventory_hostname }}' - skipping update and restart"
   when: not (ee_id_needs_update | bool)
 
-- name: Restart edge node service
+- name: Restart Edge Node service
   ansible.builtin.systemd:
     name: "{{ edge_node_service_name }}"
     state: restarted

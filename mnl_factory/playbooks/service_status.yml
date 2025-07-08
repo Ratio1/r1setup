@@ -77,6 +77,6 @@
       debug:
         msg: |
           ⚠️  WARNING: Service '{{ edge_node_service_name }}' not found on {{ inventory_hostname }}
-          This usually means the edge node has not been deployed yet.
+          This usually means the Edge Node has not been deployed yet.
           Please run deployment first before checking service status.
       when: service_exists is failed 

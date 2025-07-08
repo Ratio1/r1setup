@@ -798,9 +798,9 @@ class R1Setup:
         self.print_colored("  2) Deployment Menu        - Deploy, delete, and manage deployments")
         print()
         self.print_colored("🔧 OPERATIONS", 'cyan', bold=True)
-        self.print_colored("  3) Start Service          - Start the edge node service")
-        self.print_colored("  4) Stop Service           - Stop the edge node service")
-        self.print_colored("  5) Restart Service        - Restart the edge node service")
+        self.print_colored("  3) Start Service          - Start the Edge Node service")
+        self.print_colored("  4) Stop Service           - Stop the Edge Node service")
+        self.print_colored("  5) Restart Service        - Restart the Edge Node service")
         self.print_colored("  6) Check Status           - Check service status")
         print()
         self.print_colored("📊 MONITORING & INFO", 'cyan', bold=True)
@@ -1472,9 +1472,9 @@ class R1Setup:
 
             self.print_colored("Deployment Menu", 'cyan', bold=True)
             print()
-            self.print_colored("  1) Deploy with GPU        - Deploy full edge node with GPU support")
-            self.print_colored("  2) Deploy Docker Only     - Deploy edge node without GPU")
-            self.print_colored("  3) Delete Deployment      - Remove deployed edge node")
+            self.print_colored("  1) Deploy with GPU        - Deploy full Edge Node with GPU support")
+            self.print_colored("  2) Deploy Docker Only     - Deploy Edge Node without GPU")
+            self.print_colored("  3) Delete Deployment      - Remove deployed Edge Node")
             self.print_colored("  4) Deployment Status      - Check detailed deployment status")
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -2344,7 +2344,7 @@ class R1Setup:
         self.print_colored(f"   • Network: {env if env else 'Not set'}", 'white')
         self.print_colored(f"   • Selected Nodes: {len(selected_hosts)}/{len(all_hosts)}", 'white')
 
-        self.print_colored(f"\n🖥️  Edge nodes will be deleted from these selected machines:", 'cyan', bold=True)
+        self.print_colored(f"\n🖥️  Edge Nodes will be deleted from these selected machines:", 'cyan', bold=True)
         for name in selected_host_names:
             config = all_hosts[name]
             ip = config.get('ansible_host', 'Unknown')
@@ -2360,7 +2360,7 @@ class R1Setup:
         self.print_colored("   • Created command scripts", 'yellow')
         self.print_colored("   • Docker daemon configuration", 'yellow')
 
-        if self.get_input(f"\n⚠️  Are you sure you want to delete Edge Node deployment from {len(selected_hosts)} selected machine(s)? (y/n)", "n").lower() != 'y':
+        if self.get_input(f"\n⚠️  Are you sure you want to delete Edge Node deployment from {len(selected_hosts)} selected machine(s) (y/n)", "n").lower() != 'y':
             self.print_colored("Deletion cancelled.", 'yellow')
             return
 
@@ -2390,7 +2390,7 @@ class R1Setup:
         success, _ = self.run_command(cmd, show_output=True)
 
         if success:
-            self.print_colored("\nEdge node deleted successfully!", 'green')
+            self.print_colored("\nEdge Node deleted successfully!", 'green')
             # Update deployment metadata after successful deletion
             self._update_deletion_metadata()
             
@@ -2408,7 +2408,7 @@ class R1Setup:
             self.print_colored(f"\n💡 Note: Deleted nodes will maintain their 'deleted' status.", 'cyan')
             self.print_colored("   This status will not change automatically to preserve the deletion history.", 'white')
         else:
-            self.print_colored("\nEdge node deletion encountered issues. Please check the output above.", 'red')
+            self.print_colored("\nEdge Node deletion encountered issues. Please check the output above.", 'red')
             # Update selected node statuses to error after failed deletion
             for host_name in selected_host_names:
                 self._update_node_status(host_name, 'error')
@@ -3483,15 +3483,15 @@ class R1Setup:
             if "start" in playbook_name:
                 for host_name in selected_hosts:
                     self._update_node_status(host_name, 'running')
-                self.print_colored(f"Edge nodes have been started on {len(selected_hosts)} node(s).", 'green')
+                self.print_colored(f"Edge Nodes have been started on {len(selected_hosts)} node(s).", 'green')
             elif "stop" in playbook_name:
                 for host_name in selected_hosts:
                     self._update_node_status(host_name, 'stopped')
-                self.print_colored(f"Edge nodes have been stopped on {len(selected_hosts)} node(s).", 'green')
+                self.print_colored(f"Edge Nodes have been stopped on {len(selected_hosts)} node(s).", 'green')
             elif "restart" in playbook_name:
                 for host_name in selected_hosts:
                     self._update_node_status(host_name, 'running')
-                self.print_colored(f"Edge nodes have been restarted on {len(selected_hosts)} node(s).", 'green')
+                self.print_colored(f"Edge Nodes have been restarted on {len(selected_hosts)} node(s).", 'green')
             elif "status" in playbook_name:
                 # Status check doesn't change the actual status, just reports it
                 self.print_colored(f"Service status information retrieved for {len(selected_hosts)} node(s).", 'green')
@@ -4904,7 +4904,7 @@ except:
         """Stream logs from a specific node"""
         self.print_header(f"Streaming Logs - {node_name}")
         
-        self.print_colored("🔍 Streaming logs from the edge node service...", 'cyan')
+        self.print_colored("🔍 Streaming logs from the Edge Node service...", 'cyan')
         self.print_colored("Press Ctrl+C to stop streaming and return to menu.", 'yellow')
         print()
         
@@ -5718,7 +5718,7 @@ except:
             return "Unknown"
 
     def combined_node_status_and_info(self) -> None:
-        """Display beautiful live container status overview - checks if edge node containers are running"""
+        """Display beautiful live container status overview - checks if Edge Node containers are running"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
             input("Press Enter to continue...")
@@ -6050,15 +6050,15 @@ except:
             if "start" in playbook_name:
                 for host_name in selected_hosts:
                     self._update_node_status(host_name, 'running')
-                self.print_colored(f"Edge nodes have been started on {len(selected_hosts)} node(s).", 'green')
+                self.print_colored(f"Edge Nodes have been started on {len(selected_hosts)} node(s).", 'green')
             elif "stop" in playbook_name:
                 for host_name in selected_hosts:
                     self._update_node_status(host_name, 'stopped')
-                self.print_colored(f"Edge nodes have been stopped on {len(selected_hosts)} node(s).", 'green')
+                self.print_colored(f"Edge Nodes have been stopped on {len(selected_hosts)} node(s).", 'green')
             elif "restart" in playbook_name:
                 for host_name in selected_hosts:
                     self._update_node_status(host_name, 'running')
-                self.print_colored(f"Edge nodes have been restarted on {len(selected_hosts)} node(s).", 'green')
+                self.print_colored(f"Edge Nodes have been restarted on {len(selected_hosts)} node(s).", 'green')
             elif "status" in playbook_name:
                 # Status check doesn't change the actual status, just reports it
                 self.print_colored(f"Service status information retrieved for {len(selected_hosts)} node(s).", 'green')

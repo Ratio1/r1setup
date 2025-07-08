@@ -21,7 +21,7 @@
       debug:
         msg: |
           ⚠️  WARNING: Service '{{ edge_node_service_name }}' not found on {{ inventory_hostname }}
-          This usually means the edge node has not been deployed yet.
+          This usually means the Edge Node has not been deployed yet.
           Skipping stop operation for this node.
       when: service_exists is failed
 
@@ -39,7 +39,7 @@
           {{ current_status.status.ActiveState | default('unknown') }}
       when: service_exists is not failed
 
-    - name: Stop the edge node service
+    - name: Stop the Edge Node service
       ansible.builtin.systemd:
         name: "{{ edge_node_service_name }}"
         state: stopped
@@ -65,7 +65,7 @@
     - name: Display stop success
       debug:
         msg: |
-          ✅ SUCCESS: Edge node service stopped on {{ inventory_hostname }}
+          ✅ SUCCESS: Edge Node service stopped on {{ inventory_hostname }}
           Service: {{ edge_node_service_name }}
           Status: {{ service_status.status.ActiveState | default('unknown') }}
           Auto-start: Disabled
@@ -98,7 +98,7 @@
       debug:
         msg: |
           🚨 IMPORTANT: Node {{ inventory_hostname }} is now offline
-          • The edge node is no longer participating in the network
+          • The Edge Node is no longer participating in the network
           • This may affect your earnings until the service is restarted
           • Use 'Start services' option to bring the node back online
       when: service_exists is not failed and service_status.status.ActiveState == "inactive" 

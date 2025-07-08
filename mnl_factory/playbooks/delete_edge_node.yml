@@ -1,5 +1,5 @@
 ---
-- name: Delete edge node deployment
+- name: Delete Edge Node deployment
   hosts: gpu_nodes
   become: true
   vars:
@@ -13,7 +13,7 @@
     - name: Display cleanup warning
       debug:
         msg: |
-          WARNING: This will completely remove the edge node deployment including:
+          WARNING: This will completely remove the Edge Node deployment including:
           - Systemd service ({{ edge_node_service_name }})
           - Docker container ({{ mnl_docker_container_name }})
           - Docker images ({{ mnl_docker_image_url }})
@@ -21,13 +21,13 @@
           - Created command scripts (/usr/local/bin/get_logs, /usr/local/bin/restart_service, /usr/local/bin/get_node_info)
           - Docker daemon configuration (/etc/docker/daemon.json)
 
-    - name: Stop the edge node service
+    - name: Stop the Edge Node service
       ansible.builtin.systemd:
         name: "{{ edge_node_service_name }}"
         state: stopped
       ignore_errors: true
 
-    - name: Disable the edge node service
+    - name: Disable the Edge Node service
       ansible.builtin.systemd:
         name: "{{ edge_node_service_name }}"
         enabled: false
@@ -102,4 +102,4 @@
 
     - name: Display completion message
       debug:
-        msg: "Edge node cleanup completed successfully on {{ inventory_hostname }}" 
+        msg: "Edge Node cleanup completed successfully on {{ inventory_hostname }}" 
