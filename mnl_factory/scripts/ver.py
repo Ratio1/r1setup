@@ -3,7 +3,7 @@
 Version management for Ratio1 Multi-Node Launcher CLI
 """
 
-__VER__ = '1.2.0'
+__VER__ = '1.3.0'
 
 
 def get_version():
