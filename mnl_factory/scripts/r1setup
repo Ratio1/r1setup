@@ -1511,10 +1511,9 @@ class R1Setup:
 
             self.print_colored("Utilities Menu", 'cyan', bold=True)
             print()
-            self.print_colored("  1) Update Node Status     - Check and update node status")
-            self.print_colored("  2) SSH to Node           - Connect to node via SSH")
-            self.print_colored("  3) Get Logs              - Stream logs from nodes")
-            self.print_colored("  4) Write Logs to File    - Save node logs to local file")
+            self.print_colored("  1) SSH to Node           - Connect to node via SSH")
+            self.print_colored("  2) Get Logs              - Stream logs from nodes")
+            self.print_colored("  3) Write Logs to File    - Save node logs to local file")
             self.print_colored("  0) Back to Main Menu")
             print()
 
@@ -1523,12 +1522,10 @@ class R1Setup:
             if choice == '0':
                 break
             elif choice == '1':
-                self.check_and_update_node_status()
-            elif choice == '2':
                 self.ssh_into_node_machine()
-            elif choice == '3':
+            elif choice == '2':
                 self.get_logs()
-            elif choice == '4':
+            elif choice == '3':
                 self.write_logs_to_file()
             else:
                 self.print_colored("Invalid option. Please try again.", 'red')
@@ -3578,10 +3575,12 @@ class R1Setup:
             user = config.get('ansible_user', 'Unknown')
             status_info = self._get_node_status_info(host_name)
             status = status_info['status']
+            last_update = status_info['last_update']
             emoji, color, description = self._get_status_display_info(status)
+            last_update_str = self._format_timestamp_ago(last_update)
             
             self.print_colored(f"  {i}) {host_name}", 'cyan')
-            self.print_colored(f"     └─ {user}@{ip} [{emoji} {description}]", 'white')
+            self.print_colored(f"     └─ {user}@{ip} [{emoji} {description}] (Last updated: {last_update_str})", 'white')
         
         self.print_colored(f"  0) Cancel")
 
@@ -5361,26 +5360,31 @@ except:
         """Stream logs from a specific node"""
         self.print_header(f"Streaming Logs - {node_name}")
         
-        self.print_colored("🔍 Streaming logs from the Edge Node service...", 'cyan')
-        self.print_colored("Press Ctrl+C to stop streaming and return to menu.", 'yellow')
+        # Get node connection details first to validate before asking user to proceed
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        node_config = hosts.get(node_name, {})
+        
+        host = node_config.get('ansible_host', '')
+        user = node_config.get('ansible_user', '')
+        
+        if not host or not user:
+            self.print_colored("Error: Node configuration incomplete.", 'red')
+            input("Press Enter to continue...")
+            return
+        
+        self.print_colored(f"📡 Ready to stream logs from: {user}@{host}", 'cyan')
+        self.print_colored("🔍 This will run 'get_logs -f' on the target machine", 'white')
+        self.print_colored("⚠️  Use Ctrl+C to stop streaming and return to menu", 'yellow', bold=True)
+        print()
+        
+        # Ask user to confirm before starting
+        input("Press Enter to start streaming logs...")
         print()
         
         try:
-            # Get node connection details
-            self.load_configuration()
-            hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
-            node_config = hosts.get(node_name, {})
-            
-            host = node_config.get('ansible_host', '')
-            user = node_config.get('ansible_user', '')
-            
-            if not host or not user:
-                self.print_colored("Error: Node configuration incomplete.", 'red')
-                input("Press Enter to continue...")
-                return
-            
-            # Construct SSH command to follow logs
-            ssh_cmd = f"ssh {user}@{host} 'sudo journalctl -u edge_node -f --no-pager'"
+            # Construct SSH command to follow logs using the deployed get_logs script
+            ssh_cmd = f"ssh {user}@{host} 'get_logs -f'"
             
             # Handle SSH key vs password authentication
             if 'ansible_ssh_pass' in node_config:
@@ -5388,6 +5392,7 @@ except:
                 ssh_cmd = f"sshpass -p '{node_config['ansible_ssh_pass']}' {ssh_cmd}"
             
             self.print_colored(f"Connecting to {user}@{host}...", 'yellow')
+            print("=" * 80)
             
             # Execute the command
             process = subprocess.Popen(ssh_cmd, shell=True, stdout=subprocess.PIPE, 
@@ -5402,7 +5407,8 @@ except:
                     else:
                         break
             except KeyboardInterrupt:
-                self.print_colored("\n\nLog streaming stopped by user.", 'yellow')
+                print("\n" + "=" * 80)
+                self.print_colored("\n🛑 Log streaming stopped by user.", 'yellow')
                 process.terminate()
                 try:
                     process.wait(timeout=5)
@@ -5515,8 +5521,8 @@ except:
                 input("Press Enter to continue...")
                 return
             
-            # Construct SSH command to get logs
-            ssh_cmd = f"ssh {user}@{host} 'sudo journalctl -u edge_node -n {lines_count} --no-pager'"
+            # Construct SSH command to get logs using the deployed get_logs script
+            ssh_cmd = f"ssh {user}@{host} 'get_logs -n {lines_count}'"
             
             # Handle SSH key vs password authentication
             if 'ansible_ssh_pass' in node_config:
@@ -6193,6 +6199,10 @@ except:
         
         # Use the same deployment status workflow - get real-time status
         node_status_data = self._get_real_time_node_status()
+
+        # Update persistent status information for each node
+        for node_name, status_data in node_status_data.items():
+            self._update_node_status(node_name, status_data['status'])
 
         # Clear and display beautiful status
         print("\033[2J\033[H", end="")
