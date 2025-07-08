@@ -161,6 +161,8 @@ class R1Setup:
 
     def _load_active_config(self) -> None:
         """Load the active configuration settings"""
+        self.print_debug(f"Loading active config from: {self.active_config_file}")
+        
         self.active_config = {
             'config_name': None,
             'environment': None,
@@ -176,7 +178,10 @@ class R1Setup:
         if self.active_config_file.exists():
             try:
                 with open(self.active_config_file) as f:
-                    self.active_config.update(json.load(f))
+                    loaded_config = json.load(f)
+                    self.print_debug(f"Loaded active config from file: {loaded_config}")
+                    self.active_config.update(loaded_config)
+                    self.print_debug(f"Final active config after update: {self.active_config}")
                 
                 # Ensure network environment is synchronized after loading active config
                 env = self.active_config.get('environment')
@@ -185,14 +190,21 @@ class R1Setup:
                     self.print_debug(f"Network environment synchronized after loading active config: {env}")
             except Exception as e:
                 self.print_colored(f"Warning: Could not load active config: {e}", 'yellow')
+                self.print_debug(f"Exception loading active config: {e}")
+        else:
+            self.print_debug(f"Active config file does not exist: {self.active_config_file}")
 
     def _save_active_config(self) -> None:
         """Save the active configuration settings"""
         try:
+            self.print_debug(f"Saving active config to: {self.active_config_file}")
+            self.print_debug(f"Active config being saved: {self.active_config}")
             with open(self.active_config_file, 'w') as f:
                 json.dump(self.active_config, f, indent=2)
+            self.print_debug(f"Successfully saved active config")
         except Exception as e:
             self.print_colored(f"Error saving active config: {e}", 'red')
+            self.print_debug(f"Exception saving active config: {e}")
 
     def _generate_config_name(self, nodes_count: int, custom_name: str = None) -> str:
         """Generate a configuration name with user input, timestamp and metadata"""
@@ -276,19 +288,43 @@ class R1Setup:
 
         os.chmod(config_path, 0o600)
 
-        # Save metadata
-        metadata = {
-            'environment': environment,
-            'nodes_count': nodes_count,
-            'created_at': datetime.now().isoformat(),
-            'config_name': config_name,
-            'description': f"Configuration with {nodes_count} node(s) for {environment} network",
-            'last_deployed_date': None,
-            'last_deployed_network': None,
-            'deployment_status': 'never_deployed',
-            'last_deleted_date': None,
-            'last_deployment_type': None
-        }
+        # Load existing metadata if it exists, otherwise create new
+        if metadata_path.exists():
+            try:
+                with open(metadata_path) as f:
+                    metadata = json.load(f)
+                
+                # Update specific fields
+                metadata['environment'] = environment
+                metadata['nodes_count'] = nodes_count
+            except (json.JSONDecodeError, IOError):
+                # If file is corrupted or unreadable, create a new one
+                metadata = {}
+        else:
+            metadata = {}
+
+        # Fill in any missing metadata fields
+        if 'created_at' not in metadata:
+            metadata['created_at'] = datetime.now().isoformat()
+        if 'config_name' not in metadata:
+            metadata['config_name'] = config_name
+        if 'description' not in metadata:
+            metadata['description'] = f"Configuration with {nodes_count} node(s) for {environment} network"
+        if 'last_deployed_date' not in metadata:
+            metadata['last_deployed_date'] = None
+        if 'last_deployed_network' not in metadata:
+            metadata['last_deployed_network'] = None
+        if 'deployment_status' not in metadata:
+            metadata['deployment_status'] = 'never_deployed'
+        if 'last_deleted_date' not in metadata:
+            metadata['last_deleted_date'] = None
+        if 'last_deployment_type' not in metadata:
+            metadata['last_deployment_type'] = None
+        
+        # Always update these fields
+        metadata['environment'] = environment
+        metadata['nodes_count'] = nodes_count
+
 
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
@@ -687,6 +723,9 @@ class R1Setup:
 
     def show_main_menu(self) -> None:
         """Display the main menu"""
+        # Reload active config to ensure deployment status is current
+        self._load_active_config()
+        
         self.print_header("Ratio1 Multi-Node Launcher Setup")
 
         # Show current status
@@ -1396,6 +1435,9 @@ class R1Setup:
     def deployment_menu(self) -> None:
         """Show deployment submenu"""
         while True:
+            # Reload active config to ensure deployment status is current
+            self._load_active_config()
+            
             self.print_header("Deployment Menu")
 
             # Show deployment status overview
@@ -4734,6 +4776,9 @@ except:
             input("Press Enter to continue...")
             return
 
+        # Reload active config to ensure deployment status is current
+        self._load_active_config()
+        
         self.print_header("Deployment Status")
         
         # Load configuration
@@ -6043,7 +6088,6 @@ except:
         input("Press Enter to continue...")
 
 
-    
 if __name__ == "__main__":
     r1setup = R1Setup()
     r1setup.run()
