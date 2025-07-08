@@ -70,7 +70,7 @@
     msg: "Docker access test {{ 'passed' if docker_test_result.rc == 0 else 'failed' }}. Group membership {{ 'active' if docker_test_result.rc == 0 else 'may require logout/login or reboot' }}"
   when: docker_test_result is defined
 
-`
+
 - name: "Remove old service for legacy systems"
   ansible.builtin.file:
     path: /etc/systemd/system/edge_node_service.service
