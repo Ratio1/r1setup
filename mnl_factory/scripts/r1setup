@@ -5741,101 +5741,45 @@ except:
         # Clear screen and show loading
         print("\033[2J\033[H", end="")
         self.print_header("Container Status")
-        self.print_colored("🔍 Checking container status...", 'cyan')
+        self.print_colored("🔍 Checking container status (max 30s timeout)...", 'cyan')
         
-        # Run service status playbook silently
-        playbook_path = self.config_dir / 'playbooks/service_status.yml'
-        if not playbook_path.exists():
-            self.print_colored(f"❌ Service status playbook not found: {playbook_path}", 'red')
-            input("Press Enter to continue...")
-            return
-
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} {playbook_path}")
-
-        success, output = self.run_command(cmd, show_output=False)
-        
-        # Process results for container status
-        node_status_data = {}
-        
-        if success:
-            # Parse the output for service status information
-            lines = output.split('\n')
-            current_host = None
-            
-            for line in lines:
-                line = line.strip()
-                
-                # Track current host being processed
-                if line.startswith('PLAY ['):
-                    continue
-                elif line.startswith('TASK ['):
-                    continue
-                elif ' | ' in line and ('SUCCESS' in line or 'FAILED' in line or 'UNREACHABLE' in line):
-                    # Extract hostname and result
-                    parts = line.split(' | ')
-                    if len(parts) >= 2:
-                        hostname = parts[0].strip()
-                        current_host = hostname
-                        result = parts[1].strip()
-                        
-                        if hostname in hosts:
-                            if 'UNREACHABLE' in result:
-                                node_status_data[hostname] = {
-                                    'status': 'unreachable',
-                                    'result': 'Node unreachable'
-                                }
-                
-                # Look for debug output with container status
-                if 'Container Status:' in line:
-                    if current_host and current_host in hosts:
-                        if 'RUNNING' in line:
-                            node_status_data[current_host] = {
-                                'status': 'running',
-                                'result': 'Container is running'
-                            }
-                        elif 'NOT RUNNING' in line:
-                            node_status_data[current_host] = {
-                                'status': 'stopped',
-                                'result': 'Container is not running'
-                            }
-                
-                # Also check for service status
-                if 'Service Status:' in line:
-                    if current_host and current_host in hosts:
-                        if 'ACTIVE' in line:
-                            # If we haven't set container status yet, use service status
-                            if current_host not in node_status_data:
-                                node_status_data[current_host] = {
-                                    'status': 'running',
-                                    'result': 'Service is active'
-                                }
-                        elif 'INACTIVE' in line or 'FAILED' in line:
-                            if current_host not in node_status_data:
-                                node_status_data[current_host] = {
-                                    'status': 'stopped',
-                                    'result': 'Service is inactive'
-                                }
-                        elif 'NOT FOUND' in line:
-                            if current_host not in node_status_data:
-                                node_status_data[current_host] = {
-                                    'status': 'not_deployed',
-                                    'result': 'Service not found'
-                                }
-        
-        # Fill in any missing hosts
-        for hostname in hosts.keys():
-            if hostname not in node_status_data:
-                node_status_data[hostname] = {
-                    'status': 'unknown',
-                    'result': 'Unable to determine status'
-                }
+        # Use the same deployment status workflow - get real-time status
+        node_status_data = self._get_real_time_node_status()
 
         # Clear and display beautiful status
         print("\033[2J\033[H", end="")
         self.print_header("Container Status")
+        
+        # Show deployment status overview (like deployment menu does)
+        self._load_active_config()
+        deployment_status = self.active_config.get('deployment_status', 'never_deployed')
+        last_deployed_date = self.active_config.get('last_deployed_date')
+        last_deployed_network = self.active_config.get('last_deployed_network')
+        last_deployment_type = self.active_config.get('last_deployment_type')
+        last_deleted_date = self.active_config.get('last_deleted_date')
+        
+        # Overall deployment status
+        if deployment_status == 'deployed' and last_deployed_date:
+            try:
+                deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
+                deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
+                deployment_text = f"🚀 Last deployed: {deployed_str}"
+                if last_deployed_network:
+                    deployment_text += f" ({last_deployed_network})"
+                self.print_colored(f"Deployment: {deployment_text}", 'green')
+            except:
+                self.print_colored("Deployment: ✓ Deployed", 'green')
+        elif deployment_status == 'deleted' and last_deleted_date:
+            try:
+                deleted_dt = datetime.fromisoformat(last_deleted_date.replace('Z', '+00:00'))
+                deleted_str = deleted_dt.strftime('%Y-%m-%d %H:%M')
+                deployment_text = f"🗑️ Last deleted: {deleted_str}"
+                self.print_colored(f"Deployment: {deployment_text}", 'red')
+            except:
+                self.print_colored("Deployment: ✓ Deleted", 'red')
+        else:
+            self.print_colored("Deployment: ✗ Never deployed", 'yellow')
+        print()
         
         # Network info
         env_color = 'green' if env else 'red'
