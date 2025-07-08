@@ -801,16 +801,15 @@ class R1Setup:
         self.print_colored("  3) Start Service          - Start the Edge Node service")
         self.print_colored("  4) Stop Service           - Stop the Edge Node service")
         self.print_colored("  5) Restart Service        - Restart the Edge Node service")
-        self.print_colored("  6) Check Status           - Check service status")
         print()
         self.print_colored("📊 MONITORING & INFO", 'cyan', bold=True)
-        self.print_colored("  7) Node Status & Information - Get latest info and show detailed status")
-        self.print_colored("  8) Get Node Addresses       - Display node blockchain addresses")
-        self.print_colored("  9) Export to CSV            - Export node data to CSV file")
-        self.print_colored(" 10) Test Connectivity        - Verify connection to configured nodes")
+        self.print_colored("  6) Node Status & Information - Get latest info and show detailed status")
+        self.print_colored("  7) Get Node Addresses       - Display node blockchain addresses")
+        self.print_colored("  8) Export to CSV            - Export node data to CSV file")
+        self.print_colored("  9) Test Connectivity        - Verify connection to configured nodes")
         print()
         self.print_colored("🛠️ UTILITIES", 'cyan', bold=True)
-        self.print_colored(" 11) Utilities Menu        - Advanced utilities and tools")
+        self.print_colored(" 10) Utilities Menu        - Advanced utilities and tools")
         print()
         self.print_colored("  0) Exit")
         print()
@@ -2580,12 +2579,13 @@ class R1Setup:
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
                f"ansible-playbook -i {self.config_file} {playbook_path}")
 
-        success, _ = self.run_command(cmd, show_output=True)
+        success, _ = self.run_command(cmd, show_output=True, timeout=30)
 
         if success:
             self.print_colored("\nNode information retrieved successfully!", 'green')
         else:
             self.print_colored("\nFailed to retrieve node information.", 'red')
+            self.print_colored("This may be due to nodes being offline or network issues.", 'yellow')
 
         input("Press Enter to continue...")
 
@@ -2608,7 +2608,7 @@ class R1Setup:
         globals()['DEBUG'] = True
         
         # Always capture output for parsing, but show it if debug is enabled
-        success, output = self.run_command(cmd, show_output=False)
+        success, output = self.run_command(cmd, show_output=False, timeout=60)
         
         # Show output if debug was originally enabled
         if original_debug:
@@ -2622,7 +2622,11 @@ class R1Setup:
             self.print_debug("=== END ANSIBLE OUTPUT ===")
             
         if not success:
-            self.print_colored("Failed to run node info playbook", 'red')
+            if "timed out" in output.lower():
+                self.print_colored("Node info retrieval timed out after 60 seconds", 'red')
+                self.print_colored("Some nodes may be offline or not responding", 'yellow')
+            else:
+                self.print_colored("Failed to run node info playbook", 'red')
             return {}
 
         # Debug: show first few lines of output
@@ -3312,9 +3316,7 @@ class R1Setup:
         """Restart Edge Node on all configured nodes"""
         self._manage_service("service_restart.yml", "Restart Edge Node", "🔄 Restarting Edge Node")
 
-    def check_service_status(self) -> None:
-        """Check Edge Node status on all configured nodes"""
-        self._manage_service("service_status.yml", "Check Service Status", "📊 Checking Edge Node status")
+
 
     def view_node_statuses(self) -> None:
         """View current node statuses with last update information"""
@@ -4825,16 +4827,14 @@ except:
                 elif choice == '5':
                     self.restart_edge_node_service()
                 elif choice == '6':
-                    self.check_service_status()
-                elif choice == '7':
                     self.combined_node_status_and_info()
-                elif choice == '8':
+                elif choice == '7':
                     self.get_node_addresses()
-                elif choice == '9':
+                elif choice == '8':
                     self.export_addresses_csv()
-                elif choice == '10':
+                elif choice == '9':
                     self.test_connectivity()
-                elif choice == '11':
+                elif choice == '10':
                     self.utilities_menu()
                 else:
                     self.print_colored("Invalid option. Please try again.", 'red')
@@ -5952,7 +5952,7 @@ except:
         print()
 
         # Quick actions
-        self.print_colored("💡 Quick Actions: 3 Start │ 4 Stop │ 5 Restart │ 6 Check Status", 'white')
+        self.print_colored("💡 Quick Actions: 3 Start │ 4 Stop │ 5 Restart", 'white')
 
         input("\nPress Enter to continue...")
 
