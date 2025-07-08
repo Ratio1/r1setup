@@ -2579,15 +2579,160 @@ class R1Setup:
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
                f"ansible-playbook -i {self.config_file} {playbook_path}")
 
-        success, _ = self.run_command(cmd, show_output=True, timeout=30)
+        self.print_colored("Retrieving node information...", 'yellow')
 
-        if success:
-            self.print_colored("\nNode information retrieved successfully!", 'green')
+        success, output = self.run_command(cmd, show_output=False, timeout=60)
+
+        # Check for timeout specifically
+        if not success and "timed out" in output.lower():
+            self.print_colored("Node info retrieval timed out after 60 seconds", 'red')
+            self.print_colored("Some nodes may be offline or not responding", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Parse the output to extract both successful and failed nodes
+        # Note: We parse even if success=False because some nodes might have succeeded
+        node_results = self._parse_node_info_output(output)
+        
+        if not node_results:
+            self.print_colored("No node information could be parsed from the playbook output.", 'yellow')
+            self.print_colored("This might be because the nodes are not running or not accessible.", 'yellow')
         else:
-            self.print_colored("\nFailed to retrieve node information.", 'red')
-            self.print_colored("This may be due to nodes being offline or network issues.", 'yellow')
+            # Display the results in a formatted table
+            self.print_colored(f"\nNode Information Summary:", 'green')
+            self.print_colored(f"{'Node Name':<20} {'Status':<15} {'Address':<48}", 'cyan')
+            self.print_colored("-" * 83, 'cyan')
+            
+            success_count = 0
+            unreachable_count = 0
+            
+            for node_name, result in node_results.items():
+                if result['status'] == 'success':
+                    address = result['data'].get('address', 'N/A')
+                    self.print_colored(f"{node_name:<20} {'SUCCESS':<15} {address:<48}", 'green')
+                    success_count += 1
+                else:
+                    self.print_colored(f"{node_name:<20} {'UNREACHABLE':<15} {'Connection failed':<48}", 'red')
+                    unreachable_count += 1
+            
+            # Show summary
+            if success_count > 0 and unreachable_count > 0:
+                self.print_colored(f"\n✅ {success_count} node(s) retrieved successfully, ❌ {unreachable_count} node(s) unreachable", 'yellow')
+            elif success_count > 0:
+                self.print_colored(f"\n✅ All {success_count} node(s) retrieved successfully", 'green')
+            else:
+                self.print_colored(f"\n❌ All {unreachable_count} node(s) are unreachable", 'red')
 
-        input("Press Enter to continue...")
+        input("\nPress Enter to continue...")
+
+    def _parse_node_info_output(self, output: str) -> Dict[str, Dict[str, Any]]:
+        """Parse node info output to extract both successful and failed nodes"""
+        node_results = {}
+        import re
+        
+        # First, detect unreachable nodes
+        unreachable_pattern = r'fatal: \[([^\]]+)\]: UNREACHABLE!'
+        unreachable_matches = re.findall(unreachable_pattern, output)
+        
+        for node_name in unreachable_matches:
+            node_results[node_name] = {
+                'status': 'unreachable',
+                'data': None
+            }
+            self.print_debug(f"Found unreachable node: {node_name}")
+        
+        # Also check for other unreachable patterns
+        unreachable_pattern2 = r'unreachable: \[([^\]]+)\]'
+        unreachable_matches2 = re.findall(unreachable_pattern2, output)
+        
+        for node_name in unreachable_matches2:
+            if node_name not in node_results:
+                node_results[node_name] = {
+                    'status': 'unreachable',
+                    'data': None
+                }
+                self.print_debug(f"Found unreachable node (pattern2): {node_name}")
+        
+        # Now parse successful nodes (existing logic from _get_node_info_data)
+        result_blocks = re.split(r'(?=ok: \[[^\]]+\] => \{)', output)
+        
+        for block in result_blocks:
+            if not block.strip():
+                continue
+                
+            # Extract node name from the block
+            node_match = re.search(r'ok: \[([^\]]+)\] => \{', block)
+            if not node_match:
+                continue
+                
+            node_name = node_match.group(1)
+            self.print_debug(f"Processing successful node: {node_name}")
+            
+            # Check if this block contains node_info.stdout_lines
+            if '"node_info.stdout_lines":' not in block:
+                self.print_debug(f"No node_info.stdout_lines found for {node_name}")
+                continue
+            
+            try:
+                # Extract the JSON lines from stdout_lines array
+                stdout_start = block.find('"node_info.stdout_lines":')
+                if stdout_start == -1:
+                    continue
+                
+                # Find the opening bracket for the array
+                array_start = block.find('[', stdout_start)
+                if array_start == -1:
+                    continue
+                
+                # Count brackets to find the matching closing bracket
+                bracket_count = 0
+                array_end = array_start
+                for i in range(array_start, len(block)):
+                    if block[i] == '[':
+                        bracket_count += 1
+                    elif block[i] == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            array_end = i
+                            break
+                
+                if bracket_count != 0:
+                    continue
+                
+                # Extract the array content
+                array_content = block[array_start+1:array_end]
+                
+                # Extract all quoted strings from the array content using regex
+                # Pattern to match quoted strings, handling escaped quotes
+                quoted_pattern = r'"([^"\\]*(?:\\.[^"\\]*)*)"'
+                quoted_matches = re.findall(quoted_pattern, array_content)
+                
+                # Reconstruct the JSON string
+                json_str = ''
+                for line in quoted_matches:
+                    # Unescape the quotes and add to JSON string
+                    unescaped_line = line.replace('\\"', '"')
+                    json_str += unescaped_line + '\n'
+                
+                # Parse the JSON
+                if json_str.strip():
+                    node_data = json.loads(json_str.strip())
+                    node_results[node_name] = {
+                        'status': 'success',
+                        'data': node_data
+                    }
+                    self.print_debug(f"Successfully parsed JSON for {node_name}")
+                    
+            except (json.JSONDecodeError, Exception) as e:
+                self.print_debug(f"Failed to parse JSON for {node_name}: {e}")
+                # If parsing fails, mark as error but don't overwrite unreachable status
+                if node_name not in node_results:
+                    node_results[node_name] = {
+                        'status': 'error',
+                        'data': None
+                    }
+        
+        return node_results
 
     def _get_node_info_data(self) -> Dict[str, Dict[str, Any]]:
         """Get node information data by running the get_node_info playbook and parsing output"""
@@ -2696,12 +2841,14 @@ class R1Setup:
                 array_content = block[array_start+1:array_end]
                 self.print_debug(f"Raw array content for {node_name}: {array_content[:200]}...")
                 
-                # Extract all quoted strings from the array content
-                quoted_lines = re.findall(r'"([^"]*(?:\\"[^"]*)*)"', array_content)
+                # Extract all quoted strings from the array content using regex
+                # Pattern to match quoted strings, handling escaped quotes
+                quoted_pattern = r'"([^"\\]*(?:\\.[^"\\]*)*)"'
+                quoted_matches = re.findall(quoted_pattern, array_content)
                 
                 # Reconstruct the JSON string
                 json_str = ''
-                for line in quoted_lines:
+                for line in quoted_matches:
                     # Unescape the quotes and add to JSON string
                     unescaped_line = line.replace('\\"', '"')
                     json_str += unescaped_line + '\n'
@@ -2819,29 +2966,61 @@ class R1Setup:
 
         self.print_header("Node Addresses")
 
-        # Get node information using the same playbook as option 9
-        node_info = self._get_node_info_data()
-        
-        if not node_info:
-            self.print_colored("Failed to retrieve node information!", 'red')
+        playbook_path = self.config_dir / 'playbooks/get_node_info.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"Node info playbook not found: {playbook_path}", 'red')
             input("Press Enter to continue...")
             return
 
-        # Display the addresses in a formatted table
-        self.print_colored(f"\nFound information for {len(node_info)} node(s):", 'green')
-        self.print_colored(f"{'Node Alias':<20} {'Address':<48} {'ETH Address':<42}", 'cyan')
-        self.print_colored("-" * 110, 'cyan')
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+
+        self.print_colored("Retrieving node addresses...", 'yellow')
+
+        success, output = self.run_command(cmd, show_output=False, timeout=60)
+
+        # Check for timeout specifically
+        if not success and "timed out" in output.lower():
+            self.print_colored("Node address retrieval timed out after 60 seconds", 'red')
+            self.print_colored("Some nodes may be offline or not responding", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Parse the output to extract both successful and failed nodes
+        # Note: We parse even if success=False because some nodes might have succeeded
+        node_results = self._parse_node_info_output(output)
         
-        for node_name, info in node_info.items():
-            alias = info.get('alias', node_name)
-            address = info.get('address', 'N/A')
-            eth_address = info.get('eth_address', 'N/A')
-            
-            self.print_colored(f"{alias:<20} {address:<48} {eth_address:<42}")
-        
-        if len(node_info) == 0:
+        if not node_results:
             self.print_colored("No node information could be parsed from the playbook output.", 'yellow')
             self.print_colored("This might be because the nodes are not running or not accessible.", 'yellow')
+        else:
+            # Display the addresses in a formatted table
+            self.print_colored(f"\nNode Addresses Summary:", 'green')
+            self.print_colored(f"{'Node Name':<20} {'Status':<15} {'Address':<48} {'ETH Address':<42}", 'cyan')
+            self.print_colored("-" * 125, 'cyan')
+            
+            success_count = 0
+            unreachable_count = 0
+            
+            for node_name, result in node_results.items():
+                if result['status'] == 'success':
+                    address = result['data'].get('address', 'N/A')
+                    eth_address = result['data'].get('eth_address', 'N/A')
+                    self.print_colored(f"{node_name:<20} {'SUCCESS':<15} {address:<48} {eth_address:<42}", 'green')
+                    success_count += 1
+                else:
+                    self.print_colored(f"{node_name:<20} {'UNREACHABLE':<15} {'Connection failed':<48} {'N/A':<42}", 'red')
+                    unreachable_count += 1
+            
+            # Show summary
+            if success_count > 0 and unreachable_count > 0:
+                self.print_colored(f"\n✅ {success_count} node(s) retrieved successfully, ❌ {unreachable_count} node(s) unreachable", 'yellow')
+            elif success_count > 0:
+                self.print_colored(f"\n✅ All {success_count} node(s) retrieved successfully", 'green')
+            else:
+                self.print_colored(f"\n❌ All {unreachable_count} node(s) are unreachable", 'red')
 
         input("\nPress Enter to continue...")
 
@@ -2854,31 +3033,55 @@ class R1Setup:
 
         self.print_header("Export Addresses to CSV")
 
-        # Get node information using the same playbook as option 9
-        node_info = self._get_node_info_data()
-        
-        if not node_info:
-            self.print_colored("Failed to retrieve node information!", 'red')
+        playbook_path = self.config_dir / 'playbooks/get_node_info.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"Node info playbook not found: {playbook_path}", 'red')
             input("Press Enter to continue...")
             return
 
-        self.print_colored(f"Found information for {len(node_info)} node(s)", 'green')
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+
+        self.print_colored("Retrieving node information for CSV export...", 'yellow')
+
+        success, output = self.run_command(cmd, show_output=False, timeout=60)
+
+        # Check for timeout specifically
+        if not success and "timed out" in output.lower():
+            self.print_colored("Node info retrieval timed out after 60 seconds", 'red')
+            self.print_colored("Some nodes may be offline or not responding", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Parse the output to extract both successful and failed nodes
+        # Note: We parse even if success=False because some nodes might have succeeded
+        node_results = self._parse_node_info_output(output)
+        
+        if not node_results:
+            self.print_colored("No node information could be parsed from the playbook output.", 'yellow')
+            self.print_colored("This might be because the nodes are not running or not accessible.", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Count successful and failed nodes
+        success_count = sum(1 for result in node_results.values() if result['status'] == 'success')
+        unreachable_count = sum(1 for result in node_results.values() if result['status'] == 'unreachable')
+        
+        self.print_colored(f"Found information for {len(node_results)} node(s) (✅ {success_count} successful, ❌ {unreachable_count} unreachable)", 'green')
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         csv_file = f"node_addresses_{timestamp}.csv"
 
         try:
             with open(csv_file, 'w') as f:
-                f.write("Node_Alias,Address,ETH_Address,SSH_Host,SSH_User\n")
+                f.write("Node_Name,Status,Address,ETH_Address,SSH_Host,SSH_User\n")
                 
                 # Load configuration to get SSH details
                 self.load_configuration()
                 hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
                 
-                for node_name, info in node_info.items():
-                    alias = info.get('alias', node_name)
-                    address = info.get('address', 'N/A')
-                    eth_address = info.get('eth_address', 'N/A')
-                    
+                for node_name, result in node_results.items():
                     # Get SSH info from configuration
                     ssh_host = 'N/A'
                     ssh_user = 'N/A'
@@ -2886,10 +3089,19 @@ class R1Setup:
                         ssh_host = hosts[node_name].get('ansible_host', 'N/A')
                         ssh_user = hosts[node_name].get('ansible_user', 'N/A')
                     
-                    f.write(f'"{alias}","{address}","{eth_address}","{ssh_host}","{ssh_user}"\n')
+                    if result['status'] == 'success':
+                        info = result['data']
+                        alias = info.get('alias', node_name)
+                        address = info.get('address', 'N/A')
+                        eth_address = info.get('eth_address', 'N/A')
+                        f.write(f'"{node_name}","SUCCESS","{address}","{eth_address}","{ssh_host}","{ssh_user}"\n')
+                    else:
+                        f.write(f'"{node_name}","UNREACHABLE","N/A","N/A","{ssh_host}","{ssh_user}"\n')
 
             self.print_colored(f"Addresses exported to: {csv_file}", 'green')
-            self.print_colored(f"CSV contains: Node Alias, Blockchain Address, ETH Address, SSH Host, SSH User", 'cyan')
+            self.print_colored(f"CSV contains: Node Name, Status, Blockchain Address, ETH Address, SSH Host, SSH User", 'cyan')
+            if success_count > 0 and unreachable_count > 0:
+                self.print_colored(f"Note: {success_count} nodes have valid addresses, {unreachable_count} nodes are marked as unreachable", 'yellow')
         except Exception as e:
             self.print_colored(f"Error exporting to CSV: {e}", 'red')
 
