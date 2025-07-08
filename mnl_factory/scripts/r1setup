@@ -844,6 +844,7 @@ class R1Setup:
             self.print_colored("  2) Manage Configurations  - Switch, backup, restore configurations")
             self.print_colored("  3) View Configuration     - Display current configuration")
             self.print_colored("  4) Switch Environment     - Change network environment (mainnet/testnet/devnet)")
+            print()
             self.print_colored("  0) Back to Main Menu")
             print()
 
@@ -956,6 +957,7 @@ class R1Setup:
                 self.print_colored("  4) Rename Configuration          - Change configuration name")
                 self.print_colored("  5) Backup Configuration          - Save configuration backup")
                 self.print_colored("  6) Restore Configuration         - Restore from backup")
+            print()
             self.print_colored("  0) Back to Main Menu")
             print()
 
@@ -1409,6 +1411,7 @@ class R1Setup:
                 self.print_colored("  2) Edit Existing Node             - Modify node settings")
                 self.print_colored("  3) Remove Node                    - Delete node from config")
                 self.print_colored("  4) Create New Configuration       - Start fresh configuration")
+            print()
             self.print_colored("  0) Back to Main Menu")
             print()
 
@@ -1475,6 +1478,7 @@ class R1Setup:
             self.print_colored("  2) Deploy Docker Only     - Deploy Edge Node without GPU")
             self.print_colored("  3) Delete Deployment      - Remove deployed Edge Node")
             self.print_colored("  4) Deployment Status      - Check detailed deployment status")
+            print()
             self.print_colored("  0) Back to Main Menu")
             print()
 
@@ -1514,6 +1518,7 @@ class R1Setup:
             self.print_colored("  1) SSH to Node           - Connect to node via SSH")
             self.print_colored("  2) Get Logs              - Stream logs from nodes")
             self.print_colored("  3) Write Logs to File    - Save node logs to local file")
+            print()
             self.print_colored("  0) Back to Main Menu")
             print()
 
@@ -5101,6 +5106,7 @@ except:
             self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
             self.print_colored("  1) Select an existing configuration to activate")
             self.print_colored("  2) Create a new configuration")
+            print()
             self.print_colored("  0) Exit")
 
             while True:
@@ -5144,6 +5150,7 @@ except:
 
             self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
             self.print_colored("  1) Create your first configuration")
+            print()
             self.print_colored("  0) Exit")
 
             while True:
