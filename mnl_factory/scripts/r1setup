@@ -666,19 +666,19 @@ class R1Setup:
                     host_config['last_status_update'] = timestamp
                     needs_update = True
                 
-                if 'last_status_check' not in host_config:
-                    host_config['last_status_check'] = timestamp
+                # Remove legacy last_status_check field if it exists
+                if 'last_status_check' in host_config:
+                    del host_config['last_status_check']
                     needs_update = True
                 
                 if needs_update:
                     updated = True
                     self.print_debug(f"Initialized missing status fields for node: {host_name}")
-                    self.print_debug(f"  status={host_config.get('node_status')}, update={host_config.get('last_status_update')}, check={host_config.get('last_status_check')}")
+                    self.print_debug(f"  status={host_config.get('node_status')}, update={host_config.get('last_status_update')}")
                 else:
                     current_status = host_config.get('node_status', 'unknown')
                     current_update = host_config.get('last_status_update', 'none')
-                    current_check = host_config.get('last_status_check', 'none')
-                    self.print_debug(f"Node {host_name} has all status fields: status={current_status}, update={current_update}, check={current_check}")
+                    self.print_debug(f"Node {host_name} has all status fields: status={current_status}, update={current_update}")
             
             # Save configuration if we updated any status fields
             if updated:
@@ -1752,13 +1752,11 @@ class R1Setup:
                 # Preserve existing status unless it's being updated
                 host['node_status'] = existing_config.get('node_status', 'unknown')
                 host['last_status_update'] = existing_config.get('last_status_update', datetime.now().isoformat())
-                host['last_status_check'] = existing_config.get('last_status_check', datetime.now().isoformat())
             else:
                 # New node - set initial status
                 timestamp = datetime.now().isoformat()
                 host['node_status'] = 'never_deployed'
                 host['last_status_update'] = timestamp
-                host['last_status_check'] = timestamp
 
             # Show summary and confirm
             self.print_colored("\nConfiguration Summary:", 'yellow')
@@ -1802,13 +1800,13 @@ class R1Setup:
         """Update the last checked timestamp for a node without changing status"""
         hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
         if node_name in hosts:
-            old_check = hosts[node_name].get('last_status_check', 'never')
-            new_check = datetime.now().isoformat()
+            old_update = hosts[node_name].get('last_status_update', 'never')
+            new_update = datetime.now().isoformat()
             
-            hosts[node_name]['last_status_check'] = new_check
+            hosts[node_name]['last_status_update'] = new_update
             self._save_configuration()
             
-            self.print_debug(f"Updated {node_name} last check timestamp: {old_check} → {new_check}")
+            self.print_debug(f"Updated {node_name} last update timestamp: {old_update} → {new_update}")
 
     def _get_node_status_info(self, node_name: str) -> Dict[str, str]:
         """Get status information for a node"""
@@ -1816,11 +1814,10 @@ class R1Setup:
         if node_name in hosts:
             status = hosts[node_name].get('node_status', 'unknown')
             last_update = hosts[node_name].get('last_status_update', '')
-            last_check = hosts[node_name].get('last_status_check', '')
-            self.print_debug(f"Retrieved {node_name} status: {status} (updated: {last_update}, checked: {last_check})")
-            return {'status': status, 'last_update': last_update, 'last_check': last_check}
+            self.print_debug(f"Retrieved {node_name} status: {status} (updated: {last_update})")
+            return {'status': status, 'last_update': last_update}
         self.print_debug(f"Node {node_name} not found in hosts configuration")
-        return {'status': 'unknown', 'last_update': '', 'last_check': ''}
+        return {'status': 'unknown', 'last_update': ''}
 
     def _get_real_time_node_status(self) -> Dict[str, Dict[str, str]]:
         """Get real-time status for all nodes by running the service status playbook"""
@@ -1886,7 +1883,7 @@ class R1Setup:
                     self.print_debug(f"Found task result for host: {current_host}")
                     continue
                 
-                # Handle unreachable nodes
+                # Handle unreachable nodes - both patterns
                 if 'unreachable:' in line and '[' in line and ']' in line:
                     unreachable_match = re.search(r'unreachable: \[([^\]]+)\]', line)
                     if unreachable_match:
@@ -1896,6 +1893,18 @@ class R1Setup:
                             'result': 'Node unreachable'
                         }
                         self.print_debug(f"Set {hostname} to unreachable")
+                        continue
+                
+                # Handle fatal unreachable nodes (ansible format: fatal: [hostname]: UNREACHABLE!)
+                if 'fatal:' in line and 'UNREACHABLE!' in line and '[' in line and ']' in line:
+                    fatal_match = re.search(r'fatal: \[([^\]]+)\]: UNREACHABLE!', line)
+                    if fatal_match:
+                        hostname = fatal_match.group(1)
+                        node_status_data[hostname] = {
+                            'status': 'unreachable',
+                            'result': 'Node unreachable - connection failed'
+                        }
+                        self.print_debug(f"Set {hostname} to unreachable (fatal)")
                         continue
                 
                 # Look for the structured message output from the playbook
@@ -2269,7 +2278,7 @@ class R1Setup:
                 
                 for key, value in config.items():
                     # Skip displaying status fields in the config details
-                    if key in ['node_status', 'last_status_update', 'last_status_check']:
+                    if key in ['node_status', 'last_status_update']:
                         continue
                     if any(k in key.lower() for k in ["password", "key"]):
                         value = "********"
@@ -2938,11 +2947,11 @@ class R1Setup:
             for name in hosts.keys():
                 status_info = self._get_node_status_info(name)
                 status = status_info['status']
-                last_check = status_info['last_check']
+                last_update = status_info['last_update']
                 emoji, color, description = self._get_status_display_info(status)
-                last_check_str = self._format_timestamp_ago(last_check)
+                last_update_str = self._format_timestamp_ago(last_update)
                 self.print_colored(f"   • {name}: {emoji} {description}", color, end='')
-                self.print_colored(f" (Last check: {last_check_str})", 'white')
+                self.print_colored(f" (Last updated: {last_update_str})", 'white')
                 
         else:
             self.print_colored("❌ Service status check failed. Please check network connectivity and node access.", 'red')
@@ -3094,12 +3103,12 @@ class R1Setup:
             auth_type = "Password" if 'ansible_ssh_pass' in config else "SSH Key"
             status_info = self._get_node_status_info(name)
             status = status_info['status']
-            last_check = status_info['last_check']
+            last_update = status_info['last_update']
             emoji, color, description = self._get_status_display_info(status)
-            last_check_str = self._format_timestamp_ago(last_check)
+            last_update_str = self._format_timestamp_ago(last_update)
             self.print_colored(f"   • {name}: {user}@{ip} ", 'white', end='')
             self.print_colored(f"[{emoji} {description}]", color, end='')
-            self.print_colored(f" ({auth_type}) (Last check: {last_check_str})", 'white')
+            self.print_colored(f" ({auth_type}) (Last updated: {last_update_str})", 'white')
 
         self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
         self.print_colored("   • Connect you directly to the selected node via SSH", 'yellow')
