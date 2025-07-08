@@ -21,7 +21,7 @@
       debug:
         msg: |
           ❌ ERROR: Service '{{ edge_node_service_name }}' not found on {{ inventory_hostname }}
-          This usually means the edge node has not been deployed yet.
+          This usually means the Edge Node has not been deployed yet.
           Please run deployment first before restarting services.
       when: service_exists is failed
 
@@ -58,14 +58,14 @@
           {{ pre_restart_logs.stdout }}
       when: service_exists is not failed and pre_restart_logs.stdout is defined
 
-    - name: Enable the edge node service (ensure it's enabled)
+    - name: Enable the Edge Node service (ensure it's enabled)
       ansible.builtin.systemd:
         name: "{{ edge_node_service_name }}"
         enabled: true
         daemon_reload: true
       when: service_exists is not failed
 
-    - name: Restart the edge node service
+    - name: Restart the Edge Node service
       ansible.builtin.systemd:
         name: "{{ edge_node_service_name }}"
         state: restarted
@@ -91,7 +91,7 @@
     - name: Display restart success
       debug:
         msg: |
-          ✅ SUCCESS: Edge node service restarted on {{ inventory_hostname }}
+          ✅ SUCCESS: Edge Node service restarted on {{ inventory_hostname }}
           Service: {{ edge_node_service_name }}
           Status: {{ service_status.status.ActiveState | default('unknown') }}
           Auto-start: Enabled
@@ -124,7 +124,7 @@
       debug:
         msg: |
           🔄 RESTART COMPLETED: Node {{ inventory_hostname }}
-          • The edge node service has been restarted
+          • The Edge Node service has been restarted
           • Service should now be running with fresh configuration
           • Monitor logs to ensure stable operation
           • Node is back online and participating in the network

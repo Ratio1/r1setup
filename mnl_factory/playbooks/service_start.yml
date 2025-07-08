@@ -21,7 +21,7 @@
       debug:
         msg: |
           ❌ ERROR: Service '{{ edge_node_service_name }}' not found on {{ inventory_hostname }}
-          This usually means the edge node has not been deployed yet.
+          This usually means the Edge Node has not been deployed yet.
           Please run deployment first before starting services.
       when: service_exists is failed
 
@@ -30,14 +30,14 @@
         msg: "Service {{ edge_node_service_name }} not found on {{ inventory_hostname }}"
       when: service_exists is failed
 
-    - name: Enable the edge node service
+    - name: Enable the Edge Node service
       ansible.builtin.systemd:
         name: "{{ edge_node_service_name }}"
         enabled: true
         daemon_reload: true
       when: service_exists is not failed
 
-    - name: Start the edge node service
+    - name: Start the Edge Node service
       ansible.builtin.systemd:
         name: "{{ edge_node_service_name }}"
         state: started
@@ -63,7 +63,7 @@
     - name: Display startup success
       debug:
         msg: |
-          ✅ SUCCESS: Edge node service started on {{ inventory_hostname }}
+          ✅ SUCCESS: Edge Node service started on {{ inventory_hostname }}
           Service: {{ edge_node_service_name }}
           Status: {{ service_status.status.ActiveState | default('unknown') }}
           Container: {{ 'Running' if (container_check is succeeded and mnl_docker_container_name in container_check.stdout) else 'Not running' }}

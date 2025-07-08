@@ -161,6 +161,8 @@ class R1Setup:
 
     def _load_active_config(self) -> None:
         """Load the active configuration settings"""
+        self.print_debug(f"Loading active config from: {self.active_config_file}")
+        
         self.active_config = {
             'config_name': None,
             'environment': None,
@@ -176,17 +178,33 @@ class R1Setup:
         if self.active_config_file.exists():
             try:
                 with open(self.active_config_file) as f:
-                    self.active_config.update(json.load(f))
+                    loaded_config = json.load(f)
+                    self.print_debug(f"Loaded active config from file: {loaded_config}")
+                    self.active_config.update(loaded_config)
+                    self.print_debug(f"Final active config after update: {self.active_config}")
+                
+                # Ensure network environment is synchronized after loading active config
+                env = self.active_config.get('environment')
+                if env:
+                    self.set_mnl_app_env(env)
+                    self.print_debug(f"Network environment synchronized after loading active config: {env}")
             except Exception as e:
                 self.print_colored(f"Warning: Could not load active config: {e}", 'yellow')
+                self.print_debug(f"Exception loading active config: {e}")
+        else:
+            self.print_debug(f"Active config file does not exist: {self.active_config_file}")
 
     def _save_active_config(self) -> None:
         """Save the active configuration settings"""
         try:
+            self.print_debug(f"Saving active config to: {self.active_config_file}")
+            self.print_debug(f"Active config being saved: {self.active_config}")
             with open(self.active_config_file, 'w') as f:
                 json.dump(self.active_config, f, indent=2)
+            self.print_debug(f"Successfully saved active config")
         except Exception as e:
             self.print_colored(f"Error saving active config: {e}", 'red')
+            self.print_debug(f"Exception saving active config: {e}")
 
     def _generate_config_name(self, nodes_count: int, custom_name: str = None) -> str:
         """Generate a configuration name with user input, timestamp and metadata"""
@@ -252,7 +270,7 @@ class R1Setup:
         configs.sort(key=lambda x: x[1]['created_at'], reverse=True)
         return configs
 
-    def _save_config_with_metadata(self, config_name: str, environment: str, nodes_count: int) -> None:
+    def _save_config_with_metadata(self, config_name: str, environment: str, nodes_count: int, update_symlink: bool = True) -> None:
         """Save configuration with metadata"""
         config_path = self.configs_dir / f"{config_name}.yml"
         metadata_path = self.configs_dir / f"{config_name}.json"
@@ -270,19 +288,43 @@ class R1Setup:
 
         os.chmod(config_path, 0o600)
 
-        # Save metadata
-        metadata = {
-            'environment': environment,
-            'nodes_count': nodes_count,
-            'created_at': datetime.now().isoformat(),
-            'config_name': config_name,
-            'description': f"Configuration with {nodes_count} node(s) for {environment} network",
-            'last_deployed_date': None,
-            'last_deployed_network': None,
-            'deployment_status': 'never_deployed',
-            'last_deleted_date': None,
-            'last_deployment_type': None
-        }
+        # Load existing metadata if it exists, otherwise create new
+        if metadata_path.exists():
+            try:
+                with open(metadata_path) as f:
+                    metadata = json.load(f)
+                
+                # Update specific fields
+                metadata['environment'] = environment
+                metadata['nodes_count'] = nodes_count
+            except (json.JSONDecodeError, IOError):
+                # If file is corrupted or unreadable, create a new one
+                metadata = {}
+        else:
+            metadata = {}
+
+        # Fill in any missing metadata fields
+        if 'created_at' not in metadata:
+            metadata['created_at'] = datetime.now().isoformat()
+        if 'config_name' not in metadata:
+            metadata['config_name'] = config_name
+        if 'description' not in metadata:
+            metadata['description'] = f"Configuration with {nodes_count} node(s) for {environment} network"
+        if 'last_deployed_date' not in metadata:
+            metadata['last_deployed_date'] = None
+        if 'last_deployed_network' not in metadata:
+            metadata['last_deployed_network'] = None
+        if 'deployment_status' not in metadata:
+            metadata['deployment_status'] = 'never_deployed'
+        if 'last_deleted_date' not in metadata:
+            metadata['last_deleted_date'] = None
+        if 'last_deployment_type' not in metadata:
+            metadata['last_deployment_type'] = None
+        
+        # Always update these fields
+        metadata['environment'] = environment
+        metadata['nodes_count'] = nodes_count
+
 
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
@@ -291,8 +333,9 @@ class R1Setup:
         self.active_config.update(metadata)
         self._save_active_config()
 
-        # Create/update symlink to active configuration
-        self._update_hosts_symlink(config_path)
+        # Create/update symlink to active configuration only if requested
+        if update_symlink:
+            self._update_hosts_symlink(config_path)
 
     def _update_hosts_symlink(self, config_path: Path) -> None:
         """Update the hosts.yml symlink to point to the active configuration"""
@@ -500,24 +543,53 @@ class R1Setup:
                 self.print_colored("Invalid choice. Please select 1 or 2.", 'red')
                 continue
 
-    def run_command(self, cmd: str, show_output: bool = True, shell: bool = True) -> tuple:
+    def run_command(self, cmd: str, show_output: bool = True, shell: bool = True, timeout: int = None) -> tuple:
         """Run a shell command and return success status and output"""
         try:
             if show_output:
                 self.print_colored(f"Running: {cmd}", 'cyan')
 
-            result = subprocess.run(
-                cmd,
-                shell=shell,
-                capture_output=not show_output,
-                text=True,
-                check=False
-            )
-
-            if show_output:
-                return result.returncode == 0, ""
+            if timeout and not show_output:
+                # Use Popen for timeout cases where we want to capture partial output
+                process = subprocess.Popen(
+                    cmd,
+                    shell=shell,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True
+                )
+                
+                try:
+                    stdout, _ = process.communicate(timeout=timeout)
+                    return process.returncode == 0, stdout
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    # Try to get any partial output
+                    try:
+                        stdout, _ = process.communicate(timeout=5)
+                        self.print_colored(f"Command timed out after {timeout} seconds but captured partial output", 'yellow')
+                        return False, stdout  # Return partial output even though it timed out
+                    except subprocess.TimeoutExpired:
+                        self.print_colored(f"Command timed out after {timeout} seconds: {cmd}", 'red')
+                        return False, f"Command timed out after {timeout} seconds"
             else:
-                return result.returncode == 0, result.stdout
+                # Use regular subprocess.run for other cases
+                result = subprocess.run(
+                    cmd,
+                    shell=shell,
+                    capture_output=not show_output,
+                    text=True,
+                    check=False,
+                    timeout=timeout
+                )
+
+                if show_output:
+                    return result.returncode == 0, ""
+                else:
+                    return result.returncode == 0, result.stdout
+        except subprocess.TimeoutExpired:
+            self.print_colored(f"Command timed out after {timeout} seconds: {cmd}", 'red')
+            return False, f"Command timed out after {timeout} seconds"
         except Exception as e:
             self.print_colored(f"Error running command: {e}", 'red')
             return False, str(e)
@@ -571,6 +643,12 @@ class R1Setup:
             with open(self.config_file) as f:
                 self.inventory = yaml.safe_load(f) or self.inventory
             
+            # Ensure network environment is synchronized with active configuration
+            env = self.active_config.get('environment')
+            if env:
+                self.set_mnl_app_env(env)
+                self.print_debug(f"Network environment synchronized to: {env}")
+            
             # Initialize status fields for existing nodes that don't have them
             hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
             updated = False
@@ -588,19 +666,19 @@ class R1Setup:
                     host_config['last_status_update'] = timestamp
                     needs_update = True
                 
-                if 'last_status_check' not in host_config:
-                    host_config['last_status_check'] = timestamp
+                # Remove legacy last_status_check field if it exists
+                if 'last_status_check' in host_config:
+                    del host_config['last_status_check']
                     needs_update = True
                 
                 if needs_update:
                     updated = True
                     self.print_debug(f"Initialized missing status fields for node: {host_name}")
-                    self.print_debug(f"  status={host_config.get('node_status')}, update={host_config.get('last_status_update')}, check={host_config.get('last_status_check')}")
+                    self.print_debug(f"  status={host_config.get('node_status')}, update={host_config.get('last_status_update')}")
                 else:
                     current_status = host_config.get('node_status', 'unknown')
                     current_update = host_config.get('last_status_update', 'none')
-                    current_check = host_config.get('last_status_check', 'none')
-                    self.print_debug(f"Node {host_name} has all status fields: status={current_status}, update={current_update}, check={current_check}")
+                    self.print_debug(f"Node {host_name} has all status fields: status={current_status}, update={current_update}")
             
             # Save configuration if we updated any status fields
             if updated:
@@ -645,6 +723,9 @@ class R1Setup:
 
     def show_main_menu(self) -> None:
         """Display the main menu"""
+        # Reload active config to ensure deployment status is current
+        self._load_active_config()
+        
         self.print_header("Ratio1 Multi-Node Launcher Setup")
 
         # Show current status
@@ -708,38 +789,80 @@ class R1Setup:
         else:
             self.print_colored("Deployment: ✗ Never deployed", 'yellow')
 
-        self.print_section("Available Options")
+        self.print_section("R1Setup Main Menu")
         print()
-        self.print_colored("Configuration Management:")
-        self.print_colored("  1) Nodes Fleet Config       - Configure Fleet information for deployment")
-        self.print_colored("  2) Manage configurations    - List, switch, or delete saved configurations")
-        self.print_colored("  3) View configuration       - Display current node configuration")
-        self.print_colored("  4) Test node connectivity   - Verify connection to configured nodes")
+        self.print_colored("📋 CONFIGURATION", 'cyan', bold=True)
+        self.print_colored("  1) Configuration Menu     - Node setup, environments, and management")
         print()
-        self.print_colored("Deployment:")
-        self.print_colored("  5) Deploy full node         - Deploy Edge Node including GPU support")
-        self.print_colored("  6) Deploy non-GPU           - Deploy Edge Node without GPU support ")
-        self.print_colored("  7) Delete Edge Node         - Completely remove deployed Edge Node")
+        self.print_colored("🚀 DEPLOYMENT", 'cyan', bold=True)
+        self.print_colored("  2) Deployment Menu        - Deploy, delete, and manage deployments")
         print()
-        self.print_colored("Information:")
-        self.print_colored("  8) Get node information     - Retrieve detailed node information")
-        self.print_colored("  9) Get node addresses       - Display nodes addresses")
-        self.print_colored(" 10) Export addresses to CSV  - Save addresses to CSV file")
+        self.print_colored("🔧 OPERATIONS", 'cyan', bold=True)
+        self.print_colored("  3) Start Service          - Start the Edge Node service")
+        self.print_colored("  4) Stop Service           - Stop the Edge Node service")
+        self.print_colored("  5) Restart Service        - Restart the Edge Node service")
         print()
-        self.print_colored("Service Management:")
-        self.print_colored(" 11) Start Edge Node          - Start the Edge Node on all nodes")
-        self.print_colored(" 12) Stop Edge Node           - Stop the Edge Node on all nodes")
-        self.print_colored(" 13) Restart Edge Node        - Restart the Edge Node on all nodes")
-        self.print_colored(" 14) Check service status     - Check Edge Node status on all nodes")
-        self.print_colored(" 15) View node statuses       - Show current node statuses and timestamp details")
-        self.print_colored(" 16) Check & update node status - Verify actual service status and update")
-        self.print_colored(" 17) SSH into node's machine  - Connect to a selected node's machine via SSH")
+        self.print_colored("📊 MONITORING & INFO", 'cyan', bold=True)
+        self.print_colored("  6) Node Status & Information - Get latest info and show detailed status")
+        self.print_colored("  7) Get Node Addresses       - Display node blockchain addresses")
+        self.print_colored("  8) Export to CSV            - Export node data to CSV file")
+        self.print_colored("  9) Test Connectivity        - Verify connection to configured nodes")
         print()
-        self.print_colored("Settings:")
-        self.print_colored(" 18) Change network environment - Switch between mainnet/testnet/devnet")
+        self.print_colored("🛠️ UTILITIES", 'cyan', bold=True)
+        self.print_colored(" 10) Utilities Menu        - Advanced utilities and tools")
         print()
         self.print_colored("  0) Exit")
         print()
+
+    def configuration_menu(self) -> None:
+        """Show configuration submenu"""
+        while True:
+            self.print_header("Configuration Menu")
+
+            # Show current configuration status
+            has_config = self.check_hosts_config()
+            current_env = self.get_mnl_app_env()
+            active_config_name = self.active_config.get('config_name', 'None')
+
+            self.print_section("Current Status")
+            self.print_colored(f"Active Config: {active_config_name if active_config_name != 'None' else '✗ No active config'}",
+                               'green' if active_config_name != 'None' else 'red')
+            self.print_colored(f"Configuration: {'✓ Configured' if has_config else '✗ Not configured'}",
+                               'green' if has_config else 'red')
+            self.print_colored(f"Network: {current_env if current_env else '✗ Not set'}",
+                               'green' if current_env else 'red')
+
+            # Show node count if configured
+            if has_config:
+                self.load_configuration()
+                hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+                self.print_colored(f"Nodes: {len(hosts)} configured", 'cyan')
+
+            self.print_colored("Configuration Menu", 'cyan', bold=True)
+            print()
+            self.print_colored("  1) Configure Nodes        - Node connection setup and management")
+            self.print_colored("  2) Manage Configurations  - Switch, backup, restore configurations")
+            self.print_colored("  3) View Configuration     - Display current configuration")
+            self.print_colored("  4) Switch Environment     - Change network environment (mainnet/testnet/devnet)")
+            print()
+            self.print_colored("  0) Back to Main Menu")
+            print()
+
+            choice = self.get_input("Select option", "0")
+
+            if choice == '0':
+                break
+            elif choice == '1':
+                self.configure_nodes_menu()
+            elif choice == '2':
+                self.manage_configurations_menu()
+            elif choice == '3':
+                self.view_configuration()
+            elif choice == '4':
+                self.switch_environment()
+            else:
+                self.print_colored("Invalid option. Please try again.", 'red')
+                input("Press Enter to continue...")
 
     def manage_configurations_menu(self) -> None:
         """Show configuration management submenu"""
@@ -825,13 +948,17 @@ class R1Setup:
                     self.print_colored(f"     {deployment_info}", deployment_color)
                 print()
 
-            self.print_colored("Configuration Options:")
-            self.print_colored("  1) Create new configuration  - Set up a new node configuration")
+            self.print_colored("Manage Configurations Menu", 'cyan', bold=True)
+            print()
+            self.print_colored("  1) Create New Configuration       - Set up new configuration")
             if configs:
-                self.print_colored("  2) Switch configuration      - Activate a different configuration")
-                self.print_colored("  3) Delete configuration      - Remove a saved configuration")
-                self.print_colored("  4) Rename configuration      - Change configuration name")
-            self.print_colored("  0) Back to main menu")
+                self.print_colored("  2) Switch Configuration          - Activate different configuration")
+                self.print_colored("  3) Delete Configuration          - Remove saved configuration")
+                self.print_colored("  4) Rename Configuration          - Change configuration name")
+                self.print_colored("  5) Backup Configuration          - Save configuration backup")
+                self.print_colored("  6) Restore Configuration         - Restore from backup")
+            print()
+            self.print_colored("  0) Back to Main Menu")
             print()
 
             choice = self.get_input("Select option", "0")
@@ -846,6 +973,10 @@ class R1Setup:
                 self._delete_configuration(configs)
             elif choice == '4' and configs:
                 self._rename_configuration(configs)
+            elif choice == '5' and configs:
+                self._backup_configuration(configs)
+            elif choice == '6' and configs:
+                self._restore_configuration()
             else:
                 self.print_colored("Invalid option. Please try again.", 'red')
                 input("Press Enter to continue...")
@@ -1073,6 +1204,180 @@ class R1Setup:
 
         input("Press Enter to continue...")
 
+    def _backup_configuration(self, configs: List[Tuple[str, Dict]]) -> None:
+        """Create a backup of a configuration"""
+        self.print_section("Backup Configuration")
+
+        for i, (config_name, metadata) in enumerate(configs, 1):
+            display_name = config_name.replace('.yml', '')
+            env = metadata.get('environment', 'unknown')
+            nodes = metadata.get('nodes_count', 0)
+            self.print_colored(f"  {i}) {display_name} ({env}, {nodes} nodes)")
+
+        while True:
+            try:
+                choice = int(self.get_input("Select configuration number to backup", "1")) - 1
+                if 0 <= choice < len(configs):
+                    config_name = configs[choice][0].replace('.yml', '')
+                    break
+                self.print_colored("Invalid selection", 'red')
+            except ValueError:
+                self.print_colored("Please enter a number", 'red')
+
+        try:
+            # Create backup directory if it doesn't exist
+            backup_dir = self.configs_dir / 'backups'
+            backup_dir.mkdir(parents=True, exist_ok=True)
+
+            # Generate backup filename with timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_name = f"{config_name}_backup_{timestamp}"
+            
+            # Copy configuration files
+            config_path = self.configs_dir / f"{config_name}.yml"
+            metadata_path = self.configs_dir / f"{config_name}.json"
+            
+            backup_config_path = backup_dir / f"{backup_name}.yml"
+            backup_metadata_path = backup_dir / f"{backup_name}.json"
+            
+            if config_path.exists():
+                shutil.copy2(config_path, backup_config_path)
+            if metadata_path.exists():
+                shutil.copy2(metadata_path, backup_metadata_path)
+            
+            self.print_colored(f"✅ Configuration '{config_name}' backed up as '{backup_name}'", 'green')
+            self.print_colored(f"📁 Backup location: {backup_dir}", 'cyan')
+            
+        except Exception as e:
+            self.print_colored(f"❌ Error creating backup: {e}", 'red')
+
+        input("Press Enter to continue...")
+
+    def _restore_configuration(self) -> None:
+        """Restore a configuration from backup"""
+        self.print_section("Restore Configuration")
+
+        # Check if backup directory exists
+        backup_dir = self.configs_dir / 'backups'
+        if not backup_dir.exists():
+            self.print_colored("No backups found. Backup directory doesn't exist.", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Get list of backup files
+        backup_files = list(backup_dir.glob('*_backup_*.yml'))
+        if not backup_files:
+            self.print_colored("No backup files found.", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Parse backup information
+        backups = []
+        for backup_file in backup_files:
+            backup_name = backup_file.stem
+            # Extract original name and timestamp from backup name
+            # Format: originalname_backup_YYYYMMDD_HHMMSS
+            parts = backup_name.split('_backup_')
+            if len(parts) == 2:
+                original_name = parts[0]
+                timestamp_str = parts[1]
+                try:
+                    timestamp = datetime.strptime(timestamp_str, '%Y%m%d_%H%M%S')
+                    backups.append((backup_name, original_name, timestamp))
+                except ValueError:
+                    continue
+
+        if not backups:
+            self.print_colored("No valid backup files found.", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Sort backups by timestamp (newest first)
+        backups.sort(key=lambda x: x[2], reverse=True)
+
+        # Show available backups
+        self.print_colored("Available Backups:")
+        for i, (backup_name, original_name, timestamp) in enumerate(backups, 1):
+            timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+            self.print_colored(f"  {i}) {original_name} (backed up on {timestamp_str})")
+
+        while True:
+            try:
+                choice = int(self.get_input("Select backup number to restore", "1")) - 1
+                if 0 <= choice < len(backups):
+                    selected_backup = backups[choice]
+                    break
+                self.print_colored("Invalid selection", 'red')
+            except ValueError:
+                self.print_colored("Please enter a number", 'red')
+
+        backup_name, original_name, timestamp = selected_backup
+        
+        # Get new name for restored configuration
+        self.print_colored(f"\nRestoring backup of '{original_name}' from {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+        new_name = self.get_input(f"Enter name for restored configuration (default: {original_name}_restored)", 
+                                  f"{original_name}_restored")
+
+        # Validate new name
+        if not re.match(r'^[a-zA-Z0-9_-]+$', new_name):
+            self.print_colored("Invalid name. Use only letters, numbers, underscore, and hyphen.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        try:
+            # Load backup metadata to get proper configuration structure
+            backup_metadata_path = backup_dir / f"{backup_name}.json"
+            nodes_count = 1
+            environment = 'mainnet'
+            
+            if backup_metadata_path.exists():
+                try:
+                    with open(backup_metadata_path) as f:
+                        metadata = json.load(f)
+                    nodes_count = metadata.get('nodes_count', 1)
+                    environment = metadata.get('environment', 'mainnet')
+                except Exception:
+                    pass
+
+            # Generate proper configuration name
+            restored_config_name = self._generate_config_name(nodes_count, new_name)
+
+            # Check if restored name already exists
+            if (self.configs_dir / f"{restored_config_name}.yml").exists():
+                self.print_colored("A configuration with this name already exists!", 'red')
+                input("Press Enter to continue...")
+                return
+
+            # Copy backup files to main config directory
+            backup_config_path = backup_dir / f"{backup_name}.yml"
+            backup_metadata_path = backup_dir / f"{backup_name}.json"
+            
+            restored_config_path = self.configs_dir / f"{restored_config_name}.yml"
+            restored_metadata_path = self.configs_dir / f"{restored_config_name}.json"
+
+            if backup_config_path.exists():
+                shutil.copy2(backup_config_path, restored_config_path)
+            if backup_metadata_path.exists():
+                shutil.copy2(backup_metadata_path, restored_metadata_path)
+                
+                # Update metadata with new name
+                with open(restored_metadata_path) as f:
+                    metadata = json.load(f)
+                metadata['config_name'] = restored_config_name
+                metadata['restored_from'] = backup_name
+                metadata['restored_at'] = datetime.now().isoformat()
+                
+                with open(restored_metadata_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+
+            self.print_colored(f"✅ Configuration restored as '{restored_config_name}'", 'green')
+            self.print_colored("💡 Use 'Switch Configuration' to activate the restored configuration.", 'cyan')
+            
+        except Exception as e:
+            self.print_colored(f"❌ Error restoring configuration: {e}", 'red')
+
+        input("Press Enter to continue...")
+
     def configure_nodes_menu(self) -> None:
         """Show node configuration submenu"""
         while True:
@@ -1097,15 +1402,17 @@ class R1Setup:
                     self.print_colored(f"[{status_emoji} {status_desc}]", status_color)
                 print()
 
-            self.print_colored("Configuration Options:")
+            self.print_colored("Configure Nodes Menu", 'cyan', bold=True)
+            print()
             if not hosts:
-                self.print_colored("  1) Create initial configuration - Set up your first nodes")
+                self.print_colored("  1) Create Initial Configuration    - First-time setup")
             else:
-                self.print_colored("  1) Add new node                 - Add another node to the configuration")
-                self.print_colored("  2) Update existing node         - Modify an existing node's settings")
-                self.print_colored("  3) Delete node                  - Remove a node from configuration")
-                self.print_colored("  4) Create new configuration     - Start over with fresh configuration")
-            self.print_colored("  0) Back to main menu")
+                self.print_colored("  1) Add New Node                   - Add node to existing config")
+                self.print_colored("  2) Edit Existing Node             - Modify node settings")
+                self.print_colored("  3) Remove Node                    - Delete node from config")
+                self.print_colored("  4) Create New Configuration       - Start fresh configuration")
+            print()
+            self.print_colored("  0) Back to Main Menu")
             print()
 
             choice = self.get_input("Select option", "0")
@@ -1123,6 +1430,108 @@ class R1Setup:
                 self._delete_node()
             elif choice == '4' and hosts:
                 self._create_new_configuration()
+            else:
+                self.print_colored("Invalid option. Please try again.", 'red')
+                input("Press Enter to continue...")
+
+    def deployment_menu(self) -> None:
+        """Show deployment submenu"""
+        while True:
+            # Reload active config to ensure deployment status is current
+            self._load_active_config()
+            
+            self.print_header("Deployment Menu")
+
+            # Show deployment status overview
+            deployment_status = self.active_config.get('deployment_status', 'never_deployed')
+            last_deployed_date = self.active_config.get('last_deployed_date')
+            last_deployed_network = self.active_config.get('last_deployed_network')
+            last_deployment_type = self.active_config.get('last_deployment_type')
+            last_deleted_date = self.active_config.get('last_deleted_date')
+
+            # Show current deployment status
+            self.print_section("Current Deployment Status")
+            if deployment_status == 'deployed' and last_deployed_date:
+                try:
+                    deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
+                    deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
+                    self.print_colored(f"🚀 Status: Deployed on {deployed_str}", 'green')
+                    if last_deployed_network:
+                        self.print_colored(f"🌐 Network: {last_deployed_network}", 'cyan')
+                    if last_deployment_type:
+                        self.print_colored(f"🔧 Type: {last_deployment_type}", 'cyan')
+                except:
+                    self.print_colored("🚀 Status: Deployed", 'green')
+            elif deployment_status == 'deleted' and last_deleted_date:
+                try:
+                    deleted_dt = datetime.fromisoformat(last_deleted_date.replace('Z', '+00:00'))
+                    deleted_str = deleted_dt.strftime('%Y-%m-%d %H:%M')
+                    self.print_colored(f"🗑️ Status: Deleted on {deleted_str}", 'red')
+                except:
+                    self.print_colored("🗑️ Status: Deleted", 'red')
+            else:
+                self.print_colored("📋 Status: Never deployed", 'yellow')
+
+            self.print_colored("Deployment Menu", 'cyan', bold=True)
+            print()
+            self.print_colored("  1) Deploy with GPU        - Deploy full Edge Node with GPU support")
+            self.print_colored("  2) Deploy Docker Only     - Deploy Edge Node without GPU")
+            self.print_colored("  3) Delete Deployment      - Remove deployed Edge Node")
+            self.print_colored("  4) Deployment Status      - Check detailed deployment status")
+            print()
+            self.print_colored("  0) Back to Main Menu")
+            print()
+
+            choice = self.get_input("Select option", "0")
+
+            if choice == '0':
+                break
+            elif choice == '1':
+                self.deploy_full()
+            elif choice == '2':
+                self.deploy_docker_only()
+            elif choice == '3':
+                self.delete_edge_node()
+            elif choice == '4':
+                self.deployment_status()
+            else:
+                self.print_colored("Invalid option. Please try again.", 'red')
+                input("Press Enter to continue...")
+
+    def utilities_menu(self) -> None:
+        """Show utilities submenu"""
+        while True:
+            self.print_header("Utilities Menu")
+
+            # Show if configuration exists
+            has_config = self.check_hosts_config()
+            if has_config:
+                self.load_configuration()
+                hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+                self.print_section(f"Available for {len(hosts)} configured node(s)")
+            else:
+                self.print_section("No nodes configured")
+                self.print_colored("⚠️  Configure nodes first to use utilities", 'yellow')
+
+            self.print_colored("Utilities Menu", 'cyan', bold=True)
+            print()
+            self.print_colored("  1) SSH to Node           - Connect to node via SSH")
+            self.print_colored("  2) Get Logs              - Stream logs from nodes")
+            self.print_colored("  3) Write Logs to File    - Save node logs to local file")
+            print()
+            self.print_colored("  0) Back to Main Menu")
+            print()
+
+            choice = self.get_input("Select option", "0")
+
+            if choice == '0':
+                break
+            elif choice == '1':
+                self.ssh_into_node_machine()
+            elif choice == '2':
+                self.get_logs()
+            elif choice == '3':
+                self.write_logs_to_file()
             else:
                 self.print_colored("Invalid option. Please try again.", 'red')
                 input("Press Enter to continue...")
@@ -1344,13 +1753,11 @@ class R1Setup:
                 # Preserve existing status unless it's being updated
                 host['node_status'] = existing_config.get('node_status', 'unknown')
                 host['last_status_update'] = existing_config.get('last_status_update', datetime.now().isoformat())
-                host['last_status_check'] = existing_config.get('last_status_check', datetime.now().isoformat())
             else:
                 # New node - set initial status
                 timestamp = datetime.now().isoformat()
                 host['node_status'] = 'never_deployed'
                 host['last_status_update'] = timestamp
-                host['last_status_check'] = timestamp
 
             # Show summary and confirm
             self.print_colored("\nConfiguration Summary:", 'yellow')
@@ -1394,13 +1801,13 @@ class R1Setup:
         """Update the last checked timestamp for a node without changing status"""
         hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
         if node_name in hosts:
-            old_check = hosts[node_name].get('last_status_check', 'never')
-            new_check = datetime.now().isoformat()
+            old_update = hosts[node_name].get('last_status_update', 'never')
+            new_update = datetime.now().isoformat()
             
-            hosts[node_name]['last_status_check'] = new_check
+            hosts[node_name]['last_status_update'] = new_update
             self._save_configuration()
             
-            self.print_debug(f"Updated {node_name} last check timestamp: {old_check} → {new_check}")
+            self.print_debug(f"Updated {node_name} last update timestamp: {old_update} → {new_update}")
 
     def _get_node_status_info(self, node_name: str) -> Dict[str, str]:
         """Get status information for a node"""
@@ -1408,11 +1815,238 @@ class R1Setup:
         if node_name in hosts:
             status = hosts[node_name].get('node_status', 'unknown')
             last_update = hosts[node_name].get('last_status_update', '')
-            last_check = hosts[node_name].get('last_status_check', '')
-            self.print_debug(f"Retrieved {node_name} status: {status} (updated: {last_update}, checked: {last_check})")
-            return {'status': status, 'last_update': last_update, 'last_check': last_check}
+            self.print_debug(f"Retrieved {node_name} status: {status} (updated: {last_update})")
+            return {'status': status, 'last_update': last_update}
         self.print_debug(f"Node {node_name} not found in hosts configuration")
-        return {'status': 'unknown', 'last_update': '', 'last_check': ''}
+        return {'status': 'unknown', 'last_update': ''}
+
+    def _get_real_time_node_status(self) -> Dict[str, Dict[str, str]]:
+        """Get real-time status for all nodes by running the service status playbook"""
+        # Run service status playbook
+        playbook_path = self.config_dir / 'playbooks/service_status.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"❌ Service status playbook not found: {playbook_path}", 'red')
+            return {}
+
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+
+        # Use a reasonable timeout for status checking (30 seconds should be enough for most cases)
+        success, output = self.run_command(cmd, show_output=False, timeout=30)
+        
+        # Process results for real-time status
+        node_status_data = {}
+        
+        if success:
+            self.print_debug(f"Playbook output length: {len(output)} characters")
+            self.print_debug("=== PLAYBOOK OUTPUT ===")
+            self.print_debug(output)
+            self.print_debug("=== END OUTPUT ===")
+            
+            # Parse the output for service status information
+            lines = output.split('\n')
+            current_host = None
+            
+            # Use regex to find all task result blocks
+            import re
+        else:
+            # Handle timeout or other failure cases
+            self.print_debug(f"Status check failed with output length: {len(output) if output else 0}")
+            if "timed out" in output.lower():
+                self.print_debug("Status check timed out - some hosts may be offline")
+            else:
+                self.print_debug(f"Status check failed with error: {output}")
+            
+            # We'll still try to parse whatever output we got - partial output is valuable
+            if output:
+                self.print_debug("=== PARTIAL PLAYBOOK OUTPUT ===")
+                self.print_debug(output)
+                self.print_debug("=== END PARTIAL OUTPUT ===")
+            
+            lines = output.split('\n') if output else []
+            current_host = None
+            
+            # Use regex to find all task result blocks
+            import re
+            
+            # Look for pattern: ok: [hostname] => {
+            task_pattern = re.compile(r'ok: \[([^\]]+)\] => \{')
+            
+            for i, line in enumerate(lines):
+                line = line.strip()
+                
+                # Track current host being processed from task results
+                task_match = task_pattern.match(line)
+                if task_match:
+                    current_host = task_match.group(1)
+                    self.print_debug(f"Found task result for host: {current_host}")
+                    continue
+                
+                # Handle unreachable nodes - both patterns
+                if 'unreachable:' in line and '[' in line and ']' in line:
+                    unreachable_match = re.search(r'unreachable: \[([^\]]+)\]', line)
+                    if unreachable_match:
+                        hostname = unreachable_match.group(1)
+                        node_status_data[hostname] = {
+                            'status': 'unreachable',
+                            'result': 'Node unreachable'
+                        }
+                        self.print_debug(f"Set {hostname} to unreachable")
+                        continue
+                
+                # Handle fatal unreachable nodes (ansible format: fatal: [hostname]: UNREACHABLE!)
+                if 'fatal:' in line and 'UNREACHABLE!' in line and '[' in line and ']' in line:
+                    fatal_match = re.search(r'fatal: \[([^\]]+)\]: UNREACHABLE!', line)
+                    if fatal_match:
+                        hostname = fatal_match.group(1)
+                        node_status_data[hostname] = {
+                            'status': 'unreachable',
+                            'result': 'Node unreachable - connection failed'
+                        }
+                        self.print_debug(f"Set {hostname} to unreachable (fatal)")
+                        continue
+                
+                # Look for the structured message output from the playbook
+                if current_host and '"msg":' in line:
+                    self.print_debug(f"Processing message line for {current_host}: {line}")
+                    
+                    # Extract the message content - it contains the status information
+                    msg_match = re.search(r'"msg":\s*"([^"]*(?:\\.[^"]*)*)"', line)
+                    if msg_match:
+                        msg_content = msg_match.group(1)
+                        # Decode escaped characters (like \n)
+                        msg_content = msg_content.replace('\\n', '\n').replace('\\"', '"')
+                        self.print_debug(f"Extracted message for {current_host}: {msg_content}")
+                        
+                        # Parse the decoded message content for status information
+                        service_status = None
+                        container_status = None
+                        
+                        # Look for Service Status in the message
+                        if 'Service Status: ACTIVE' in msg_content:
+                            service_status = 'ACTIVE'
+                        elif 'Service Status: INACTIVE' in msg_content:
+                            service_status = 'INACTIVE'
+                        elif 'Service Status: FAILED' in msg_content:
+                            service_status = 'FAILED'
+                        elif 'Service Status: NOT FOUND' in msg_content:
+                            service_status = 'NOT_FOUND'
+                        
+                        # Look for Container Status in the message
+                        if 'Container Status: RUNNING' in msg_content:
+                            container_status = 'RUNNING'
+                        elif 'Container Status: NOT RUNNING' in msg_content:
+                            container_status = 'NOT_RUNNING'
+                        
+                        self.print_debug(f"Parsed {current_host}: service={service_status}, container={container_status}")
+                        
+                        # Determine overall status based on service and container status
+                        if container_status == 'RUNNING':
+                            node_status_data[current_host] = {
+                                'status': 'running',
+                                'result': 'Container is running'
+                            }
+                            self.print_debug(f"Set {current_host} to running (container running)")
+                        elif container_status == 'NOT_RUNNING':
+                            if service_status == 'ACTIVE':
+                                node_status_data[current_host] = {
+                                    'status': 'stopped',
+                                    'result': 'Service active but container not running'
+                                }
+                                self.print_debug(f"Set {current_host} to stopped (service active, container not running)")
+                            elif service_status == 'NOT_FOUND':
+                                node_status_data[current_host] = {
+                                    'status': 'not_deployed',
+                                    'result': 'Service not found - not deployed'
+                                }
+                                self.print_debug(f"Set {current_host} to not_deployed (service not found)")
+                            else:
+                                node_status_data[current_host] = {
+                                    'status': 'stopped',
+                                    'result': 'Container not running'
+                                }
+                                self.print_debug(f"Set {current_host} to stopped (container not running)")
+                        elif service_status == 'ACTIVE' and current_host not in node_status_data:
+                            node_status_data[current_host] = {
+                                'status': 'running',
+                                'result': 'Service is active'
+                            }
+                            self.print_debug(f"Set {current_host} to running (service active)")
+                        elif service_status in ['INACTIVE', 'FAILED'] and current_host not in node_status_data:
+                            node_status_data[current_host] = {
+                                'status': 'stopped',
+                                'result': 'Service is inactive/failed'
+                            }
+                            self.print_debug(f"Set {current_host} to stopped (service inactive/failed)")
+                        elif service_status == 'NOT_FOUND' and current_host not in node_status_data:
+                            node_status_data[current_host] = {
+                                'status': 'not_deployed',
+                                'result': 'Service not found - not deployed'
+                            }
+                            self.print_debug(f"Set {current_host} to not_deployed (service not found)")
+                
+                # Fallback: Look for debug output with container and service status (legacy format)
+                elif current_host and ('Container Status:' in line or 'Service Status:' in line):
+                    # Parse container status
+                    if 'Container Status: RUNNING' in line:
+                        node_status_data[current_host] = {
+                            'status': 'running',
+                            'result': 'Container is running'
+                        }
+                        self.print_debug(f"Set {current_host} to running (legacy format)")
+                    elif 'Container Status: NOT RUNNING' in line:
+                        # Check if we have service status info
+                        if 'Service Status: ACTIVE' in line:
+                            node_status_data[current_host] = {
+                                'status': 'stopped',
+                                'result': 'Service active but container not running'
+                            }
+                        elif 'Service Status: NOT FOUND' in line:
+                            node_status_data[current_host] = {
+                                'status': 'not_deployed',
+                                'result': 'Service not found - not deployed'
+                            }
+                        else:
+                            node_status_data[current_host] = {
+                                'status': 'stopped',
+                                'result': 'Container not running'
+                            }
+                        self.print_debug(f"Set {current_host} to stopped (legacy format)")
+                    
+                    # Parse service status when container info is not available
+                    elif 'Service Status: ACTIVE' in line and current_host not in node_status_data:
+                        node_status_data[current_host] = {
+                            'status': 'running',
+                            'result': 'Service is active'
+                        }
+                        self.print_debug(f"Set {current_host} to running (service active, legacy format)")
+                    elif 'Service Status: INACTIVE' in line or 'Service Status: FAILED' in line:
+                        node_status_data[current_host] = {
+                            'status': 'stopped',
+                            'result': 'Service is inactive/failed'
+                        }
+                        self.print_debug(f"Set {current_host} to stopped (service inactive/failed, legacy format)")
+                    elif 'Service Status: NOT FOUND' in line:
+                        node_status_data[current_host] = {
+                            'status': 'not_deployed',
+                            'result': 'Service not found - not deployed'
+                        }
+                        self.print_debug(f"Set {current_host} to not_deployed (service not found, legacy format)")
+        
+        self.print_debug(f"Final node status data: {node_status_data}")
+        
+        # Fill in any missing hosts with unknown status
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        for hostname in hosts.keys():
+            if hostname not in node_status_data:
+                node_status_data[hostname] = {
+                    'status': 'unknown',
+                    'result': 'Unable to determine status'
+                }
+        
+        return node_status_data
 
     def _get_status_display_info(self, status: str) -> Tuple[str, str, str]:
         """Get display information for a status (emoji, color, description)"""
@@ -1424,7 +2058,9 @@ class R1Setup:
             'deploying': ('🔄', 'cyan', 'Deploying'),
             'error': ('❌', 'red', 'Error'),
             'never_deployed': ('⚪', 'white', 'Never Deployed'),
-            'deleted': ('🗑️', 'red', 'Deleted')
+            'deleted': ('🗑️', 'red', 'Deleted'),
+            'unreachable': ('🔌', 'red', 'Unreachable'),
+            'not_deployed': ('📦', 'yellow', 'Not Deployed')
         }
         return status_info.get(status, ('❓', 'white', 'Unknown'))
 
@@ -1591,11 +2227,11 @@ class R1Setup:
         # Generate config name if not set
         if not self.active_config.get('config_name'):
             config_name = self._generate_config_name(nodes_count)
-            self._save_config_with_metadata(config_name, env, nodes_count)
+            self._save_config_with_metadata(config_name, env, nodes_count, update_symlink=True)
         else:
-            # Update existing config
+            # Update existing config - no need to update symlink since we're not switching configs
             config_name = self.active_config['config_name']
-            self._save_config_with_metadata(config_name, env, nodes_count)
+            self._save_config_with_metadata(config_name, env, nodes_count, update_symlink=False)
 
     def view_configuration(self) -> None:
         """View current configuration"""
@@ -1643,7 +2279,7 @@ class R1Setup:
                 
                 for key, value in config.items():
                     # Skip displaying status fields in the config details
-                    if key in ['node_status', 'last_status_update', 'last_status_check']:
+                    if key in ['node_status', 'last_status_update']:
                         continue
                     if any(k in key.lower() for k in ["password", "key"]):
                         value = "********"
@@ -1660,9 +2296,26 @@ class R1Setup:
 
         self.print_header("Testing Node Connectivity")
 
+        # Load configuration to show nodes being tested
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        env = self.get_mnl_app_env()
+
+        # Show pre-test information
+        self.print_colored(f"🔧 Connectivity Test Details:", 'cyan', bold=True)
+        self.print_colored(f"   • Network: {env if env else 'Not set'}", 'green' if env else 'red')
+        self.print_colored(f"   • Nodes to test: {len(hosts)}", 'white')
+
+        self.print_colored(f"\n🖥️  Testing connectivity to:", 'cyan', bold=True)
+        for name, config in hosts.items():
+            ip = config.get('ansible_host', 'Unknown')
+            user = config.get('ansible_user', 'Unknown')
+            auth_type = "Password" if 'ansible_ssh_pass' in config else "SSH Key"
+            self.print_colored(f"   • {name}: {user}@{ip} ({auth_type})", 'white')
+
         playbook_path = self.config_dir / 'playbooks/test_connection.yml'
         if not playbook_path.exists():
-            self.print_colored(f"Test playbook not found: {playbook_path}", 'red')
+            self.print_colored(f"❌ Test playbook not found: {playbook_path}", 'red')
             input("Press Enter to continue...")
             return
 
@@ -1671,14 +2324,16 @@ class R1Setup:
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
                f"ansible-playbook -i {self.config_file} {playbook_path}")
 
-        success, _ = self.run_command(cmd, show_output=True)
+        self.print_colored(f"\n🔍 Running connectivity test...", 'yellow')
+        success, output = self.run_command(cmd, show_output=False)
 
-        if success:
-            self.print_colored("\nConnectivity test completed successfully!", 'green')
-        else:
-            self.print_colored("\nConnectivity test failed. Please check your configuration.", 'red')
+        # Parse the results
+        connectivity_results = self._parse_connectivity_output(output)
+        
+        # Display formatted results
+        self._display_connectivity_results(connectivity_results, hosts)
 
-        input("Press Enter to continue...")
+        input("\nPress Enter to continue...")
 
     def deploy_full(self) -> None:
         """Deploy full setup (Docker + NVIDIA + GPU)"""
@@ -1718,7 +2373,7 @@ class R1Setup:
         self.print_colored(f"   • Network: {env if env else 'Not set'}", 'white')
         self.print_colored(f"   • Selected Nodes: {len(selected_hosts)}/{len(all_hosts)}", 'white')
 
-        self.print_colored(f"\n🖥️  Edge nodes will be deleted from these selected machines:", 'cyan', bold=True)
+        self.print_colored(f"\n🖥️  Edge Nodes will be deleted from these selected machines:", 'cyan', bold=True)
         for name in selected_host_names:
             config = all_hosts[name]
             ip = config.get('ansible_host', 'Unknown')
@@ -1734,7 +2389,7 @@ class R1Setup:
         self.print_colored("   • Created command scripts", 'yellow')
         self.print_colored("   • Docker daemon configuration", 'yellow')
 
-        if self.get_input(f"\n⚠️  Are you sure you want to delete Edge Node deployment from {len(selected_hosts)} selected machine(s)? (y/n)", "n").lower() != 'y':
+        if self.get_input(f"\n⚠️  Are you sure you want to delete Edge Node deployment from {len(selected_hosts)} selected machine(s) (y/n)", "n").lower() != 'y':
             self.print_colored("Deletion cancelled.", 'yellow')
             return
 
@@ -1764,7 +2419,7 @@ class R1Setup:
         success, _ = self.run_command(cmd, show_output=True)
 
         if success:
-            self.print_colored("\nEdge node deleted successfully!", 'green')
+            self.print_colored("\nEdge Node deleted successfully!", 'green')
             # Update deployment metadata after successful deletion
             self._update_deletion_metadata()
             
@@ -1782,7 +2437,7 @@ class R1Setup:
             self.print_colored(f"\n💡 Note: Deleted nodes will maintain their 'deleted' status.", 'cyan')
             self.print_colored("   This status will not change automatically to preserve the deletion history.", 'white')
         else:
-            self.print_colored("\nEdge node deletion encountered issues. Please check the output above.", 'red')
+            self.print_colored("\nEdge Node deletion encountered issues. Please check the output above.", 'red')
             # Update selected node statuses to error after failed deletion
             for host_name in selected_host_names:
                 self._update_node_status(host_name, 'error')
@@ -1945,14 +2600,160 @@ class R1Setup:
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
                f"ansible-playbook -i {self.config_file} {playbook_path}")
 
-        success, _ = self.run_command(cmd, show_output=True)
+        self.print_colored("Retrieving node information...", 'yellow')
 
-        if success:
-            self.print_colored("\nNode information retrieved successfully!", 'green')
+        success, output = self.run_command(cmd, show_output=False, timeout=60)
+
+        # Check for timeout specifically
+        if not success and "timed out" in output.lower():
+            self.print_colored("Node info retrieval timed out after 60 seconds", 'red')
+            self.print_colored("Some nodes may be offline or not responding", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Parse the output to extract both successful and failed nodes
+        # Note: We parse even if success=False because some nodes might have succeeded
+        node_results = self._parse_node_info_output(output)
+        
+        if not node_results:
+            self.print_colored("No node information could be parsed from the playbook output.", 'yellow')
+            self.print_colored("This might be because the nodes are not running or not accessible.", 'yellow')
         else:
-            self.print_colored("\nFailed to retrieve node information.", 'red')
+            # Display the results in a formatted table
+            self.print_colored(f"\nNode Information Summary:", 'green')
+            self.print_colored(f"{'Node Name':<20} {'Status':<15} {'Address':<48}", 'cyan')
+            self.print_colored("-" * 83, 'cyan')
+            
+            success_count = 0
+            unreachable_count = 0
+            
+            for node_name, result in node_results.items():
+                if result['status'] == 'success':
+                    address = result['data'].get('address', 'N/A')
+                    self.print_colored(f"{node_name:<20} {'SUCCESS':<15} {address:<48}", 'green')
+                    success_count += 1
+                else:
+                    self.print_colored(f"{node_name:<20} {'UNREACHABLE':<15} {'Connection failed':<48}", 'red')
+                    unreachable_count += 1
+            
+            # Show summary
+            if success_count > 0 and unreachable_count > 0:
+                self.print_colored(f"\n✅ {success_count} node(s) retrieved successfully, ❌ {unreachable_count} node(s) unreachable", 'yellow')
+            elif success_count > 0:
+                self.print_colored(f"\n✅ All {success_count} node(s) retrieved successfully", 'green')
+            else:
+                self.print_colored(f"\n❌ All {unreachable_count} node(s) are unreachable", 'red')
 
-        input("Press Enter to continue...")
+        input("\nPress Enter to continue...")
+
+    def _parse_node_info_output(self, output: str) -> Dict[str, Dict[str, Any]]:
+        """Parse node info output to extract both successful and failed nodes"""
+        node_results = {}
+        import re
+        
+        # First, detect unreachable nodes
+        unreachable_pattern = r'fatal: \[([^\]]+)\]: UNREACHABLE!'
+        unreachable_matches = re.findall(unreachable_pattern, output)
+        
+        for node_name in unreachable_matches:
+            node_results[node_name] = {
+                'status': 'unreachable',
+                'data': None
+            }
+            self.print_debug(f"Found unreachable node: {node_name}")
+        
+        # Also check for other unreachable patterns
+        unreachable_pattern2 = r'unreachable: \[([^\]]+)\]'
+        unreachable_matches2 = re.findall(unreachable_pattern2, output)
+        
+        for node_name in unreachable_matches2:
+            if node_name not in node_results:
+                node_results[node_name] = {
+                    'status': 'unreachable',
+                    'data': None
+                }
+                self.print_debug(f"Found unreachable node (pattern2): {node_name}")
+        
+        # Now parse successful nodes (existing logic from _get_node_info_data)
+        result_blocks = re.split(r'(?=ok: \[[^\]]+\] => \{)', output)
+        
+        for block in result_blocks:
+            if not block.strip():
+                continue
+                
+            # Extract node name from the block
+            node_match = re.search(r'ok: \[([^\]]+)\] => \{', block)
+            if not node_match:
+                continue
+                
+            node_name = node_match.group(1)
+            self.print_debug(f"Processing successful node: {node_name}")
+            
+            # Check if this block contains node_info.stdout_lines
+            if '"node_info.stdout_lines":' not in block:
+                self.print_debug(f"No node_info.stdout_lines found for {node_name}")
+                continue
+            
+            try:
+                # Extract the JSON lines from stdout_lines array
+                stdout_start = block.find('"node_info.stdout_lines":')
+                if stdout_start == -1:
+                    continue
+                
+                # Find the opening bracket for the array
+                array_start = block.find('[', stdout_start)
+                if array_start == -1:
+                    continue
+                
+                # Count brackets to find the matching closing bracket
+                bracket_count = 0
+                array_end = array_start
+                for i in range(array_start, len(block)):
+                    if block[i] == '[':
+                        bracket_count += 1
+                    elif block[i] == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            array_end = i
+                            break
+                
+                if bracket_count != 0:
+                    continue
+                
+                # Extract the array content
+                array_content = block[array_start+1:array_end]
+                
+                # Extract all quoted strings from the array content using regex
+                # Pattern to match quoted strings, handling escaped quotes
+                quoted_pattern = r'"([^"\\]*(?:\\.[^"\\]*)*)"'
+                quoted_matches = re.findall(quoted_pattern, array_content)
+                
+                # Reconstruct the JSON string
+                json_str = ''
+                for line in quoted_matches:
+                    # Unescape the quotes and add to JSON string
+                    unescaped_line = line.replace('\\"', '"')
+                    json_str += unescaped_line + '\n'
+                
+                # Parse the JSON
+                if json_str.strip():
+                    node_data = json.loads(json_str.strip())
+                    node_results[node_name] = {
+                        'status': 'success',
+                        'data': node_data
+                    }
+                    self.print_debug(f"Successfully parsed JSON for {node_name}")
+                    
+            except (json.JSONDecodeError, Exception) as e:
+                self.print_debug(f"Failed to parse JSON for {node_name}: {e}")
+                # If parsing fails, mark as error but don't overwrite unreachable status
+                if node_name not in node_results:
+                    node_results[node_name] = {
+                        'status': 'error',
+                        'data': None
+                    }
+        
+        return node_results
 
     def _get_node_info_data(self) -> Dict[str, Dict[str, Any]]:
         """Get node information data by running the get_node_info playbook and parsing output"""
@@ -1967,10 +2768,31 @@ class R1Setup:
                f"ansible-playbook -i {self.config_file} {playbook_path}")
 
         self.print_colored("Retrieving node information...", 'yellow')
-        success, output = self.run_command(cmd, show_output=False)
+        
+        # Enable debug output for troubleshooting parsing issues
+        original_debug = globals().get('DEBUG', False)
+        globals()['DEBUG'] = True
+        
+        # Always capture output for parsing, but show it if debug is enabled
+        success, output = self.run_command(cmd, show_output=False, timeout=60)
+        
+        # Show output if debug was originally enabled
+        if original_debug:
+            self.print_colored("=== COMMAND OUTPUT ===", 'cyan')
+            print(output)
+            self.print_colored("=== END COMMAND OUTPUT ===", 'cyan')
 
+        if DEBUG and output:
+            self.print_debug("=== ANSIBLE OUTPUT ===")
+            self.print_debug(output)
+            self.print_debug("=== END ANSIBLE OUTPUT ===")
+            
         if not success:
-            self.print_colored("Failed to run node info playbook", 'red')
+            if "timed out" in output.lower():
+                self.print_colored("Node info retrieval timed out after 60 seconds", 'red')
+                self.print_colored("Some nodes may be offline or not responding", 'yellow')
+            else:
+                self.print_colored("Failed to run node info playbook", 'red')
             return {}
 
         # Debug: show first few lines of output
@@ -1999,35 +2821,68 @@ class R1Setup:
                 continue
                 
             node_name = node_match.group(1)
+            self.print_debug(f"Processing block for node: {node_name}")
             
             # Check if this block contains node_info.stdout_lines
             if '"node_info.stdout_lines":' not in block:
+                self.print_debug(f"No node_info.stdout_lines found for {node_name}")
                 continue
             
             try:
-                # Extract the JSON lines from stdout_lines array
-                stdout_match = re.search(r'"node_info\.stdout_lines":\s*\[(.*?)\]', block, re.DOTALL)
-                if not stdout_match:
-                    self.print_debug(f"Could not find stdout_lines for {node_name}")
+                # Extract the JSON lines from stdout_lines array using a more flexible approach
+                # Look for the start of the array after "node_info.stdout_lines":
+                stdout_start = block.find('"node_info.stdout_lines":')
+                if stdout_start == -1:
+                    self.print_debug(f"Could not find stdout_lines start for {node_name}")
                     continue
                 
-                stdout_content = stdout_match.group(1)
+                # Find the opening bracket for the array
+                array_start = block.find('[', stdout_start)
+                if array_start == -1:
+                    self.print_debug(f"Could not find array start for {node_name}")
+                    continue
                 
-                # Extract all quoted strings from the stdout_lines array
-                quoted_lines = re.findall(r'"([^"]*)"', stdout_content)
+                # Count brackets to find the matching closing bracket
+                bracket_count = 0
+                array_end = array_start
+                for i in range(array_start, len(block)):
+                    if block[i] == '[':
+                        bracket_count += 1
+                    elif block[i] == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            array_end = i
+                            break
+                
+                if bracket_count != 0:
+                    self.print_debug(f"Could not find matching bracket for {node_name}")
+                    continue
+                
+                # Extract the array content
+                array_content = block[array_start+1:array_end]
+                self.print_debug(f"Raw array content for {node_name}: {array_content[:200]}...")
+                
+                # Extract all quoted strings from the array content using regex
+                # Pattern to match quoted strings, handling escaped quotes
+                quoted_pattern = r'"([^"\\]*(?:\\.[^"\\]*)*)"'
+                quoted_matches = re.findall(quoted_pattern, array_content)
                 
                 # Reconstruct the JSON string
                 json_str = ''
-                for line in quoted_lines:
+                for line in quoted_matches:
                     # Unescape the quotes and add to JSON string
                     unescaped_line = line.replace('\\"', '"')
                     json_str += unescaped_line + '\n'
+                
+                self.print_debug(f"Reconstructed JSON for {node_name}: {json_str[:200]}...")
                 
                 # Parse the JSON
                 if json_str.strip():
                     node_data = json.loads(json_str.strip())
                     node_info[node_name] = node_data
                     self.print_debug(f"Successfully parsed JSON for {node_name}")
+                else:
+                    self.print_debug(f"Empty JSON string for {node_name}")
                     
             except (json.JSONDecodeError, Exception) as e:
                 self.print_debug(f"Failed to parse JSON for {node_name}: {e}")
@@ -2038,6 +2893,11 @@ class R1Setup:
             self.print_debug("Block parsing failed, trying line-by-line approach...")
             node_info = self._parse_node_info_line_by_line(output)
 
+        self.print_debug(f"Final parsing result: {len(node_info)} nodes found")
+        
+        # Restore original debug state
+        globals()['DEBUG'] = original_debug
+        
         return node_info
 
     def _parse_node_info_line_by_line(self, output: str) -> Dict[str, Dict[str, Any]]:
@@ -2056,6 +2916,7 @@ class R1Setup:
                 end = line.find(']')
                 if start > 0 and end > start:
                     node_name = line[start:end]
+                    self.print_debug(f"Line-by-line parsing for node: {node_name}")
                     
                     # Find the JSON block for this node
                     json_lines = []
@@ -2066,22 +2927,36 @@ class R1Setup:
                         i += 1
                     
                     if i < len(lines):
+                        self.print_debug(f"Found stdout_lines at line {i}")
                         i += 1  # Skip the stdout_lines line
                         
-                        # Collect JSON lines
+                        # Collect JSON lines until we hit the end
+                        json_started = False
                         while i < len(lines):
                             current_line = lines[i].strip()
                             
+                            # Stop if we hit the end of the array or next node
                             if current_line == ']' or current_line == '}' or current_line.startswith('ok: ['):
                                 break
                             
-                            # Clean up the JSON line
-                            if current_line.startswith('"') and current_line.endswith('",'):
-                                clean_line = current_line[1:-2].replace('\\"', '"')
+                            # Skip empty lines and array markers
+                            if not current_line or current_line == '[':
+                                i += 1
+                                continue
+                            
+                            # Clean up the JSON line - handle various formats
+                            if current_line.startswith('"') and (current_line.endswith('",') or current_line.endswith('"')):
+                                # Remove quotes and trailing comma
+                                clean_line = current_line[1:]
+                                if clean_line.endswith('",'):
+                                    clean_line = clean_line[:-2]
+                                elif clean_line.endswith('"'):
+                                    clean_line = clean_line[:-1]
+                                
+                                # Unescape quotes
+                                clean_line = clean_line.replace('\\"', '"')
                                 json_lines.append(clean_line)
-                            elif current_line.startswith('"') and current_line.endswith('"'):
-                                clean_line = current_line[1:-1].replace('\\"', '"')
-                                json_lines.append(clean_line)
+                                json_started = True
                             
                             i += 1
                         
@@ -2089,13 +2964,18 @@ class R1Setup:
                         if json_lines:
                             try:
                                 json_str = '\n'.join(json_lines)
+                                self.print_debug(f"Line-by-line JSON for {node_name}: {json_str[:200]}...")
                                 node_data = json.loads(json_str)
                                 node_info[node_name] = node_data
+                                self.print_debug(f"Line-by-line parsing successful for {node_name}")
                             except json.JSONDecodeError as e:
-                                self.print_debug(f"Failed to parse JSON for {node_name}: {e}")
+                                self.print_debug(f"Line-by-line JSON parsing failed for {node_name}: {e}")
+                        else:
+                            self.print_debug(f"No JSON lines collected for {node_name}")
             else:
                 i += 1
         
+        self.print_debug(f"Line-by-line parsing result: {len(node_info)} nodes found")
         return node_info
 
     def get_node_addresses(self) -> None:
@@ -2107,29 +2987,61 @@ class R1Setup:
 
         self.print_header("Node Addresses")
 
-        # Get node information using the same playbook as option 9
-        node_info = self._get_node_info_data()
-        
-        if not node_info:
-            self.print_colored("Failed to retrieve node information!", 'red')
+        playbook_path = self.config_dir / 'playbooks/get_node_info.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"Node info playbook not found: {playbook_path}", 'red')
             input("Press Enter to continue...")
             return
 
-        # Display the addresses in a formatted table
-        self.print_colored(f"\nFound information for {len(node_info)} node(s):", 'green')
-        self.print_colored(f"{'Node Alias':<20} {'Address':<48} {'ETH Address':<42}", 'cyan')
-        self.print_colored("-" * 110, 'cyan')
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+
+        self.print_colored("Retrieving node addresses...", 'yellow')
+
+        success, output = self.run_command(cmd, show_output=False, timeout=60)
+
+        # Check for timeout specifically
+        if not success and "timed out" in output.lower():
+            self.print_colored("Node address retrieval timed out after 60 seconds", 'red')
+            self.print_colored("Some nodes may be offline or not responding", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Parse the output to extract both successful and failed nodes
+        # Note: We parse even if success=False because some nodes might have succeeded
+        node_results = self._parse_node_info_output(output)
         
-        for node_name, info in node_info.items():
-            alias = info.get('alias', node_name)
-            address = info.get('address', 'N/A')
-            eth_address = info.get('eth_address', 'N/A')
-            
-            self.print_colored(f"{alias:<20} {address:<48} {eth_address:<42}")
-        
-        if len(node_info) == 0:
+        if not node_results:
             self.print_colored("No node information could be parsed from the playbook output.", 'yellow')
             self.print_colored("This might be because the nodes are not running or not accessible.", 'yellow')
+        else:
+            # Display the addresses in a formatted table
+            self.print_colored(f"\nNode Addresses Summary:", 'green')
+            self.print_colored(f"{'Node Name':<20} {'Status':<15} {'Address':<48} {'ETH Address':<42}", 'cyan')
+            self.print_colored("-" * 125, 'cyan')
+            
+            success_count = 0
+            unreachable_count = 0
+            
+            for node_name, result in node_results.items():
+                if result['status'] == 'success':
+                    address = result['data'].get('address', 'N/A')
+                    eth_address = result['data'].get('eth_address', 'N/A')
+                    self.print_colored(f"{node_name:<20} {'SUCCESS':<15} {address:<48} {eth_address:<42}", 'green')
+                    success_count += 1
+                else:
+                    self.print_colored(f"{node_name:<20} {'UNREACHABLE':<15} {'Connection failed':<48} {'N/A':<42}", 'red')
+                    unreachable_count += 1
+            
+            # Show summary
+            if success_count > 0 and unreachable_count > 0:
+                self.print_colored(f"\n✅ {success_count} node(s) retrieved successfully, ❌ {unreachable_count} node(s) unreachable", 'yellow')
+            elif success_count > 0:
+                self.print_colored(f"\n✅ All {success_count} node(s) retrieved successfully", 'green')
+            else:
+                self.print_colored(f"\n❌ All {unreachable_count} node(s) are unreachable", 'red')
 
         input("\nPress Enter to continue...")
 
@@ -2142,31 +3054,55 @@ class R1Setup:
 
         self.print_header("Export Addresses to CSV")
 
-        # Get node information using the same playbook as option 9
-        node_info = self._get_node_info_data()
-        
-        if not node_info:
-            self.print_colored("Failed to retrieve node information!", 'red')
+        playbook_path = self.config_dir / 'playbooks/get_node_info.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"Node info playbook not found: {playbook_path}", 'red')
             input("Press Enter to continue...")
             return
 
-        self.print_colored(f"Found information for {len(node_info)} node(s)", 'green')
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+
+        self.print_colored("Retrieving node information for CSV export...", 'yellow')
+
+        success, output = self.run_command(cmd, show_output=False, timeout=60)
+
+        # Check for timeout specifically
+        if not success and "timed out" in output.lower():
+            self.print_colored("Node info retrieval timed out after 60 seconds", 'red')
+            self.print_colored("Some nodes may be offline or not responding", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Parse the output to extract both successful and failed nodes
+        # Note: We parse even if success=False because some nodes might have succeeded
+        node_results = self._parse_node_info_output(output)
+        
+        if not node_results:
+            self.print_colored("No node information could be parsed from the playbook output.", 'yellow')
+            self.print_colored("This might be because the nodes are not running or not accessible.", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Count successful and failed nodes
+        success_count = sum(1 for result in node_results.values() if result['status'] == 'success')
+        unreachable_count = sum(1 for result in node_results.values() if result['status'] == 'unreachable')
+        
+        self.print_colored(f"Found information for {len(node_results)} node(s) (✅ {success_count} successful, ❌ {unreachable_count} unreachable)", 'green')
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         csv_file = f"node_addresses_{timestamp}.csv"
 
         try:
             with open(csv_file, 'w') as f:
-                f.write("Node_Alias,Address,ETH_Address,SSH_Host,SSH_User\n")
+                f.write("Node_Name,Status,Address,ETH_Address,SSH_Host,SSH_User\n")
                 
                 # Load configuration to get SSH details
                 self.load_configuration()
                 hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
                 
-                for node_name, info in node_info.items():
-                    alias = info.get('alias', node_name)
-                    address = info.get('address', 'N/A')
-                    eth_address = info.get('eth_address', 'N/A')
-                    
+                for node_name, result in node_results.items():
                     # Get SSH info from configuration
                     ssh_host = 'N/A'
                     ssh_user = 'N/A'
@@ -2174,10 +3110,19 @@ class R1Setup:
                         ssh_host = hosts[node_name].get('ansible_host', 'N/A')
                         ssh_user = hosts[node_name].get('ansible_user', 'N/A')
                     
-                    f.write(f'"{alias}","{address}","{eth_address}","{ssh_host}","{ssh_user}"\n')
+                    if result['status'] == 'success':
+                        info = result['data']
+                        alias = info.get('alias', node_name)
+                        address = info.get('address', 'N/A')
+                        eth_address = info.get('eth_address', 'N/A')
+                        f.write(f'"{node_name}","SUCCESS","{address}","{eth_address}","{ssh_host}","{ssh_user}"\n')
+                    else:
+                        f.write(f'"{node_name}","UNREACHABLE","N/A","N/A","{ssh_host}","{ssh_user}"\n')
 
             self.print_colored(f"Addresses exported to: {csv_file}", 'green')
-            self.print_colored(f"CSV contains: Node Alias, Blockchain Address, ETH Address, SSH Host, SSH User", 'cyan')
+            self.print_colored(f"CSV contains: Node Name, Status, Blockchain Address, ETH Address, SSH Host, SSH User", 'cyan')
+            if success_count > 0 and unreachable_count > 0:
+                self.print_colored(f"Note: {success_count} nodes have valid addresses, {unreachable_count} nodes are marked as unreachable", 'yellow')
         except Exception as e:
             self.print_colored(f"Error exporting to CSV: {e}", 'red')
 
@@ -2312,11 +3257,11 @@ class R1Setup:
             for name in hosts.keys():
                 status_info = self._get_node_status_info(name)
                 status = status_info['status']
-                last_check = status_info['last_check']
+                last_update = status_info['last_update']
                 emoji, color, description = self._get_status_display_info(status)
-                last_check_str = self._format_timestamp_ago(last_check)
+                last_update_str = self._format_timestamp_ago(last_update)
                 self.print_colored(f"   • {name}: {emoji} {description}", color, end='')
-                self.print_colored(f" (Last check: {last_check_str})", 'white')
+                self.print_colored(f" (Last updated: {last_update_str})", 'white')
                 
         else:
             self.print_colored("❌ Service status check failed. Please check network connectivity and node access.", 'red')
@@ -2442,6 +3387,150 @@ class R1Setup:
         self.print_debug(f"  Status mapping: {actual_status} → {result}")
         return result
 
+    def _parse_connectivity_output(self, output: str) -> Dict[str, Dict[str, Any]]:
+        """Parse ansible connectivity test output to extract connection results"""
+        node_results = {}
+        
+        try:
+            lines = output.split('\n')
+            self.print_debug(f"Parsing connectivity output with {len(lines)} lines")
+            
+            # Look for PLAY RECAP section which contains the summary
+            recap_started = False
+            for line in lines:
+                line = line.strip()
+                
+                if 'PLAY RECAP' in line:
+                    recap_started = True
+                    continue
+                
+                if recap_started and line:
+                    # Parse lines like: "node-name : ok=5 changed=1 unreachable=0 failed=0 skipped=0 rescued=0 ignored=0"
+                    if ':' in line and 'ok=' in line:
+                        parts = line.split(':', 1)
+                        if len(parts) == 2:
+                            node_name = parts[0].strip()
+                            stats = parts[1].strip()
+                            
+                            # Parse the statistics
+                            stats_dict = {}
+                            for stat_pair in stats.split():
+                                if '=' in stat_pair:
+                                    key, value = stat_pair.split('=', 1)
+                                    try:
+                                        stats_dict[key] = int(value)
+                                    except ValueError:
+                                        stats_dict[key] = value
+                            
+                            # Determine connection status
+                            if stats_dict.get('unreachable', 0) > 0:
+                                status = 'unreachable'
+                                message = 'Connection failed - node is unreachable'
+                            elif stats_dict.get('failed', 0) > 0:
+                                status = 'failed'
+                                message = 'Connection failed - authentication or other error'
+                            elif stats_dict.get('ok', 0) > 0:
+                                status = 'connected'
+                                message = 'Connection successful'
+                            else:
+                                status = 'unknown'
+                                message = 'Unknown connection status'
+                            
+                            node_results[node_name] = {
+                                'status': status,
+                                'message': message,
+                                'stats': stats_dict
+                            }
+                            
+                            self.print_debug(f"Parsed {node_name}: {status} - {message}")
+                            
+        except Exception as e:
+            self.print_debug(f"Error parsing connectivity output: {e}")
+            
+        self.print_debug(f"Final connectivity results: {node_results}")
+        return node_results
+
+    def _display_connectivity_results(self, connectivity_results: Dict[str, Dict[str, Any]], hosts: Dict[str, Dict[str, Any]]) -> None:
+        """Display formatted connectivity test results"""
+        
+        if not connectivity_results:
+            self.print_colored("\n❌ No connectivity results could be parsed from the test output.", 'red')
+            self.print_colored("   This might indicate a configuration or network issue.", 'yellow')
+            return
+        
+        # Count results by status
+        connected_count = sum(1 for result in connectivity_results.values() if result['status'] == 'connected')
+        unreachable_count = sum(1 for result in connectivity_results.values() if result['status'] == 'unreachable')
+        failed_count = sum(1 for result in connectivity_results.values() if result['status'] == 'failed')
+        total_count = len(connectivity_results)
+        
+        # Display overall summary
+        self.print_colored(f"\n📊 Connectivity Test Results", 'cyan', bold=True)
+        self.print_colored(f"   • Total nodes tested: {total_count}", 'white')
+        self.print_colored(f"   • Connected: {connected_count}", 'green' if connected_count > 0 else 'white')
+        self.print_colored(f"   • Unreachable: {unreachable_count}", 'red' if unreachable_count > 0 else 'white')
+        self.print_colored(f"   • Failed: {failed_count}", 'red' if failed_count > 0 else 'white')
+        
+        # Display detailed results for each node
+        self.print_colored(f"\n🔍 Detailed Node Results:", 'cyan', bold=True)
+        
+        for node_name, result in connectivity_results.items():
+            status = result['status']
+            message = result['message']
+            stats = result.get('stats', {})
+            
+            # Get node configuration details
+            node_config = hosts.get(node_name, {})
+            ip = node_config.get('ansible_host', 'Unknown')
+            user = node_config.get('ansible_user', 'Unknown')
+            
+            # Choose appropriate emoji and color
+            if status == 'connected':
+                emoji = '✅'
+                color = 'green'
+            elif status == 'unreachable':
+                emoji = '🔴'
+                color = 'red'
+            elif status == 'failed':
+                emoji = '❌'
+                color = 'red'
+            else:
+                emoji = '❓'
+                color = 'yellow'
+            
+            # Display node result
+            self.print_colored(f"\n   {emoji} {node_name} ({user}@{ip})", color, bold=True)
+            self.print_colored(f"      Status: {message}", color)
+            
+            # Show statistics if available
+            if stats:
+                ok_count = stats.get('ok', 0)
+                changed_count = stats.get('changed', 0)
+                unreachable_count = stats.get('unreachable', 0)
+                failed_count = stats.get('failed', 0)
+                
+                self.print_colored(f"      Tasks: {ok_count} successful, {changed_count} changed, {unreachable_count} unreachable, {failed_count} failed", 'white')
+        
+        # Overall result and recommendations
+        if connected_count == total_count:
+            self.print_colored(f"\n✅ All {total_count} node(s) are reachable and ready for deployment!", 'green', bold=True)
+        elif connected_count > 0:
+            self.print_colored(f"\n⚠️  {connected_count} of {total_count} node(s) are reachable", 'yellow', bold=True)
+            self.print_colored("   Some nodes have connectivity issues that need to be resolved.", 'yellow')
+        else:
+            self.print_colored(f"\n❌ All {total_count} node(s) are unreachable", 'red', bold=True)
+            self.print_colored("   Please check your network configuration and node settings.", 'red')
+        
+        # Show troubleshooting tips if there are issues
+        if unreachable_count > 0 or failed_count > 0:
+            self.print_colored(f"\n💡 Troubleshooting Tips:", 'cyan', bold=True)
+            self.print_colored("   • Verify network connectivity (ping the IP addresses)", 'white')
+            self.print_colored("   • Check SSH credentials and authentication method", 'white')
+            self.print_colored("   • Ensure SSH service is running on target nodes", 'white')
+            self.print_colored("   • Verify firewall settings allow SSH connections", 'white')
+            self.print_colored("   • Use option 1 → 3 to view and verify your configuration", 'white')
+            self.print_colored("   • Use option 10 → 2 to test SSH connection manually", 'white')
+
     def ssh_into_node_machine(self) -> None:
         """SSH into a selected node's machine"""
         if not self.check_hosts_config():
@@ -2468,12 +3557,12 @@ class R1Setup:
             auth_type = "Password" if 'ansible_ssh_pass' in config else "SSH Key"
             status_info = self._get_node_status_info(name)
             status = status_info['status']
-            last_check = status_info['last_check']
+            last_update = status_info['last_update']
             emoji, color, description = self._get_status_display_info(status)
-            last_check_str = self._format_timestamp_ago(last_check)
+            last_update_str = self._format_timestamp_ago(last_update)
             self.print_colored(f"   • {name}: {user}@{ip} ", 'white', end='')
             self.print_colored(f"[{emoji} {description}]", color, end='')
-            self.print_colored(f" ({auth_type}) (Last check: {last_check_str})", 'white')
+            self.print_colored(f" ({auth_type}) (Last updated: {last_update_str})", 'white')
 
         self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
         self.print_colored("   • Connect you directly to the selected node via SSH", 'yellow')
@@ -2491,10 +3580,12 @@ class R1Setup:
             user = config.get('ansible_user', 'Unknown')
             status_info = self._get_node_status_info(host_name)
             status = status_info['status']
+            last_update = status_info['last_update']
             emoji, color, description = self._get_status_display_info(status)
+            last_update_str = self._format_timestamp_ago(last_update)
             
             self.print_colored(f"  {i}) {host_name}", 'cyan')
-            self.print_colored(f"     └─ {user}@{ip} [{emoji} {description}]", 'white')
+            self.print_colored(f"     └─ {user}@{ip} [{emoji} {description}] (Last updated: {last_update_str})", 'white')
         
         self.print_colored(f"  0) Cancel")
 
@@ -2604,9 +3695,7 @@ class R1Setup:
         """Restart Edge Node on all configured nodes"""
         self._manage_service("service_restart.yml", "Restart Edge Node", "🔄 Restarting Edge Node")
 
-    def check_service_status(self) -> None:
-        """Check Edge Node status on all configured nodes"""
-        self._manage_service("service_status.yml", "Check Service Status", "📊 Checking Edge Node status")
+
 
     def view_node_statuses(self) -> None:
         """View current node statuses with last update information"""
@@ -2857,15 +3946,15 @@ class R1Setup:
             if "start" in playbook_name:
                 for host_name in selected_hosts:
                     self._update_node_status(host_name, 'running')
-                self.print_colored(f"Edge nodes have been started on {len(selected_hosts)} node(s).", 'green')
+                self.print_colored(f"Edge Nodes have been started on {len(selected_hosts)} node(s).", 'green')
             elif "stop" in playbook_name:
                 for host_name in selected_hosts:
                     self._update_node_status(host_name, 'stopped')
-                self.print_colored(f"Edge nodes have been stopped on {len(selected_hosts)} node(s).", 'green')
+                self.print_colored(f"Edge Nodes have been stopped on {len(selected_hosts)} node(s).", 'green')
             elif "restart" in playbook_name:
                 for host_name in selected_hosts:
                     self._update_node_status(host_name, 'running')
-                self.print_colored(f"Edge nodes have been restarted on {len(selected_hosts)} node(s).", 'green')
+                self.print_colored(f"Edge Nodes have been restarted on {len(selected_hosts)} node(s).", 'green')
             elif "status" in playbook_name:
                 # Status check doesn't change the actual status, just reports it
                 self.print_colored(f"Service status information retrieved for {len(selected_hosts)} node(s).", 'green')
@@ -2896,13 +3985,21 @@ class R1Setup:
 
     def _update_deployment_metadata(self, deployment_type: str) -> None:
         """Update deployment metadata after successful deployment"""
+        self.print_debug(f"Updating deployment metadata with type: {deployment_type}")
+        self.print_debug(f"Active config: {self.active_config}")
+        
         if not self.active_config.get('config_name'):
+            self.print_debug("No config_name in active_config, cannot update deployment metadata")
+            self.print_colored("Warning: No configuration name found, cannot update deployment tracking", 'yellow')
             return
 
         config_name = self.active_config['config_name']
         metadata_path = self.configs_dir / f"{config_name}.json"
+        self.print_debug(f"Looking for metadata file: {metadata_path}")
 
         if not metadata_path.exists():
+            self.print_debug(f"Metadata file does not exist: {metadata_path}")
+            self.print_colored(f"Warning: Metadata file not found: {metadata_path}", 'yellow')
             return
 
         try:
@@ -2910,12 +4007,16 @@ class R1Setup:
             with open(metadata_path) as f:
                 metadata = json.load(f)
 
+            self.print_debug(f"Loaded existing metadata: {metadata}")
+
             # Update deployment info
             current_network = self.get_mnl_app_env()
             metadata['last_deployed_date'] = datetime.now().isoformat()
             metadata['last_deployed_network'] = current_network
             metadata['deployment_status'] = 'deployed'
             metadata['last_deployment_type'] = deployment_type
+
+            self.print_debug(f"Updated metadata: {metadata}")
 
             # Save updated metadata
             with open(metadata_path, 'w') as f:
@@ -2926,8 +4027,10 @@ class R1Setup:
             self._save_active_config()
 
             self.print_colored(f"✅ Deployment tracking updated for configuration: {config_name}", 'green')
+            self.print_debug(f"Successfully updated deployment metadata for {config_name}")
         except Exception as e:
             self.print_colored(f"Warning: Could not update deployment metadata: {e}", 'yellow')
+            self.print_debug(f"Error updating deployment metadata: {e}")
 
     def _update_deletion_metadata(self) -> None:
         """Update deployment metadata after successful deletion"""
@@ -4003,6 +5106,7 @@ except:
             self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
             self.print_colored("  1) Select an existing configuration to activate")
             self.print_colored("  2) Create a new configuration")
+            print()
             self.print_colored("  0) Exit")
 
             while True:
@@ -4046,6 +5150,7 @@ except:
 
             self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
             self.print_colored("  1) Create your first configuration")
+            print()
             self.print_colored("  0) Exit")
 
             while True:
@@ -4087,47 +5192,31 @@ except:
         while True:
             try:
                 self.show_main_menu()
-                choice = self.get_input("Select option (0-17)", "0")
+                choice = self.get_input("Select option (0-11)", "0")
 
                 if choice == '0':
                     self.print_colored("Thank you for using Ratio1 Multi-Node Launcher Setup!", 'green')
                     break
                 elif choice == '1':
-                    self.configure_nodes_menu()
+                    self.configuration_menu()
                 elif choice == '2':
-                    self.manage_configurations_menu()
+                    self.deployment_menu()
                 elif choice == '3':
-                    self.view_configuration()
-                elif choice == '4':
-                    self.test_connectivity()
-                elif choice == '5':
-                    self.deploy_full()
-                elif choice == '6':
-                    self.deploy_docker_only()
-                elif choice == '7':
-                    self.delete_edge_node()
-                elif choice == '8':
-                    self.get_node_info()
-                elif choice == '9':
-                    self.get_node_addresses()
-                elif choice == '10':
-                    self.export_addresses_csv()
-                elif choice == '11':
                     self.start_edge_node_service()
-                elif choice == '12':
+                elif choice == '4':
                     self.stop_edge_node_service()
-                elif choice == '13':
+                elif choice == '5':
                     self.restart_edge_node_service()
-                elif choice == '14':
-                    self.check_service_status()
-                elif choice == '15':
-                    self.view_node_statuses()
-                elif choice == '16':
-                    self.check_and_update_node_status()
-                elif choice == '17':
-                    self.ssh_into_node_machine()
-                elif choice == '18':
-                    self.change_network_environment()
+                elif choice == '6':
+                    self.combined_node_status_and_info()
+                elif choice == '7':
+                    self.get_node_addresses()
+                elif choice == '8':
+                    self.export_addresses_csv()
+                elif choice == '9':
+                    self.test_connectivity()
+                elif choice == '10':
+                    self.utilities_menu()
                 else:
                     self.print_colored("Invalid option. Please try again.", 'red')
                     input("Press Enter to continue...")
@@ -4138,6 +5227,340 @@ except:
             except Exception as e:
                 self.print_colored(f"An error occurred: {e}", 'red')
                 input("Press Enter to continue...")
+
+    def switch_environment(self) -> None:
+        """Switch network environment (wrapper for change_network_environment)"""
+        self.change_network_environment()
+
+    def deployment_status(self) -> None:
+        """Show deployment status for all nodes"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        # Reload active config to ensure deployment status is current
+        self._load_active_config()
+        
+        self.print_header("Deployment Status")
+        
+        # Load configuration
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        
+        if not hosts:
+            self.print_colored("No nodes configured.", 'yellow')
+            input("Press Enter to continue...")
+            return
+        
+        # Show deployment status overview
+        deployment_status = self.active_config.get('deployment_status', 'never_deployed')
+        last_deployed_date = self.active_config.get('last_deployed_date')
+        last_deployed_network = self.active_config.get('last_deployed_network')
+        last_deployment_type = self.active_config.get('last_deployment_type')
+        last_deleted_date = self.active_config.get('last_deleted_date')
+        
+        # Overall deployment status
+        self.print_section("Overall Deployment Status")
+        
+        if deployment_status == 'deployed' and last_deployed_date:
+            try:
+                deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
+                deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
+                self.print_colored(f"🚀 Status: Deployed on {deployed_str}", 'green')
+                if last_deployed_network:
+                    self.print_colored(f"🌐 Network: {last_deployed_network}", 'cyan')
+                if last_deployment_type:
+                    self.print_colored(f"🔧 Type: {last_deployment_type}", 'cyan')
+            except:
+                self.print_colored("🚀 Status: Deployed", 'green')
+        elif deployment_status == 'deleted' and last_deleted_date:
+            try:
+                deleted_dt = datetime.fromisoformat(last_deleted_date.replace('Z', '+00:00'))
+                deleted_str = deleted_dt.strftime('%Y-%m-%d %H:%M')
+                self.print_colored(f"🗑️ Status: Deleted on {deleted_str}", 'red')
+            except:
+                self.print_colored("🗑️ Status: Deleted", 'red')
+        else:
+            self.print_colored("📋 Status: Never deployed", 'yellow')
+        
+        # Individual node status - check in real-time
+        self.print_section(f"Node Status Overview ({len(hosts)} nodes)")
+        self.print_colored("🔍 Checking current status (max 30s timeout)...", 'cyan')
+        
+        # Get real-time status for each node
+        real_time_status = self._get_real_time_node_status()
+        
+        print()  # Add a blank line after the checking message
+        
+        for host_name in hosts.keys():
+            if host_name in real_time_status:
+                status = real_time_status[host_name]['status']
+                result = real_time_status[host_name]['result']
+                emoji, color, description = self._get_status_display_info(status)
+                
+                self.print_colored(f"  • {host_name}: {emoji} {description}", color, end='')
+                self.print_colored(f" (Current status)", 'white')
+            else:
+                self.print_colored(f"  • {host_name}: ❓ Unable to check", 'yellow', end='')
+                self.print_colored(f" (Current status)", 'white')
+        
+        input("\nPress Enter to continue...")
+
+    def get_logs(self) -> None:
+        """Stream logs from selected nodes"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        self.print_header("Get Node Logs")
+        
+        # Load configuration
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        
+        if not hosts:
+            self.print_colored("No nodes configured.", 'yellow')
+            input("Press Enter to continue...")
+            return
+        
+        # Show available nodes
+        self.print_section(f"Available Nodes ({len(hosts)})")
+        host_list = list(hosts.keys())
+        
+        for i, host_name in enumerate(host_list, 1):
+            host_config = hosts[host_name]
+            ip = host_config.get('ansible_host', 'Unknown')
+            user = host_config.get('ansible_user', 'Unknown')
+            
+            # Get status information
+            status_info = self._get_node_status_info(host_name)
+            status = status_info['status']
+            emoji, color, description = self._get_status_display_info(status)
+            
+            self.print_colored(f"  {i}. {host_name} ({user}@{ip}) ", 'white', end='')
+            self.print_colored(f"[{emoji} {description}]", color)
+        
+        print()
+        self.print_colored("  0) Return to main menu")
+        print()
+        
+        while True:
+            choice = self.get_input("Select a node to view logs (0 to return)", "0")
+            
+            if choice == '0':
+                return
+            
+            try:
+                node_index = int(choice) - 1
+                if 0 <= node_index < len(host_list):
+                    selected_node = host_list[node_index]
+                    self._stream_node_logs(selected_node)
+                    break
+                else:
+                    self.print_colored("Invalid selection. Please try again.", 'red')
+            except ValueError:
+                self.print_colored("Invalid input. Please enter a number.", 'red')
+
+    def _stream_node_logs(self, node_name: str) -> None:
+        """Stream logs from a specific node"""
+        self.print_header(f"Streaming Logs - {node_name}")
+        
+        # Get node connection details first to validate before asking user to proceed
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        node_config = hosts.get(node_name, {})
+        
+        host = node_config.get('ansible_host', '')
+        user = node_config.get('ansible_user', '')
+        
+        if not host or not user:
+            self.print_colored("Error: Node configuration incomplete.", 'red')
+            input("Press Enter to continue...")
+            return
+        
+        self.print_colored(f"📡 Ready to stream logs from: {user}@{host}", 'cyan')
+        self.print_colored("🔍 This will run 'get_logs -f' on the target machine", 'white')
+        self.print_colored("⚠️  Use Ctrl+C to stop streaming and return to menu", 'yellow', bold=True)
+        print()
+        
+        # Ask user to confirm before starting
+        input("Press Enter to start streaming logs...")
+        print()
+        
+        try:
+            # Construct SSH command to follow logs using the deployed get_logs script
+            ssh_cmd = f"ssh {user}@{host} 'get_logs -f'"
+            
+            # Handle SSH key vs password authentication
+            if 'ansible_ssh_pass' in node_config:
+                # Use sshpass for password authentication
+                ssh_cmd = f"sshpass -p '{node_config['ansible_ssh_pass']}' {ssh_cmd}"
+            
+            self.print_colored(f"Connecting to {user}@{host}...", 'yellow')
+            print("=" * 80)
+            
+            # Execute the command
+            process = subprocess.Popen(ssh_cmd, shell=True, stdout=subprocess.PIPE, 
+                                     stderr=subprocess.STDOUT, text=True, 
+                                     universal_newlines=True)
+            
+            # Stream the output
+            try:
+                for line in iter(process.stdout.readline, ''):
+                    if line:
+                        print(line.rstrip())
+                    else:
+                        break
+            except KeyboardInterrupt:
+                print("\n" + "=" * 80)
+                self.print_colored("\n🛑 Log streaming stopped by user.", 'yellow')
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            
+        except Exception as e:
+            self.print_colored(f"Error streaming logs: {e}", 'red')
+        
+        input("\nPress Enter to continue...")
+
+    def write_logs_to_file(self) -> None:
+        """Save node logs to a local file"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        self.print_header("Write Logs to File")
+        
+        # Load configuration
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        
+        if not hosts:
+            self.print_colored("No nodes configured.", 'yellow')
+            input("Press Enter to continue...")
+            return
+        
+        # Show available nodes
+        self.print_section(f"Available Nodes ({len(hosts)})")
+        host_list = list(hosts.keys())
+        
+        for i, host_name in enumerate(host_list, 1):
+            host_config = hosts[host_name]
+            ip = host_config.get('ansible_host', 'Unknown')
+            user = host_config.get('ansible_user', 'Unknown')
+            
+            # Get status information
+            status_info = self._get_node_status_info(host_name)
+            status = status_info['status']
+            emoji, color, description = self._get_status_display_info(status)
+            
+            self.print_colored(f"  {i}. {host_name} ({user}@{ip}) ", 'white', end='')
+            self.print_colored(f"[{emoji} {description}]", color)
+        
+        print()
+        self.print_colored("  0) Return to main menu")
+        print()
+        
+        while True:
+            choice = self.get_input("Select a node to save logs from (0 to return)", "0")
+            
+            if choice == '0':
+                return
+            
+            try:
+                node_index = int(choice) - 1
+                if 0 <= node_index < len(host_list):
+                    selected_node = host_list[node_index]
+                    self._save_node_logs_to_file(selected_node)
+                    break
+                else:
+                    self.print_colored("Invalid selection. Please try again.", 'red')
+            except ValueError:
+                self.print_colored("Invalid input. Please enter a number.", 'red')
+
+    def _save_node_logs_to_file(self, node_name: str) -> None:
+        """Save logs from a specific node to a local file"""
+        self.print_header(f"Save Logs to File - {node_name}")
+        
+        # Get log lines count
+        while True:
+            try:
+                lines_input = self.get_input("How many recent log lines to save (default: 1000)", "1000")
+                lines_count = int(lines_input)
+                if lines_count <= 0:
+                    self.print_colored("Please enter a positive number.", 'red')
+                    continue
+                break
+            except ValueError:
+                self.print_colored("Invalid input. Please enter a number.", 'red')
+        
+        # Generate default filename
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        default_filename = f"{node_name}_logs_{timestamp}.txt"
+        
+        # Get output filename
+        filename = self.get_input(f"Output filename (default: {default_filename})", default_filename)
+        
+        # Ensure we have a valid filename
+        if not filename.strip():
+            filename = default_filename
+        
+        # Add .txt extension if not present
+        if not filename.endswith('.txt'):
+            filename += '.txt'
+        
+        try:
+            # Get node connection details
+            self.load_configuration()
+            hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+            node_config = hosts.get(node_name, {})
+            
+            host = node_config.get('ansible_host', '')
+            user = node_config.get('ansible_user', '')
+            
+            if not host or not user:
+                self.print_colored("Error: Node configuration incomplete.", 'red')
+                input("Press Enter to continue...")
+                return
+            
+            # Construct SSH command to get logs using the deployed get_logs script
+            ssh_cmd = f"ssh {user}@{host} 'get_logs -n {lines_count}'"
+            
+            # Handle SSH key vs password authentication
+            if 'ansible_ssh_pass' in node_config:
+                # Use sshpass for password authentication
+                ssh_cmd = f"sshpass -p '{node_config['ansible_ssh_pass']}' {ssh_cmd}"
+            
+            self.print_colored(f"Connecting to {user}@{host} and retrieving {lines_count} log lines...", 'yellow')
+            
+            # Execute the command
+            result = subprocess.run(ssh_cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                # Save logs to file
+                with open(filename, 'w') as f:
+                    f.write(f"# Edge Node Logs from {node_name} ({user}@{host})\n")
+                    f.write(f"# Retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"# Last {lines_count} log lines\n")
+                    f.write("# " + "="*60 + "\n\n")
+                    f.write(result.stdout)
+                
+                self.print_colored(f"✅ Logs saved to: {filename}", 'green')
+                self.print_colored(f"📝 File size: {os.path.getsize(filename)} bytes", 'cyan')
+                self.print_colored(f"📅 Lines saved: {lines_count}", 'cyan')
+                
+            else:
+                self.print_colored(f"❌ Error retrieving logs: {result.stderr}", 'red')
+                
+        except Exception as e:
+            self.print_colored(f"Error saving logs: {e}", 'red')
+        
+        input("\nPress Enter to continue...")
 
     def _interactive_deployment_host_selection(self, hosts: Dict[str, Dict[str, Any]], operation_name: str) -> List[str]:
         """Interactive host selection for deployments with never-deployed nodes preselected"""
@@ -4764,20 +6187,325 @@ except:
             self.print_debug(f"Error parsing timestamp '{timestamp}': {e}")
             return "Unknown"
 
-    def _get_node_status_info(self, node_name: str) -> Dict[str, str]:
-        """Get status information for a node"""
+    def combined_node_status_and_info(self) -> None:
+        """Display beautiful live container status overview - checks if Edge Node containers are running"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        # Load configuration
+        self.load_configuration()
         hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
-        if node_name in hosts:
-            status = hosts[node_name].get('node_status', 'unknown')
-            last_update = hosts[node_name].get('last_status_update', '')
-            last_check = hosts[node_name].get('last_status_check', '')
-            self.print_debug(f"Retrieved {node_name} status: {status} (updated: {last_update}, checked: {last_check})")
-            return {'status': status, 'last_update': last_update, 'last_check': last_check}
-        self.print_debug(f"Node {node_name} not found in hosts configuration")
-        return {'status': 'unknown', 'last_update': '', 'last_check': ''}
+        env = self.get_mnl_app_env()
+
+        # Clear screen and show loading
+        print("\033[2J\033[H", end="")
+        self.print_header("Container Status")
+        self.print_colored("🔍 Checking container status (max 30s timeout)...", 'cyan')
+        
+        # Use the same deployment status workflow - get real-time status
+        node_status_data = self._get_real_time_node_status()
+
+        # Update persistent status information for each node
+        for node_name, status_data in node_status_data.items():
+            self._update_node_status(node_name, status_data['status'])
+
+        # Clear and display beautiful status
+        print("\033[2J\033[H", end="")
+        self.print_header("Container Status")
+        
+        # Show deployment status overview (like deployment menu does)
+        self._load_active_config()
+        deployment_status = self.active_config.get('deployment_status', 'never_deployed')
+        last_deployed_date = self.active_config.get('last_deployed_date')
+        last_deployed_network = self.active_config.get('last_deployed_network')
+        last_deployment_type = self.active_config.get('last_deployment_type')
+        last_deleted_date = self.active_config.get('last_deleted_date')
+        
+        # Overall deployment status
+        if deployment_status == 'deployed' and last_deployed_date:
+            try:
+                deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
+                deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
+                deployment_text = f"🚀 Last deployed: {deployed_str}"
+                if last_deployed_network:
+                    deployment_text += f" ({last_deployed_network})"
+                self.print_colored(f"Deployment: {deployment_text}", 'green')
+            except:
+                self.print_colored("Deployment: ✓ Deployed", 'green')
+        elif deployment_status == 'deleted' and last_deleted_date:
+            try:
+                deleted_dt = datetime.fromisoformat(last_deleted_date.replace('Z', '+00:00'))
+                deleted_str = deleted_dt.strftime('%Y-%m-%d %H:%M')
+                deployment_text = f"🗑️ Last deleted: {deleted_str}"
+                self.print_colored(f"Deployment: {deployment_text}", 'red')
+            except:
+                self.print_colored("Deployment: ✓ Deleted", 'red')
+        else:
+            self.print_colored("Deployment: ✗ Never deployed", 'yellow')
+        print()
+        
+        # Network info
+        env_color = 'green' if env else 'red'
+        env_text = env if env else 'Not Set'
+        self.print_colored(f"🌐 {env_text} │ 🐳 {len(hosts)} containers", env_color, bold=True)
+        print()
+
+        # Count status
+        running = sum(1 for data in node_status_data.values() if data['status'] == 'running')
+        stopped = sum(1 for data in node_status_data.values() if data['status'] == 'stopped')
+        unreachable = sum(1 for data in node_status_data.values() if data['status'] == 'unreachable')
+        not_deployed = sum(1 for data in node_status_data.values() if data['status'] == 'not_deployed')
+        unknown = sum(1 for data in node_status_data.values() if data['status'] == 'unknown')
+
+        # Status overview
+        self.print_colored("┌─ Container Status " + "─" * 48 + "┐", 'cyan')
+        status_line = "│"
+        if running > 0:
+            status_line += f" 🟢 {running} Running"
+        if stopped > 0:
+            status_line += f" 🔴 {stopped} Stopped"
+        if not_deployed > 0:
+            status_line += f" 📦 {not_deployed} Not Deployed"
+        if unreachable > 0:
+            status_line += f" 🔌 {unreachable} Unreachable"
+        if unknown > 0:
+            status_line += f" ❓ {unknown} Unknown"
+        
+        # Pad the status line
+        padding = 68 - len(status_line)
+        status_line += " " * padding + "│"
+        
+        if running > 0:
+            self.print_colored(status_line, 'green')
+        elif stopped > 0:
+            self.print_colored(status_line, 'red')
+        else:
+            self.print_colored(status_line, 'yellow')
+        
+        self.print_colored("└" + "─" * 68 + "┘", 'cyan')
+        print()
+
+        # Container list
+        self.print_colored("┌─ Containers " + "─" * 55 + "┐", 'cyan')
+        
+        for i, (name, config) in enumerate(hosts.items()):
+            ip = config.get('ansible_host', 'Unknown')
+            user = config.get('ansible_user', 'Unknown')
+            status_data = node_status_data[name]
+            status = status_data['status']
+            
+            # Status display
+            if status == 'running':
+                status_icon = "🟢"
+                status_text = "RUNNING"
+                status_color = 'green'
+            elif status == 'stopped':
+                status_icon = "🔴"
+                status_text = "STOPPED"
+                status_color = 'red'
+            elif status == 'not_deployed':
+                status_icon = "📦"
+                status_text = "NOT DEPLOYED"
+                status_color = 'yellow'
+            elif status == 'unreachable':
+                status_icon = "🔌"
+                status_text = "UNREACHABLE"
+                status_color = 'red'
+            else:
+                status_icon = "❓"
+                status_text = "UNKNOWN"
+                status_color = 'yellow'
+            
+            # Node name line
+            self.print_colored("│", 'cyan', end='')
+            self.print_colored(f" {status_icon} {name}", status_color, bold=True, end='')
+            self.print_colored(f" [{status_text}]", status_color, end='')
+            
+            # Calculate padding for node name line
+            line_text = f" {status_icon} {name} [{status_text}]"
+            padding = 67 - len(line_text)
+            self.print_colored(" " * padding + "│", 'cyan')
+            
+            # Connection info
+            self.print_colored("│", 'cyan', end='')
+            self.print_colored(f"   📡 {user}@{ip}", 'white', end='')
+            
+            display_text = f"   📡 {user}@{ip}"
+            padding = 67 - len(display_text)
+            self.print_colored(" " * padding + "│", 'cyan')
+            
+            # Add separator between nodes (except last)
+            if i < len(hosts) - 1:
+                self.print_colored("├" + "─" * 68 + "┤", 'cyan')
+        
+        self.print_colored("└" + "─" * 68 + "┘", 'cyan')
+        print()
+
+        # Quick actions
+        self.print_colored("💡 Quick Actions: 3 Start │ 4 Stop │ 5 Restart", 'white')
+
+        input("\nPress Enter to continue...")
+
+    def _manage_service(self, playbook_name: str, title: str, action_text: str) -> None:
+        """Common method to manage Edge Nodes"""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        self.print_header(title)
+
+        # Load configuration to show service management details
+        self.load_configuration()
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        env = self.get_mnl_app_env()
+
+        # Show service management details
+        self.print_colored(f"🔧 Service Management Details:", 'cyan', bold=True)
+        self.print_colored(f"   • Action: {action_text}", 'white')
+        self.print_colored(f"   • Network: {env if env else 'Not set'}", 'green' if env else 'red')
+        self.print_colored(f"   • Available Nodes: {len(hosts)}", 'white')
+
+        self.print_colored(f"\n🖥️  Available Machines:", 'cyan', bold=True)
+        for name, config in hosts.items():
+            ip = config.get('ansible_host', 'Unknown')
+            user = config.get('ansible_user', 'Unknown')
+            status_info = self._get_node_status_info(name)
+            status = status_info['status']
+            last_check = status_info['last_check']
+            emoji, color, description = self._get_status_display_info(status)
+            last_check_str = self._format_timestamp_ago(last_check)
+            self.print_colored(f"   • {name}: {user}@{ip} ", 'white', end='')
+            self.print_colored(f"[{emoji} {description}]", color, end='')
+            self.print_colored(f" (Last check: {last_check_str})", 'white')
+
+        # Service-specific descriptions
+        if "start" in playbook_name:
+            self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
+            self.print_colored("   • Start the Edge Node systemd service on selected nodes", 'yellow')
+            self.print_colored("   • Enable the service to start automatically on boot", 'yellow')
+            self.print_colored("   • Verify service startup status", 'yellow')
+        elif "stop" in playbook_name:
+            self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
+            self.print_colored("   • Stop the Edge Node systemd service on selected nodes", 'yellow')
+            self.print_colored("   • Keep the service enabled for future startups", 'yellow')
+            self.print_colored("   • Verify service shutdown status", 'yellow')
+        elif "restart" in playbook_name:
+            self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
+            self.print_colored("   • Stop the current Edge Node", 'yellow')
+            self.print_colored("   • Start the Edge Node with fresh state", 'yellow')
+            self.print_colored("   • Verify service restart status", 'yellow')
+        elif "status" in playbook_name:
+            self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
+            self.print_colored("   • Check the current status of Edge Node", 'yellow')
+            self.print_colored("   • Show service logs and runtime information", 'yellow')
+            self.print_colored("   • Display resource usage if available", 'yellow')
+
+        if not env:
+            self.print_colored("\n⚠️  WARNING: Network environment is not set!", 'red', bold=True)
+            self.print_colored("   Service operations will proceed, but network environment should be configured.", 'red')
+
+        # Interactive host selection
+        operation_name = action_text.lower()
+        selected_hosts = self._interactive_host_selection(hosts, operation_name)
+        
+        if not selected_hosts:
+            self.print_colored("No hosts selected. Operation cancelled.", 'yellow')
+            return
+
+        # Show final confirmation with selected hosts
+        self.print_colored(f"\n📋 Selected hosts for {operation_name}:", 'cyan', bold=True)
+        for host_name in selected_hosts:
+            host_config = hosts[host_name]
+            ip = host_config.get('ansible_host', 'Unknown')
+            user = host_config.get('ansible_user', 'Unknown')
+            self.print_colored(f"   ✓ {host_name}: {user}@{ip}", 'green')
+
+        # Confirmation for potentially disruptive operations
+        if "stop" in playbook_name or "restart" in playbook_name:
+            if self.get_input(f"\n⚠️  Continue with {operation_name} on {len(selected_hosts)} selected node(s)? (y/n)", "y").lower() != 'y':
+                self.print_colored("Service operation cancelled.", 'yellow')
+                return
+        else:
+            if self.get_input(f"\n🔧 Continue with {operation_name} on {len(selected_hosts)} selected node(s)? (y/n)", "y").lower() != 'y':
+                self.print_colored("Service operation cancelled.", 'yellow')
+                return
+
+        playbook_path = self.config_dir / f'playbooks/{playbook_name}'
+        if not playbook_path.exists():
+            self.print_colored(f"Service management playbook not found: {playbook_path}", 'red')
+            input("Press Enter to continue...")
+            return
+
+        # Build Ansible command with host limitation
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+
+        # Add --limit parameter to target only selected hosts
+        if len(selected_hosts) < len(hosts):
+            limit_hosts = ','.join(selected_hosts)
+            cmd += f" --limit '{limit_hosts}'"
+
+        # Update node statuses to reflect the operation being performed
+        if "start" in playbook_name or "restart" in playbook_name:
+            for host_name in selected_hosts:
+                self._update_node_status(host_name, 'deploying')
+        elif "stop" in playbook_name:
+            for host_name in selected_hosts:
+                self._update_node_status(host_name, 'deploying')
+
+        self.print_colored(f"\n{action_text} on {len(selected_hosts)} node(s)...", 'cyan')
+        success, _ = self.run_command(cmd, show_output=True)
+
+        if success:
+            self.print_colored(f"\n✅ {title} completed successfully!", 'green')
+            
+            # Update node statuses based on successful operation
+            if "start" in playbook_name:
+                for host_name in selected_hosts:
+                    self._update_node_status(host_name, 'running')
+                self.print_colored(f"Edge Nodes have been started on {len(selected_hosts)} node(s).", 'green')
+            elif "stop" in playbook_name:
+                for host_name in selected_hosts:
+                    self._update_node_status(host_name, 'stopped')
+                self.print_colored(f"Edge Nodes have been stopped on {len(selected_hosts)} node(s).", 'green')
+            elif "restart" in playbook_name:
+                for host_name in selected_hosts:
+                    self._update_node_status(host_name, 'running')
+                self.print_colored(f"Edge Nodes have been restarted on {len(selected_hosts)} node(s).", 'green')
+            elif "status" in playbook_name:
+                # Status check doesn't change the actual status, just reports it
+                self.print_colored(f"Service status information retrieved for {len(selected_hosts)} node(s).", 'green')
+                
+            # Show updated statuses
+            if "start" in playbook_name or "stop" in playbook_name or "restart" in playbook_name:
+                self.print_colored(f"\n📊 Updated Node Statuses:", 'cyan', bold=True)
+                for host_name in selected_hosts:
+                    self.print_colored(f"   • {host_name}: ", 'white', end='')
+                    self._display_node_status(host_name, compact=True)
+                    print()  # New line after each status
+        else:
+            self.print_colored(f"\n❌ {title} encountered issues. Please check the output above.", 'red')
+            
+            # Update node statuses to reflect potential error state
+            if "start" in playbook_name or "restart" in playbook_name or "stop" in playbook_name:
+                for host_name in selected_hosts:
+                    self._update_node_status(host_name, 'error')
+                self.print_colored(f"\n📊 Node statuses updated to Error due to operation failure.", 'yellow')
+            
+            # Additional error guidance based on operation
+            if "start" in playbook_name:
+                self.print_colored("Common issues: Service not deployed, network connectivity, or configuration errors.", 'yellow')
+            elif "stop" in playbook_name or "restart" in playbook_name:
+                self.print_colored("This might be normal if the service was not running on some nodes.", 'yellow')
+
+        input("Press Enter to continue...")
 
 
-    
 if __name__ == "__main__":
     r1setup = R1Setup()
     r1setup.run()
