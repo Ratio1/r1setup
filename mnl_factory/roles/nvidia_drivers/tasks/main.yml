@@ -1,21 +1,32 @@
 ---
+# Skip this role entirely if skip_gpu is set to true
+- name: Skip NVIDIA drivers setup when skip_gpu is true
+  debug:
+    msg: "NVIDIA drivers setup skipped due to skip_gpu=true configuration"
+  when: skip_gpu is defined and skip_gpu
+  tags: never
+
 # First, detect OS family
 - name: Detect OS family
   set_fact:
     is_ubuntu: ansible_distribution == "Ubuntu"
     is_debian: ansible_distribution == "Debian"
     is_rhel: ansible_os_family == "RedHat"
+  when: skip_gpu is not defined or not skip_gpu
 
 - name: Check for NVIDIA GPU
   shell: "lspci | grep -i nvidia"
   register: nvidia_check
   ignore_errors: yes
   changed_when: false
+  when: skip_gpu is not defined or not skip_gpu
 
 - name: Skip message if no NVIDIA GPU found
   debug:
     msg: "No NVIDIA GPU detected. Skipping driver installation."
-  when: nvidia_check.rc != 0
+  when: 
+    - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_check.rc != 0
 
 - block:
     # Ubuntu/Debian specific tasks
@@ -81,4 +92,6 @@
 #      when: is_rhel
 
   # Only run this block if NVIDIA GPU is detected
-  when: nvidia_check.rc == 0 
+  when: 
+    - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_check.rc == 0 
