@@ -2903,6 +2903,9 @@ class R1Setup:
                 self.print_colored(f"   • {host_name}: ", 'white', end='')
                 self._display_node_status(host_name, compact=True)
                 print()  # New line after each status
+            
+            # Display copy-friendly node addresses after successful deployment
+            self._display_copy_friendly_addresses(selected_host_names)
         else:
             self.print_colored(f"\n{title} encountered issues. Please check the output above.", 'red')
             # Update selected node statuses to error after failed deployment
@@ -2912,6 +2915,51 @@ class R1Setup:
 
         input("Press Enter to continue...")
 
+    def _display_copy_friendly_addresses(self, host_names: List[str]) -> None:
+        """Display copy-friendly node addresses after successful deployment"""
+        self.print_colored(f"\n🎉 Deployment Complete! Getting node addresses...", 'green', bold=True)
+        
+        # Get node addresses for the deployed hosts
+        playbook_path = self.config_dir / 'playbooks/get_node_info.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"Node info playbook not found: {playbook_path}", 'red')
+            return
+
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+
+        success, output = self.run_command(cmd, show_output=False, timeout=30)
+        
+        if success:
+            node_results = self._parse_node_info_output(output)
+            
+            # Filter results to only show the successfully deployed nodes
+            successful_deployed_nodes = []
+            for host_name in host_names:
+                if host_name in node_results and node_results[host_name]['status'] == 'success':
+                    successful_deployed_nodes.append((host_name, node_results[host_name]))
+            
+            if successful_deployed_nodes:
+                
+                self.print_colored(f"\n📋 Your Node Addresses (Ready to Copy!):", 'green', bold=True)
+                self.print_colored(f"\n Copy addresses below  and and link them to your licenses in ratio1.ai dashboard.", 'blue')
+                
+                self.print_colored("=" * 55, 'cyan')
+                
+                for i, (node_name, result) in enumerate(successful_deployed_nodes, 1):
+                    eth_address = result['data'].get('eth_address', 'N/A')
+                    self.print_colored(f"{i}. {node_name}", 'yellow')
+                    print(f"   {eth_address}")
+                    print()
+                
+                self.print_colored("\n💡 Tip: Double-click to select an address, then Ctrl+Shift+C (Command+Shift+C on Mac) to copy", 'cyan')
+                self.print_colored("💡 These addresses will also be available via menu option 7", 'cyan')
+            else:
+                self.print_colored(f"\n⚠️  Node addresses not ready yet. Use menu option 7 to check again later.", 'yellow')
+        else:
+            self.print_colored(f"\n⚠️  Could not retrieve node addresses at this time. Use menu option 7 to check later.", 'yellow')
 
     def _parse_node_info_output(self, output: str) -> Dict[str, Dict[str, Any]]:
         """Parse node info output to extract both successful and failed nodes"""
