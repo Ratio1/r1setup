@@ -3142,8 +3142,8 @@ class R1Setup:
         else:
             # Display the addresses in a formatted table
             self.print_colored(f"\nNode Addresses Summary:", 'green')
-            self.print_colored(f"{'Node Name':<20} {'Status':<15} {'Address':<48} {'ETH Address':<42}", 'cyan')
-            self.print_colored("-" * 125, 'cyan')
+            self.print_colored(f"{'Node Name':<20} {'ETH Address':<48} {'Status':<15}", 'cyan')
+            self.print_colored("-" * 83, 'cyan')
             
             success_count = 0
             unreachable_count = 0
@@ -3152,10 +3152,10 @@ class R1Setup:
                 if result['status'] == 'success':
                     address = result['data'].get('address', 'N/A')
                     eth_address = result['data'].get('eth_address', 'N/A')
-                    self.print_colored(f"{node_name:<20} {'SUCCESS':<15} {address:<48} {eth_address:<42}", 'green')
+                    self.print_colored(f"{node_name:<20} {eth_address:<48} {'SUCCESS':<15}", 'green')
                     success_count += 1
                 else:
-                    self.print_colored(f"{node_name:<20} {'UNREACHABLE':<15} {'Connection failed':<48} {'N/A':<42}", 'red')
+                    self.print_colored(f"{node_name:<20} {'N/A':<48} {'UNREACHABLE':<15}", 'red')
                     unreachable_count += 1
             
             # Show summary
@@ -3219,7 +3219,7 @@ class R1Setup:
 
         try:
             with open(csv_file, 'w') as f:
-                f.write("Node_Name,Status,Address,ETH_Address,SSH_Host,SSH_User\n")
+                f.write("Node_Name,Status,ETH_Address,SSH_Host,SSH_User,Address\n")
                 
                 # Load configuration to get SSH details
                 self.load_configuration()
@@ -3238,12 +3238,12 @@ class R1Setup:
                         alias = info.get('alias', node_name)
                         address = info.get('address', 'N/A')
                         eth_address = info.get('eth_address', 'N/A')
-                        f.write(f'"{node_name}","SUCCESS","{address}","{eth_address}","{ssh_host}","{ssh_user}"\n')
+                        f.write(f'"{node_name}","SUCCESS","{eth_address}","{ssh_host}","{ssh_user}","{address}"\n')
                     else:
-                        f.write(f'"{node_name}","UNREACHABLE","N/A","N/A","{ssh_host}","{ssh_user}"\n')
+                        f.write(f'"{node_name}","UNREACHABLE","N/A","{ssh_host}","{ssh_user}","N/A"\n')
 
             self.print_colored(f"Addresses exported to: {csv_file}", 'green')
-            self.print_colored(f"CSV contains: Node Name, Status, Blockchain Address, ETH Address, SSH Host, SSH User", 'cyan')
+            self.print_colored(f"CSV contains: Node Name, Status, ETH Address, SSH Host, SSH User, Address", 'cyan')
             if success_count > 0 and unreachable_count > 0:
                 self.print_colored(f"Note: {success_count} nodes have valid addresses, {unreachable_count} nodes are marked as unreachable", 'yellow')
         except Exception as e:
