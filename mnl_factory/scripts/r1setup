@@ -1475,7 +1475,7 @@ class R1Setup:
             self.print_colored("Deployment Menu", 'cyan', bold=True)
             print()
             self.print_colored("  1) Deploy with GPU        - Deploy full Edge Node with GPU support")
-            self.print_colored("  2) Deploy Docker Only     - Deploy Edge Node without GPU")
+            self.print_colored("  2) Deploy CPU Only        - Deploy Edge Node without GPU capabilities")
             self.print_colored("  3) Delete Deployment      - Remove deployed Edge Node")
             self.print_colored("  4) Deployment Status      - Check detailed deployment status")
             print()
