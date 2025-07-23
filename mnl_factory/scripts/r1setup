@@ -955,8 +955,15 @@ class R1Setup:
                 self.print_colored("  2) Switch Configuration          - Activate different configuration")
                 self.print_colored("  3) Delete Configuration          - Remove saved configuration")
                 self.print_colored("  4) Rename Configuration          - Change configuration name")
+                self.print_colored("")
                 self.print_colored("  5) Backup Configuration          - Save configuration backup")
                 self.print_colored("  6) Restore Configuration         - Restore from backup")
+                self.print_colored("  7) Export Configuration          - Create portable config file")
+                self.print_colored("  8) Quick Export Current Config   - Export active config")
+            else:
+                self.print_colored("  7) Export Configuration          - Create portable config file (no configs)")
+                self.print_colored("  8) Quick Export Current          - Export active config")
+            self.print_colored("  9) Import Configuration          - Import from portable file")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -977,6 +984,16 @@ class R1Setup:
                 self._backup_configuration(configs)
             elif choice == '6' and configs:
                 self._restore_configuration()
+            elif choice == '7':
+                if configs:
+                    self._export_configuration(configs)
+                else:
+                    self.print_colored("No configurations available to export.", 'yellow')
+                    input("Press Enter to continue...")
+            elif choice == '8':
+                self._quick_export_current()
+            elif choice == '9':
+                self._import_configuration()
             else:
                 self.print_colored("Invalid option. Please try again.", 'red')
                 input("Press Enter to continue...")
@@ -1377,6 +1394,341 @@ class R1Setup:
             self.print_colored(f"❌ Error restoring configuration: {e}", 'red')
 
         input("Press Enter to continue...")
+
+    def _export_configuration(self, configs: List[Tuple[str, Dict]]) -> None:
+        """Export configuration to a portable file for transfer between machines"""
+        self.print_section("Export Configuration")
+        
+        if not configs:
+            self.print_colored("No configurations available to export.", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Show available configurations
+        self.print_colored("Available configurations to export:")
+        for i, (config_name, metadata) in enumerate(configs, 1):
+            display_name = config_name.replace('.yml', '')
+            env = metadata.get('environment', 'unknown')
+            nodes = metadata.get('nodes_count', 0)
+            created = metadata.get('created_at', 'unknown')
+            if isinstance(created, str) and 'T' in created:
+                try:
+                    created = datetime.fromisoformat(created.replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
+                except:
+                    pass
+            self.print_colored(f"  {i}) {display_name} ({env}, {nodes} nodes, created: {created})")
+
+        # Select configuration to export
+        while True:
+            try:
+                choice = int(self.get_input("Select configuration number to export", "1")) - 1
+                if 0 <= choice < len(configs):
+                    config_name = configs[choice][0].replace('.yml', '')
+                    config_metadata = configs[choice][1]
+                    break
+                self.print_colored("Invalid selection", 'red')
+            except ValueError:
+                self.print_colored("Please enter a number", 'red')
+
+        # Get export destination
+        default_filename = f"{config_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.r1config"
+        filename = self.get_input(f"Export filename [{default_filename}]", default_filename)
+        
+        # Ensure .r1config extension
+        if not filename.endswith('.r1config'):
+            filename += '.r1config'
+        
+        export_path = Path(filename)
+        if not export_path.is_absolute():
+            export_path = Path.cwd() / filename
+
+        try:
+            # Load configuration files
+            config_path = self.configs_dir / f"{config_name}.yml"
+            metadata_path = self.configs_dir / f"{config_name}.json"
+            
+            # Read configuration data
+            with open(config_path) as f:
+                config_data = yaml.safe_load(f)
+            
+            with open(metadata_path) as f:
+                metadata = json.load(f)
+
+            # Read current environment variables
+            env_data = {}
+            if self.vars_file.exists():
+                with open(self.vars_file) as f:
+                    env_data = yaml.safe_load(f) or {}
+
+            # Create unified export structure
+            export_data = {
+                'format_version': '1.0',
+                'exported_at': datetime.now().isoformat(),
+                'exported_by': self.real_user,
+                'export_source': 'r1setup',
+                'configuration': {
+                    'name': config_name,
+                    'metadata': metadata,
+                    'inventory': config_data,
+                    'environment_vars': env_data,
+                    'ansible_vars': {}
+                }
+            }
+
+            # Include relevant ansible variables if they exist
+            ansible_vars_files = [
+                self.config_dir / 'group_vars/all.yml',
+                self.config_dir / 'group_vars/mnl.yml'
+            ]
+            
+            for var_file in ansible_vars_files:
+                if var_file.exists():
+                    with open(var_file) as f:
+                        var_data = yaml.safe_load(f) or {}
+                        export_data['configuration']['ansible_vars'][var_file.name] = var_data
+
+            # Write export file
+            with open(export_path, 'w') as f:
+                json.dump(export_data, f, indent=2, default=str)
+
+            self.print_colored(f"✅ Configuration '{config_name}' exported successfully!", 'green')
+            self.print_colored(f"📁 Export file: {export_path}", 'cyan')
+            self.print_colored(f"📝 File size: {export_path.stat().st_size} bytes", 'white')
+            
+            # Show what was exported
+            hosts_count = len(config_data.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {}))
+            self.print_colored(f"🔧 Exported: {hosts_count} nodes, {metadata.get('environment', 'unknown')} environment", 'cyan')
+            
+            self.print_colored("\n💡 To import on another machine:", 'yellow')
+            self.print_colored(f"   1. Copy {filename} to the target machine", 'white')
+            self.print_colored(f"   2. Run 'r1setup' and select Configuration Management → Import Configuration", 'white')
+            
+        except Exception as e:
+            self.print_colored(f"❌ Error exporting configuration: {e}", 'red')
+
+        input("\nPress Enter to continue...")
+
+    def _import_configuration(self) -> None:
+        """Import configuration from a portable file"""
+        self.print_section("Import Configuration")
+        
+        self.print_colored("This will import a configuration from an .r1config file.", 'cyan')
+        self.print_colored("The file should have been created using the Export Configuration option.", 'yellow')
+        
+        # Get import file path
+        import_file = self.get_input("Enter path to .r1config file")
+        import_path = Path(import_file)
+        
+        if not import_path.is_absolute():
+            import_path = Path.cwd() / import_file
+
+        if not import_path.exists():
+            self.print_colored(f"❌ File not found: {import_path}", 'red')
+            input("Press Enter to continue...")
+            return
+
+        try:
+            # Read and validate import file
+            with open(import_path) as f:
+                import_data = json.load(f)
+
+            # Validate format
+            if not isinstance(import_data, dict) or 'configuration' not in import_data:
+                self.print_colored("❌ Invalid configuration file format", 'red')
+                input("Press Enter to continue...")
+                return
+
+            config_info = import_data['configuration']
+            metadata = config_info.get('metadata', {})
+            inventory = config_info.get('inventory', {})
+            env_vars = config_info.get('environment_vars', {})
+            ansible_vars = config_info.get('ansible_vars', {})
+
+            # Show import details
+            original_name = config_info.get('name', 'unknown')
+            nodes_count = len(inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {}))
+            environment = metadata.get('environment', 'unknown')
+            exported_at = import_data.get('exported_at', 'unknown')
+            exported_by = import_data.get('exported_by', 'unknown')
+
+            self.print_colored(f"\n📋 Configuration Details:", 'cyan', bold=True)
+            self.print_colored(f"   Original name: {original_name}")
+            self.print_colored(f"   Environment: {environment}")
+            self.print_colored(f"   Nodes: {nodes_count}")
+            self.print_colored(f"   Exported: {exported_at}")
+            self.print_colored(f"   Exported by: {exported_by}")
+
+            # Show nodes that will be imported
+            hosts = inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+            if hosts:
+                self.print_colored(f"\n🖥️  Nodes to import:", 'yellow', bold=True)
+                for hostname, config in hosts.items():
+                    ip = config.get('ansible_host', 'unknown')
+                    user = config.get('ansible_user', 'unknown')
+                    self.print_colored(f"   • {hostname} ({ip}) - user: {user}")
+
+            # Confirm import
+            if self.get_input(f"\nProceed with import? (y/n)", "n").lower() != 'y':
+                self.print_colored("Import cancelled.", 'yellow')
+                input("Press Enter to continue...")
+                return
+
+            # Get new configuration name
+            suggested_name = self.get_input(f"Configuration name [{original_name}]", original_name)
+            
+            # Generate proper config filename
+            final_config_name = self._generate_config_name(nodes_count, suggested_name)
+            
+            # Check if config already exists
+            if (self.configs_dir / f"{final_config_name}.yml").exists():
+                if self.get_input(f"Configuration '{final_config_name}' already exists. Overwrite? (y/n)", "n").lower() != 'y':
+                    self.print_colored("Import cancelled.", 'yellow')
+                    input("Press Enter to continue...")
+                    return
+
+            # Save imported configuration
+            config_path = self.configs_dir / f"{final_config_name}.yml"
+            metadata_path = self.configs_dir / f"{final_config_name}.json"
+
+            # Update metadata
+            updated_metadata = dict(metadata)
+            updated_metadata['config_name'] = final_config_name
+            updated_metadata['imported_at'] = datetime.now().isoformat()
+            updated_metadata['imported_from'] = str(import_path)
+            updated_metadata['original_name'] = original_name
+
+            # Save configuration files
+            with open(config_path, 'w') as f:
+                yaml.safe_dump(inventory, f, default_flow_style=False)
+            
+            with open(metadata_path, 'w') as f:
+                json.dump(updated_metadata, f, indent=2)
+
+            os.chmod(config_path, 0o600)
+
+            # Update environment variables if included
+            if env_vars:
+                current_env_vars = {}
+                if self.vars_file.exists():
+                    try:
+                        with open(self.vars_file) as f:
+                            current_env_vars = yaml.safe_load(f) or {}
+                    except:
+                        pass
+                
+                # Merge environment variables (imported ones take precedence)
+                current_env_vars.update(env_vars)
+                
+                # Ensure directory exists
+                self.vars_file.parent.mkdir(parents=True, exist_ok=True)
+                
+                with open(self.vars_file, 'w') as f:
+                    yaml.safe_dump(current_env_vars, f, default_flow_style=False)
+
+            # Apply ansible variables if included
+            for var_filename, var_content in ansible_vars.items():
+                var_file_path = self.config_dir / 'group_vars' / var_filename
+                var_file_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Only update if the imported file has content
+                if var_content:
+                    with open(var_file_path, 'w') as f:
+                        yaml.safe_dump(var_content, f, default_flow_style=False)
+
+            self.print_colored(f"✅ Configuration imported successfully as '{final_config_name}'!", 'green')
+            self.print_colored(f"📁 Saved to: {config_path}", 'cyan')
+            
+            # Ask if user wants to activate the imported configuration
+            if self.get_input("Activate this configuration now? (y/n)", "y").lower() == 'y':
+                self.inventory = inventory
+                self.active_config.update(updated_metadata)
+                self._save_active_config()
+                self._update_hosts_symlink(config_path)
+                
+                # Set environment
+                env = updated_metadata.get('environment')
+                if env:
+                    self.set_mnl_app_env(env)
+                
+                self.print_colored("✅ Configuration activated!", 'green')
+            else:
+                self.print_colored("💡 Use 'Switch Configuration' to activate it later.", 'cyan')
+
+        except json.JSONDecodeError:
+            self.print_colored("❌ Invalid JSON in configuration file", 'red')
+        except yaml.YAMLError as e:
+            self.print_colored(f"❌ Invalid YAML in configuration: {e}", 'red')
+        except Exception as e:
+            self.print_colored(f"❌ Error importing configuration: {e}", 'red')
+
+        input("\nPress Enter to continue...")
+
+    def _quick_export_current(self) -> None:
+        """Quick export of current active configuration"""
+        if not self.check_hosts_config():
+            self.print_colored("No active configuration to export.", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Generate filename based on active config
+        config_name = self.active_config.get('config_name', 'current_config')
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"{config_name}_{timestamp}.r1config"
+        
+        try:
+            # Create export in current directory
+            export_path = Path.cwd() / filename
+
+            # Read current configuration
+            with open(self.config_file) as f:
+                config_data = yaml.safe_load(f)
+
+            # Read environment variables
+            env_data = {}
+            if self.vars_file.exists():
+                with open(self.vars_file) as f:
+                    env_data = yaml.safe_load(f) or {}
+
+            # Create export structure
+            export_data = {
+                'format_version': '1.0',
+                'exported_at': datetime.now().isoformat(),
+                'exported_by': self.real_user,
+                'export_source': 'r1setup_quick',
+                'configuration': {
+                    'name': config_name,
+                    'metadata': dict(self.active_config),
+                    'inventory': config_data,
+                    'environment_vars': env_data,
+                    'ansible_vars': {}
+                }
+            }
+
+            # Include ansible variables
+            ansible_vars_files = [
+                self.config_dir / 'group_vars/all.yml',
+                self.config_dir / 'group_vars/mnl.yml'
+            ]
+            
+            for var_file in ansible_vars_files:
+                if var_file.exists():
+                    with open(var_file) as f:
+                        var_data = yaml.safe_load(f) or {}
+                        export_data['configuration']['ansible_vars'][var_file.name] = var_data
+
+            # Write export file
+            with open(export_path, 'w') as f:
+                json.dump(export_data, f, indent=2, default=str)
+
+            self.print_colored(f"✅ Current configuration exported to: {filename}", 'green')
+            nodes = len(config_data.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {}))
+            env = self.active_config.get('environment', 'unknown')
+            self.print_colored(f"🔧 Exported: {nodes} nodes, {env} environment", 'cyan')
+
+        except Exception as e:
+            self.print_colored(f"❌ Error exporting configuration: {e}", 'red')
+
+        input("\nPress Enter to continue...")
 
     def configure_nodes_menu(self) -> None:
         """Show node configuration submenu"""
@@ -4837,11 +5189,12 @@ except:
             self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
             self.print_colored("  1) Select an existing configuration to activate")
             self.print_colored("  2) Create a new configuration")
+            self.print_colored("  3) Import configuration from .r1config file")
             print()
             self.print_colored("  0) Exit")
 
             while True:
-                choice = self.get_input("\nSelect option (0-2)", "1")
+                choice = self.get_input("\nSelect option (0-3)", "1")
 
                 if choice == '0':
                     self.print_colored("Exiting r1setup.", 'yellow')
@@ -4871,8 +5224,19 @@ except:
                     # Create new configuration
                     self._create_new_configuration_with_management()
                     return True
+                elif choice == '3':
+                    # Import configuration
+                    self._import_configuration()
+                    # Check if import was successful by seeing if we now have an active config
+                    if self.check_hosts_config():
+                        self.print_colored("You can now access the main menu.", 'green')
+                        input("Press Enter to continue...")
+                        return True
+                    else:
+                        self.print_colored("Import was cancelled or failed. Please try again.", 'yellow')
+                        continue
                 else:
-                    self.print_colored("Invalid option. Please enter 0, 1, or 2.", 'red')
+                    self.print_colored("Invalid option. Please enter 0, 1, 2, or 3.", 'red')
         else:
             # No saved configurations exist
             self.print_colored("\n📝 No configurations found!", 'yellow')
@@ -4881,11 +5245,12 @@ except:
 
             self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
             self.print_colored("  1) Create your first configuration")
+            self.print_colored("  2) Import configuration from .r1config file")
             print()
             self.print_colored("  0) Exit")
 
             while True:
-                choice = self.get_input("\nSelect option (0-1)", "1")
+                choice = self.get_input("\nSelect option (0-2)", "1")
 
                 if choice == '0':
                     self.print_colored("Exiting r1setup.", 'yellow')
@@ -4893,8 +5258,20 @@ except:
                 elif choice == '1':
                     self._create_new_configuration_with_management()
                     return True
+                elif choice == '2':
+                    # Import configuration for first-time users
+                    self._import_configuration()
+                    # Check if import was successful by seeing if we now have an active config
+                    if self.check_hosts_config():
+                        self.print_colored("Welcome to r1setup! Your configuration has been imported successfully.", 'green')
+                        self.print_colored("You can now access the main menu.", 'green')
+                        input("Press Enter to continue...")
+                        return True
+                    else:
+                        self.print_colored("Import was cancelled or failed. Please try again.", 'yellow')
+                        continue
                 else:
-                    self.print_colored("Invalid option. Please enter 0 or 1.", 'red')
+                    self.print_colored("Invalid option. Please enter 0, 1, or 2.", 'red')
 
     def run(self) -> None:
         """Main program loop"""
