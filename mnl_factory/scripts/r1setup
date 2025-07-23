@@ -1568,7 +1568,7 @@ class R1Setup:
                     self.print_colored(f"   • {hostname} ({ip}) - user: {user}")
 
             # Confirm import
-            if self.get_input(f"\nProceed with import? (y/n)", "n").lower() != 'y':
+            if self.get_input(f"\nProceed with import? (y/n)", "y").lower() != 'y':
                 self.print_colored("Import cancelled.", 'yellow')
                 input("Press Enter to continue...")
                 return
