@@ -5186,14 +5186,14 @@ except:
                 self.print_colored(f"  {i}. {custom_name}", 'cyan', bold=True)
                 self.print_colored(f"     {env} | {nodes} node(s) | Created: {created_str}{deployment_str}", 'white')
 
-            self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
-            self.print_colored("  1) Select an existing configuration to activate")
-            self.print_colored("  2) Create a new configuration")
-            self.print_colored("  3) Import configuration from .r1config file")
-            print()
-            self.print_colored("  0) Exit")
-
             while True:
+                self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
+                self.print_colored("  1) Select an existing configuration to activate")
+                self.print_colored("  2) Create a new configuration")
+                self.print_colored("  3) Import configuration from .r1config file")
+                print()
+                self.print_colored("  0) Exit")
+
                 choice = self.get_input("\nSelect option (0-3)", "1")
 
                 if choice == '0':
@@ -5219,6 +5219,7 @@ except:
                     else:
                         self.print_colored(f"❌ Failed to activate configuration: {selected_config}", 'red')
                         self.print_colored("Please try another configuration or create a new one.", 'red')
+                        input("Press Enter to continue...")
                         continue
                 elif choice == '2':
                     # Create new configuration
@@ -5234,6 +5235,7 @@ except:
                         return True
                     else:
                         self.print_colored("Import was cancelled or failed. Please try again.", 'yellow')
+                        input("Press Enter to continue...")
                         continue
                 else:
                     self.print_colored("Invalid option. Please enter 0, 1, 2, or 3.", 'red')
@@ -5243,13 +5245,13 @@ except:
             self.print_colored("You need to create your first configuration to use r1setup.", 'white')
             self.print_colored("A configuration contains your GPU node connection details and network settings.", 'white')
 
-            self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
-            self.print_colored("  1) Create your first configuration")
-            self.print_colored("  2) Import configuration from .r1config file")
-            print()
-            self.print_colored("  0) Exit")
-
             while True:
+                self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
+                self.print_colored("  1) Create your first configuration")
+                self.print_colored("  2) Import configuration from .r1config file")
+                print()
+                self.print_colored("  0) Exit")
+
                 choice = self.get_input("\nSelect option (0-2)", "1")
 
                 if choice == '0':
@@ -5269,6 +5271,7 @@ except:
                         return True
                     else:
                         self.print_colored("Import was cancelled or failed. Please try again.", 'yellow')
+                        input("Press Enter to continue...")
                         continue
                 else:
                     self.print_colored("Invalid option. Please enter 0, 1, or 2.", 'red')
