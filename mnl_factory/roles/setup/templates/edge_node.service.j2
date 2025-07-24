@@ -10,6 +10,7 @@ Restart=always
 
 # Stop the container if it exists
 ExecStartPre=-/usr/bin/docker stop -t 20 {{ mnl_docker_container_name }}
+ExecStartPre=-/usr/bin/docker rm {{ mnl_docker_container_name }}
 
 # Pull the latest image
 ExecStartPre=-/usr/bin/docker pull {{ mnl_docker_image_url }}
