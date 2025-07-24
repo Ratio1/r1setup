@@ -96,6 +96,12 @@
   become: yes
   ignore_errors: yes
 
+- name: Enable the Edge Node service
+  ansible.builtin.systemd:
+    name: "{{ edge_node_service_name }}"
+    enabled: true
+    daemon_reload: true
+
 - name: Start the service
   ansible.builtin.systemd:
     name: "{{ edge_node_service_name }}"
