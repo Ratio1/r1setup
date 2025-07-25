@@ -58,6 +58,10 @@
           {{ pre_restart_logs.stdout }}
       when: service_exists is not failed and pre_restart_logs.stdout is defined
 
+    - name: Update node names if needed
+      include_tasks: ../roles/setup/tasks/update_node_names.yml
+      when: service_exists is not failed
+
     - name: Enable the Edge Node service (ensure it's enabled)
       ansible.builtin.systemd:
         name: "{{ edge_node_service_name }}"
