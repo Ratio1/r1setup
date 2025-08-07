@@ -114,9 +114,8 @@
     autoclean: yes
   when: ansible_os_family == "Debian"
   register: python3_dev_install
-  retries: 5
-  delay: 10
-  until: python3_dev_install is success
+  retries: 2
+  delay: 3
   ignore_errors: true
 
 - name: Install python3-dev without version specification if specific version failed (Debian/Ubuntu)
@@ -127,9 +126,8 @@
     autoclean: yes
   when: ansible_os_family == "Debian" and python3_dev_install is failed
   register: python3_dev_install_generic
-  retries: 5
-  delay: 10
-  until: python3_dev_install_generic is success
+  retries: 3
+  delay: 5
   ignore_errors: true
 
 - name: Try to install python3-dev with apt-get directly if apt module failed (Debian/Ubuntu)
@@ -140,7 +138,6 @@
   register: python3_dev_install_shell
   retries: 3
   delay: 5
-  until: python3_dev_install_shell is success
   ignore_errors: true
 
 - name: Force install python3-dev if all previous attempts failed (Debian/Ubuntu)
@@ -151,7 +148,6 @@
   register: force_python3_dev_install
   retries: 3
   delay: 5
-  until: force_python3_dev_install is success
   ignore_errors: true
 
 - name: Install required packages (RHEL)
