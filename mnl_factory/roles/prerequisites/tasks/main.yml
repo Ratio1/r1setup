@@ -15,6 +15,24 @@
     - /etc/apt/sources.list.d/download_docker_com_linux_ubuntu.list
   when: ansible_os_family == "Debian"
 
+- name: Fix broken packages (Debian/Ubuntu)
+  apt:
+    autoclean: yes
+    autoremove: yes
+  when: ansible_os_family == "Debian"
+  ignore_errors: true
+
+- name: Check for held packages (Debian/Ubuntu)
+  shell: apt-mark showhold
+  register: held_packages
+  when: ansible_os_family == "Debian"
+  changed_when: false
+
+- name: Display held packages
+  debug:
+    msg: "Held packages: {{ held_packages.stdout_lines }}"
+  when: ansible_os_family == "Debian" and held_packages.stdout_lines | length > 0
+
 - name: Update package cache (Debian/Ubuntu)
   apt:
     update_cache: yes
@@ -30,7 +48,7 @@
     update_cache: yes
   when: ansible_os_family == "RedHat"
 
-- name: Install required packages (Debian/Ubuntu)
+- name: Install basic packages first (Debian/Ubuntu)
   apt:
     name:
       - apt-transport-https
@@ -39,7 +57,6 @@
       - software-properties-common
       - python3
       - python3-pip
-      - python3-dev
       - python3-yaml
       - python3-setuptools
       - python3-requests
@@ -48,11 +65,35 @@
       - build-essential
       - git
     state: present
+    autoremove: yes
+    autoclean: yes
   when: ansible_os_family == "Debian"
-  register: apt_install
+  register: basic_packages_install
   retries: 5
   delay: 10
-  until: apt_install is success
+  until: basic_packages_install is success
+
+- name: Install python3-dev separately to handle version conflicts (Debian/Ubuntu)
+  apt:
+    name: python3-dev
+    state: present
+    autoremove: yes
+    autoclean: yes
+  when: ansible_os_family == "Debian"
+  register: python3_dev_install
+  retries: 5
+  delay: 10
+  until: python3_dev_install is success
+
+- name: Force install python3-dev if previous attempt failed (Debian/Ubuntu)
+  shell: |
+    apt-get update
+    apt-get install -y python3-dev --fix-broken
+  when: ansible_os_family == "Debian" and python3_dev_install is failed
+  register: force_python3_dev_install
+  retries: 3
+  delay: 5
+  until: force_python3_dev_install is success
 
 - name: Install required packages (RHEL)
   dnf:
