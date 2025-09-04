@@ -44,6 +44,14 @@
       command: apt-get clean
       changed_when: false
 
+    - name: Remove corrupted APT cache files
+      shell: |
+        # Remove all package list files to force fresh download
+        rm -rf /var/lib/apt/lists/*
+        # Clean any partial downloads
+        apt-get clean
+      changed_when: true
+
 - name: Install prerequisites
   package:
     name:
