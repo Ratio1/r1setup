@@ -24,6 +24,26 @@
       command: apt-get clean
       changed_when: false
 
+- name: Fix duplicate APT sources entries
+  block:
+    - name: Check if ubuntu-mirrors.list exists
+      stat:
+        path: /etc/apt/sources.list.d/ubuntu-mirrors.list
+      register: ubuntu_mirrors_file
+
+    - name: Remove duplicate entries from ubuntu-mirrors.list
+      shell: |
+        if [ -f /etc/apt/sources.list.d/ubuntu-mirrors.list ]; then
+          # Remove duplicate lines while preserving order
+          awk '!seen[$0]++' /etc/apt/sources.list.d/ubuntu-mirrors.list > /tmp/ubuntu-mirrors.list.tmp
+          mv /tmp/ubuntu-mirrors.list.tmp /etc/apt/sources.list.d/ubuntu-mirrors.list
+        fi
+      when: ubuntu_mirrors_file.stat.exists | default(false)
+
+    - name: Clean APT cache after fixing sources
+      command: apt-get clean
+      changed_when: false
+
 - name: Install prerequisites
   package:
     name:
