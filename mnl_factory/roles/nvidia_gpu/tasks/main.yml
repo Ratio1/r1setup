@@ -162,7 +162,7 @@
     - nvidia_gpu_check.rc == 0
     - nvidia_smi_check1.rc != 0
     - ubuntu_drivers_check.rc != 0
-  shell: "apt search nvidia-driver- | grep '^nvidia-driver-' | head -10"
+  shell: "apt-cache search nvidia-driver- | grep '^nvidia-driver-[0-9]' | head -10"
   register: gpu_drivers_list
   ignore_errors: true
   # Lists available NVIDIA drivers on non-Ubuntu systems
@@ -196,12 +196,10 @@
     - nvidia_gpu_check.rc == 0
     - nvidia_smi_check1.rc != 0 
     - ansible_os_family == "Debian"
-  apt:
-    name: "{{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
-    state: present
-    update_cache: yes
+  shell: "apt-cache show {{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version) }} > /dev/null 2>&1"
   register: driver_availability_check
   ignore_errors: true
+  changed_when: false
   # Check if the specified driver is available in the repositories
 
 - name: Find best available NVIDIA driver
@@ -211,7 +209,7 @@
     - nvidia_smi_check1.rc != 0 
     - ansible_os_family == "Debian"
     - driver_availability_check.rc != 0
-  shell: "apt search nvidia-driver- | grep '^nvidia-driver-' | grep -E 'driver-[0-9]+' | sort -V | tail -1 | cut -d' ' -f1"
+  shell: "apt-cache search nvidia-driver- | grep '^nvidia-driver-[0-9]' | sed 's/ .*//' | sort -V | tail -1"
   register: best_available_driver
   ignore_errors: true
   # Find the latest available NVIDIA driver if the specified one isn't available
@@ -223,8 +221,16 @@
     - nvidia_smi_check1.rc != 0 
     - ansible_os_family == "Debian"
   set_fact:
-    final_driver_package: "{{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version) if driver_availability_check.rc == 0 else best_available_driver.stdout }}"
+    final_driver_package: "{{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version) if driver_availability_check.rc == 0 else (best_available_driver.stdout if best_available_driver.stdout is defined and best_available_driver.stdout | length > 0 else nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)) }}"
   # Set the final driver package name to use for installation
+
+- name: Display driver package to be installed
+  debug:
+    msg: "Will install NVIDIA driver package: {{ final_driver_package | default('not set') }}"
+  when: 
+    - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_gpu_check.rc == 0
+    - nvidia_smi_check1.rc != 0
 
 - name: "Install NVIDIA driver: {{ final_driver_package }}"
   become: true
