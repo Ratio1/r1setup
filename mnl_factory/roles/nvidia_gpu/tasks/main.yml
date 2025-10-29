@@ -134,15 +134,38 @@
   delay: 10
   until: apt_update is success
 
-- name: List GPGPU drivers
+- name: Check if ubuntu-drivers is available
   when: 
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
     - nvidia_smi_check1.rc != 0
+  command: which ubuntu-drivers
+  register: ubuntu_drivers_check
+  ignore_errors: true
+  changed_when: false
+  # Check if ubuntu-drivers command is available on this system
+
+- name: List GPGPU drivers (Ubuntu systems)
+  when: 
+    - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_gpu_check.rc == 0
+    - nvidia_smi_check1.rc != 0
+    - ubuntu_drivers_check.rc == 0
   command: ubuntu-drivers list --gpgpu
   register: gpu_drivers_list
-  # Runs only if initial nvidia-smi check failed.
-  # Lists the available GPGPU drivers, a helpful step to check compatible drivers.
+  ignore_errors: true
+  # Lists the available GPGPU drivers on Ubuntu systems
+
+- name: List available NVIDIA drivers (Non-Ubuntu systems)
+  when: 
+    - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_gpu_check.rc == 0
+    - nvidia_smi_check1.rc != 0
+    - ubuntu_drivers_check.rc != 0
+  shell: "apt search nvidia-driver- | grep '^nvidia-driver-' | head -10"
+  register: gpu_drivers_list
+  ignore_errors: true
+  # Lists available NVIDIA drivers on non-Ubuntu systems
 
 - name: Output GPGPU drivers list
   when: 
@@ -150,8 +173,7 @@
     - nvidia_gpu_check.rc == 0
     - nvidia_smi_check1.rc != 0
   debug:
-    msg: "{{ gpu_drivers_list.stdout }}"
-  # Runs only if initial nvidia-smi check failed.
+    msg: "{{ gpu_drivers_list.stdout if gpu_drivers_list.stdout is defined else 'No driver list available' }}"
   # Outputs the list of available GPGPU drivers for informational purposes.
 
 - name: Extra update package lists
@@ -168,24 +190,61 @@
   delay: 10
   until: apt_extra_update is success
 
-- name: "Install NVIDIA driver: {{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
-  become: true
+- name: Check if specified NVIDIA driver is available
   when: 
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
     - nvidia_smi_check1.rc != 0 
     - ansible_os_family == "Debian"
   apt:
+    name: "{{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
+    state: present
+    update_cache: yes
+  register: driver_availability_check
+  ignore_errors: true
+  # Check if the specified driver is available in the repositories
+
+- name: Find best available NVIDIA driver
+  when: 
+    - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_gpu_check.rc == 0
+    - nvidia_smi_check1.rc != 0 
+    - ansible_os_family == "Debian"
+    - driver_availability_check.rc != 0
+  shell: "apt search nvidia-driver- | grep '^nvidia-driver-' | grep -E 'driver-[0-9]+' | sort -V | tail -1 | cut -d' ' -f1"
+  register: best_available_driver
+  ignore_errors: true
+  # Find the latest available NVIDIA driver if the specified one isn't available
+
+- name: Set final driver package name
+  when: 
+    - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_gpu_check.rc == 0
+    - nvidia_smi_check1.rc != 0 
+    - ansible_os_family == "Debian"
+  set_fact:
+    final_driver_package: "{{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version) if driver_availability_check.rc == 0 else best_available_driver.stdout }}"
+  # Set the final driver package name to use for installation
+
+- name: "Install NVIDIA driver: {{ final_driver_package }}"
+  become: true
+  when: 
+    - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_gpu_check.rc == 0
+    - nvidia_smi_check1.rc != 0 
+    - ansible_os_family == "Debian"
+    - final_driver_package is defined
+  apt:
     update_cache: yes
     name:
-      - "{{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
+      - "{{ final_driver_package }}"
     state: present
   register: nvidia_driver_installation
   retries: 3
   delay: 10
   until: nvidia_driver_installation is success
   # Runs only if initial nvidia-smi check failed.
-  # Installs the specified NVIDIA driver. The version should be updated as needed.
+  # Installs the specified NVIDIA driver or falls back to the best available one.
   # This task is executed only if the initial check for NVIDIA drivers failed.
 
 - name: Output NVIDIA driver installation result
@@ -198,15 +257,16 @@
   # Runs only if initial nvidia-smi check failed.
   # Outputs the result of the NVIDIA driver installation for verification.
 
-- name: "Hold the nvidia driver package {{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
+- name: "Hold the nvidia driver package {{ final_driver_package }}"
   become: true
   when: 
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
     - nvidia_smi_check1.rc != 0 
     - ansible_os_family == "Debian"
+    - final_driver_package is defined
   ansible.builtin.dpkg_selections:
-    name:  "{{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
+    name:  "{{ final_driver_package }}"
     selection: hold
   # Runs only if initial nvidia-smi check failed.
   # This task holds the NVIDIA driver package to prevent it from being automatically updated.
@@ -249,21 +309,23 @@
     - nvidia_gpu_check.rc == 0
   # Outputs the nvidia-smi results for confirmation.
 
-- name: "Check if  {{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}} is held"
-  command: "dpkg --get-selections | grep  {{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
+- name: "Check if {{ final_driver_package }} is held"
+  command: "dpkg --get-selections | grep {{ final_driver_package }}"
   register: nvidia_driver_held
   when: 
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
     - ansible_os_family == "Debian"
+    - final_driver_package is defined
 
-- name: "Show held {{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)}}"
+- name: "Show held {{ final_driver_package }}"
   debug:
     var: nvidia_driver_held
   when: 
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
     - ansible_os_family == "Debian"
+    - final_driver_package is defined
   # Outputs the result of the check for the held NVIDIA driver package.
 
 - name: Install nvtop via Snap
