@@ -1,0 +1,29 @@
+---
+- name: restart docker
+  systemd:
+    name: docker
+    state: restarted
+    daemon_reload: yes
+
+- name: fix docker socket permissions
+  file:
+    path: /var/run/docker.sock
+    group: docker
+    mode: '0660'
+  listen: "restart docker"
+
+- name: fix docker runtime permissions
+  file:
+    path: /var/run/docker
+    group: docker
+    mode: '0775'
+    recurse: yes
+  listen: "restart docker"
+
+- name: fix docker lib permissions
+  file:
+    path: /var/lib/docker
+    group: docker
+    mode: '0775'
+    recurse: yes
+  listen: "restart docker" 

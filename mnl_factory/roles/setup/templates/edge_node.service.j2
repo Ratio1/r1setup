@@ -19,7 +19,6 @@ ExecStartPre=-/usr/bin/docker pull {{ mnl_docker_image_url }}
 ExecStart=/bin/sh -c '/usr/bin/docker run \
     {% if (skip_gpu is not defined or not skip_gpu) and nvidia_gpu_check.rc == 0 and nvidia_smi_check1.rc != 0 %}{{ mnl_docker_gpus }}{% else %} {% endif %} \
     {{ mnl_port_forward | default('') }} \
-    -m {{ mnl_container_memory_limit | default('30GB') }} \
     --rm \
     --privileged \
     --cgroupns=host \
