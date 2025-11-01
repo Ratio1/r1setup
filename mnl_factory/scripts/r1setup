@@ -2224,6 +2224,31 @@ class R1Setup:
                         validation_result = self._validate_ssh_key_file(expanded_path)
                         if validation_result['valid']:
                             host['ansible_ssh_private_key_file'] = key_path
+                            
+                            # Prompt for sudo password
+                            if existing_config and 'ansible_become_password' in existing_config:
+                                self.print_colored("\nFor sudo password (Press Enter to keep existing):", 'yellow')
+                                self.print_colored("  - Enter a sudo password if required", 'yellow')
+                                self.print_colored("  - Press Enter to keep existing password", 'yellow')
+                                self.print_colored("  - Type 'none' if sudo doesn't require a password", 'yellow')
+                                sudo_pass = self.get_secure_input("Enter sudo password")
+                                if sudo_pass.strip().lower() == 'none':
+                                    # User explicitly said no sudo password needed
+                                    pass  # Don't set ansible_become_password
+                                elif sudo_pass.strip():
+                                    host['ansible_become_password'] = sudo_pass.strip()
+                                else:
+                                    # Keep existing
+                                    host['ansible_become_password'] = existing_config['ansible_become_password']
+                            else:
+                                # New configuration
+                                self.print_colored("\nFor sudo password:", 'yellow')
+                                self.print_colored("  - Enter a sudo password if required", 'yellow')
+                                self.print_colored("  - Press Enter if sudo doesn't require a password", 'yellow')
+                                sudo_pass = self.get_secure_input("Enter sudo password")
+                                if sudo_pass.strip():
+                                    host['ansible_become_password'] = sudo_pass.strip()
+                            
                             key_auth_success = True
                             auth_configured = True
                             break
@@ -2242,6 +2267,9 @@ class R1Setup:
                         elif retry_choice == '3' and existing_config and 'ansible_ssh_private_key_file' in existing_config:
                             # Keep existing key configuration
                             host['ansible_ssh_private_key_file'] = existing_config['ansible_ssh_private_key_file']
+                            # Also keep existing sudo password if present
+                            if 'ansible_become_password' in existing_config:
+                                host['ansible_become_password'] = existing_config['ansible_become_password']
                             self.print_colored("Keeping existing SSH key configuration", 'yellow')
                             key_auth_success = True
                             auth_configured = True

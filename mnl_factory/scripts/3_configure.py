@@ -173,6 +173,15 @@ class ConfigManager:
           expanded_path = os.path.expanduser(key_path)
           if os.path.exists(expanded_path):
             host['ansible_ssh_private_key_file'] = key_path
+            
+            # Prompt for sudo password
+            self.print_colored("\nFor sudo password:", 'yellow')
+            self.print_colored("  - Enter a sudo password if required", 'yellow')
+            self.print_colored("  - Press Enter if sudo doesn't require a password", 'yellow')
+            sudo_pass = self.get_secure_input("Enter sudo password")
+            if sudo_pass.strip():
+              host['ansible_become_password'] = sudo_pass.strip()
+            
             break
           self.print_colored(f"Key file not found: {expanded_path}", 'red')
           retry = self.get_input("Would you like to try another path? (y/n)", "y")
@@ -210,7 +219,8 @@ class ConfigManager:
       '1': 'IP address',
       '2': 'SSH username',
       '3': 'Authentication method',
-      '4': 'Save and exit',
+      '4': 'Sudo password',
+      '5': 'Save and exit',
     }
 
     while True:
@@ -218,7 +228,7 @@ class ConfigManager:
       for key, value in options.items():
         self.print_colored(f"{key}) {value}")
 
-      choice = self.get_input("Enter your choice", "4")
+      choice = self.get_input("Enter your choice", "5")
 
       if choice == '1':
         host_data['ansible_host'] = self.get_ip_address()
@@ -239,7 +249,27 @@ class ConfigManager:
           default_key = "~/.ssh/id_rsa"
           key_path = self.get_input("Enter path to SSH private key", default_key)
           host_data['ansible_ssh_private_key_file'] = os.path.expanduser(key_path)
+          
+          # Prompt for sudo password
+          self.print_colored("\nFor sudo password:", 'yellow')
+          self.print_colored("  - Enter a sudo password if required", 'yellow')
+          self.print_colored("  - Press Enter if sudo doesn't require a password", 'yellow')
+          sudo_pass = self.get_secure_input("Enter sudo password")
+          if sudo_pass.strip():
+            host_data['ansible_become_password'] = sudo_pass.strip()
       elif choice == '4':
+        # Update sudo password only
+        self.print_colored("\nUpdate sudo password:", 'yellow')
+        self.print_colored("  - Enter a new sudo password", 'yellow')
+        self.print_colored("  - Press Enter to remove sudo password requirement", 'yellow')
+        sudo_pass = self.get_secure_input("Enter sudo password")
+        if sudo_pass.strip():
+          host_data['ansible_become_password'] = sudo_pass.strip()
+          self.print_colored("Sudo password updated!", 'green')
+        else:
+          host_data.pop('ansible_become_password', None)
+          self.print_colored("Sudo password removed!", 'green')
+      elif choice == '5':
         break
 
     return host_data
