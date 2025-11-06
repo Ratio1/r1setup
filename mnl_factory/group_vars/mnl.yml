@@ -27,7 +27,7 @@ mnl_docker_cr_accept_insecure: false
 
 # Runtime configuration
 mnl_device: "cuda:0"
-mnl_docker_gpus: "{{ '--gpus all' if (skip_gpu is not defined or not skip_gpu) else '' }}"
+mnl_docker_gpus: "--gpus all"
 mnl_port_forward: "{{ '-p 1883:1883' if mnl_dev_mode else '' }}"
 
 # Container behavior
