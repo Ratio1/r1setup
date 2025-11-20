@@ -315,6 +315,17 @@
     - nvidia_gpu_check.rc == 0
   # Outputs the nvidia-smi results for confirmation.
 
+- name: Re-check NVIDIA-SMI for service configuration
+  command: nvidia-smi
+  register: nvidia_smi_check1
+  ignore_errors: true
+  changed_when: false
+  when:
+    - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_gpu_check.rc == 0
+  # Re-check nvidia-smi and update nvidia_smi_check1 variable after driver installation.
+  # This ensures the setup role can correctly detect GPU availability when creating the service.
+
 - name: "Check if {{ final_driver_package }} is held"
   command: "dpkg --get-selections | grep {{ final_driver_package }}"
   register: nvidia_driver_held
