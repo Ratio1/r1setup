@@ -17,7 +17,7 @@ ExecStartPre=-/usr/bin/docker pull {{ mnl_docker_image_url }}
 
 # Start the container
 ExecStart=/bin/sh -c '/usr/bin/docker run \
-    {% if nvidia_smi_check1 is defined and nvidia_smi_check1.rc == 0 %}{{ mnl_docker_gpus }} {% endif %} \
+    {% if nvidia_smi_check1 is defined and nvidia_smi_check1.rc is defined and nvidia_smi_check1.rc == 0 %}{{ mnl_docker_gpus }} {% endif %} \
     {{ mnl_port_forward | default('') }} \
     --rm \
     --privileged \
