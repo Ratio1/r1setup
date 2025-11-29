@@ -366,4 +366,83 @@
   become: true
   when: 
     - (skip_gpu is not defined or not skip_gpu)
-    - nvidia_gpu_check.rc == 0 
+    - nvidia_gpu_check.rc == 0
+
+# NVIDIA Container Toolkit Setup (for Docker GPU support)
+- name: Check if nvidia-container-toolkit is available in repositories
+  shell: "apt-cache search nvidia-container-toolkit | grep '^nvidia-container-toolkit '"
+  register: nvidia_toolkit_available
+  ignore_errors: true
+  changed_when: false
+  when:
+    - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_gpu_check.rc == 0
+    - ansible_os_family == "Debian"
+
+- name: Setup NVIDIA Container Toolkit repository if not available
+  block:
+    - name: Download NVIDIA container toolkit GPG key
+      get_url:
+        url: https://nvidia.github.io/libnvidia-container/gpgkey
+        dest: /tmp/nvidia-container-toolkit-keyring.gpg
+        mode: '0644'
+
+    - name: Install GPG key
+      shell: |
+        gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg /tmp/nvidia-container-toolkit-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+    - name: Add NVIDIA Container Toolkit repository
+      shell: |
+        curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+          sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+          tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+      args:
+        creates: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+    - name: Update apt cache after adding repository
+      apt:
+        update_cache: yes
+  when:
+    - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_gpu_check.rc == 0
+    - ansible_os_family == "Debian"
+    - nvidia_toolkit_available.rc != 0
+
+- name: Install NVIDIA Container Toolkit
+  apt:
+    name:
+      - nvidia-container-toolkit
+    state: present
+    update_cache: yes
+  when:
+    - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_gpu_check.rc == 0
+    - ansible_os_family == "Debian"
+  register: nvidia_toolkit_install
+  retries: 3
+  delay: 5
+  until: nvidia_toolkit_install is success
+
+- name: Configure Docker to use NVIDIA runtime
+  shell: nvidia-ctk runtime configure --runtime=docker
+  when:
+    - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_gpu_check.rc == 0
+    - nvidia_toolkit_install is defined
+    - nvidia_toolkit_install is success
+  register: nvidia_runtime_config
+  ignore_errors: true
+
+- name: Restart Docker service after NVIDIA runtime configuration
+  systemd:
+    name: docker
+    state: restarted
+  when:
+    - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_gpu_check.rc == 0
+    - nvidia_toolkit_install is defined
+    - nvidia_toolkit_install is success
+    - nvidia_runtime_config is defined
+    - nvidia_runtime_config.rc == 0 

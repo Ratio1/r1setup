@@ -1,18 +1,20 @@
 # NVIDIA GPU Role
 
-This role manages NVIDIA GPU configuration, monitoring, and optimization. It handles GPU-specific settings, CUDA installation, and performance tuning.
+This role manages complete NVIDIA GPU setup including driver installation, container toolkit configuration, monitoring, and optimization.
 
 ## Requirements
 
-- Ubuntu-based system
+- Ubuntu/Debian-based system
 - NVIDIA GPU(s)
-- NVIDIA drivers installed (handled by nvidia_drivers role)
+- Secure Boot disabled in BIOS
+- Docker installed (for container toolkit configuration)
 - Internet access for package downloads
 
 ## Role Variables
 
 ```yaml
 # defaults/main.yml
+nvidia_driver_version: "535"      # NVIDIA driver version to install
 cuda_version: "12.2"              # CUDA version to install
 enable_gpu_monitoring: true       # Enable GPU monitoring tools
 enable_gpu_metrics: true         # Enable GPU metrics collection
@@ -22,7 +24,7 @@ gpu_memory_limit: null           # GPU memory limit in MB (null for default)
 
 ## Dependencies
 
-- nvidia_drivers
+- docker (for container toolkit configuration)
 
 ## Example Playbook
 
@@ -40,20 +42,24 @@ gpu_memory_limit: null           # GPU memory limit in MB (null for default)
 
 The role performs the following tasks:
 
-1. CUDA Setup
-   - Installs CUDA Toolkit
-   - Configures CUDA environment
-   - Sets up development tools
+1. Pre-installation Checks
+   - Detects NVIDIA GPUs
+   - Checks current driver status
+   - Validates Secure Boot is disabled
 
-2. GPU Configuration
-   - Configures GPU power management
-   - Sets up GPU monitoring
-   - Optimizes GPU performance
+2. Driver Installation
+   - Removes existing drivers (if necessary)
+   - Installs specified driver version
+   - Sets up DKMS modules
 
-3. Monitoring Setup
-   - Installs monitoring tools (nvtop, dcgm)
-   - Configures metrics collection
-   - Sets up GPU health checks
+3. Container Toolkit Setup
+   - Installs NVIDIA Container Toolkit
+   - Configures Docker to use NVIDIA runtime
+   - Restarts Docker service
+
+4. Monitoring Setup
+   - Installs nvtop for GPU monitoring
+   - Validates driver installation with nvidia-smi
 
 ## License
 

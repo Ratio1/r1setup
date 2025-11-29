@@ -11,10 +11,8 @@
     - ../group_vars/variables.yml
   roles:
     - role: "{{ playbook_dir }}/../roles/prerequisites"
-    - role: "{{ playbook_dir }}/../roles/nvidia_gpu"
-      when: skip_gpu is not defined or not skip_gpu
     - role: "{{ playbook_dir }}/../roles/docker"
-    - role: "{{ playbook_dir }}/../roles/nvidia_drivers"
+    - role: "{{ playbook_dir }}/../roles/nvidia_gpu"
       when: skip_gpu is not defined or not skip_gpu
     - role: "{{ playbook_dir }}/../roles/setup"
 

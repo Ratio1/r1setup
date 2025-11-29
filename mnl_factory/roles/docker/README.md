@@ -5,7 +5,6 @@ This role installs and configures Docker with NVIDIA Container Toolkit support f
 ## Requirements
 
 - Ubuntu-based system
-- NVIDIA drivers installed (handled by nvidia_drivers role)
 - Internet access for package downloads
 
 ## Role Variables
@@ -20,7 +19,7 @@ docker_users: []                   # List of users to add to docker group
 
 ## Dependencies
 
-- nvidia_drivers (when enable_nvidia_runtime is true)
+- None (nvidia_gpu role handles container toolkit setup after Docker)
 
 ## Example Playbook
 
