@@ -3966,7 +3966,7 @@ class R1Setup:
         env = self.get_mnl_app_env()
 
         # Interactive host selection for deletion
-        selected_host_names = self._interactive_host_selection(all_hosts, "Edge Node deletion")
+        selected_host_names = self.select_hosts(all_hosts, "Edge Node deletion", preselect_mode='all')
         
         if not selected_host_names:
             self.print_colored("Deletion cancelled - no hosts selected.", 'yellow')
@@ -4076,7 +4076,7 @@ class R1Setup:
             return
 
         # Interactive host selection with preselection of never-deployed nodes
-        selected_host_names = self._interactive_deployment_host_selection(all_hosts, title.lower())
+        selected_host_names = self.select_hosts(all_hosts, title.lower(), preselect_mode='undeployed')
         
         if not selected_host_names:
             self.print_colored("Deployment cancelled - no hosts selected.", 'yellow')
@@ -5815,275 +5815,145 @@ class R1Setup:
         
         input("\nPress Enter to continue...")
 
-    def _interactive_deployment_host_selection(self, hosts: Dict[str, Dict[str, Any]], operation_name: str) -> List[str]:
-        """Interactive host selection for deployments with never-deployed nodes preselected"""
+    def select_hosts(self, hosts: Dict[str, Dict[str, Any]], operation_name: str,
+                     preselect_mode: str = 'all') -> List[str]:
+        """Unified host selection UI (interactive with termios, fallback without).
+
+        preselect_mode: 'all' (all selected) | 'undeployed' (never_deployed/deleted selected) | 'none'
+        Returns: list of selected host names, or [] if cancelled.
+        """
         if not hosts:
             return []
 
-        # Preselect never-deployed nodes
-        never_deployed_hosts = set()
-        for host_name in hosts.keys():
-            status_info = self._get_node_status_info(host_name)
-            if status_info['status'] in ['never_deployed', 'deleted']:
-                never_deployed_hosts.add(host_name)
+        # Compute initial selection based on preselect_mode
+        if preselect_mode == 'undeployed':
+            initial_selection = set()
+            for host_name in hosts:
+                status_info = self._get_node_status_info(host_name)
+                if status_info['status'] in ['never_deployed', 'deleted']:
+                    initial_selection.add(host_name)
+        elif preselect_mode == 'none':
+            initial_selection = set()
+        else:  # 'all'
+            initial_selection = set(hosts.keys())
 
         try:
-            import sys
             import tty
             import termios
+            return self._interactive_select_hosts(hosts, operation_name, initial_selection)
         except ImportError:
-            # Fallback to the previous method if termios is not available (Windows)
-            return self._fallback_deployment_host_selection(hosts, operation_name, never_deployed_hosts)
+            return self._fallback_select_hosts(hosts, operation_name, initial_selection)
 
-        host_list = ["All hosts"] + list(hosts.keys())
-        selected_hosts = never_deployed_hosts.copy()  # Start with never-deployed selected
-        current_index = 0
-        
-        def get_key():
-            """Get a single keypress from stdin"""
-            fd = sys.stdin.fileno()
-            old_settings = termios.tcgetattr(fd)
-            try:
-                tty.setraw(sys.stdin.fileno())
-                key = sys.stdin.read(1)
-                if key == '\x1b':  # ESC sequence
-                    key += sys.stdin.read(2)
-                return key
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    def _render_host_menu(self, hosts, host_list, selected_hosts, current_index, operation_name,
+                          initial_selection=None, interactive=True):
+        """Render the host selection menu (shared by interactive and fallback modes)."""
+        # Clear screen and move cursor to top
+        print("\033[2J\033[H", end="")
 
-        def display_menu():
-            """Display the selection menu"""
-            # Clear screen and move cursor to top
-            print("\033[2J\033[H", end="")
-            
-            # Header
-            self.print_header(f"Select Hosts for {operation_name.title()}")
-            
-            # Instructions
+        # Header
+        self.print_header(f"Select Hosts for {operation_name.title()}")
+
+        # Instructions
+        if interactive:
             self.print_colored("🎮 Navigation Controls:", 'cyan', bold=True)
             self.print_colored("   ↑/↓ Arrow keys    - Navigate up/down", 'white')
             self.print_colored("   Space bar        - Toggle selection", 'white')
             self.print_colored("   Enter           - Confirm selection", 'white')
             self.print_colored("   q/Esc           - Cancel operation", 'white')
-            print()
-            
-            # Show preselection info
-            if never_deployed_hosts:
+        else:
+            self.print_colored("📋 Instructions:", 'cyan', bold=True)
+            self.print_colored("   • Enter numbers to toggle selection (e.g., 1, 2, 3)", 'white')
+            self.print_colored("   • Use 'a' to select all hosts", 'white')
+            self.print_colored("   • Use 'n' to deselect all hosts", 'white')
+            self.print_colored("   • Use 'c' to cancel operation", 'white')
+            self.print_colored("   • Press Enter when ready to proceed", 'white')
+        print()
+
+        # Show preselection info (only for 'undeployed' mode)
+        if initial_selection is not None and initial_selection != set(hosts.keys()):
+            preselected = initial_selection
+            if preselected:
                 self.print_colored("💡 Pre-selected nodes that were never deployed or deleted:", 'cyan', bold=True)
-                for host_name in sorted(never_deployed_hosts):
+                for host_name in sorted(preselected):
                     status_info = self._get_node_status_info(host_name)
                     status_emoji, _, status_desc = self._get_status_display_info(status_info['status'])
                     self.print_colored(f"   • {host_name} [{status_emoji} {status_desc}]", 'green')
                 print()
-            
-            # Status
-            all_selected = len(selected_hosts) == len(hosts)
-            if len(selected_hosts) == 0:
-                self.print_colored("⚠️  No hosts selected!", 'red', bold=True)
-            elif all_selected:
-                self.print_colored(f"✅ All {len(hosts)} hosts selected", 'green', bold=True)
-            else:
-                self.print_colored(f"📊 Selected: {len(selected_hosts)}/{len(hosts)} hosts", 'cyan', bold=True)
-            print()
-            
-            # Menu items
-            for i, item in enumerate(host_list):
-                is_current = (i == current_index)
-                
-                if item == "All hosts":
-                    # All hosts option
-                    all_selected = len(selected_hosts) == len(hosts)
-                    marker = "✓" if all_selected else " "
-                    prefix = "→ " if is_current else "  "
-                    color = 'yellow' if is_current else ('green' if all_selected else 'white')
-                    style = 'bold' if is_current else False
-                    
-                    self.print_colored(f"{prefix}[{marker}] {item} ({len(hosts)} total)", color, bold=style)
-                else:
-                    # Individual host
-                    host_name = item
-                    host_config = hosts[host_name]
-                    ip = host_config.get('ansible_host', 'Unknown')
-                    user = host_config.get('ansible_user', 'Unknown')
-                    
-                    # Get status information
-                    status_info = self._get_node_status_info(host_name)
-                    status = status_info['status']
-                    status_emoji, status_color, status_desc = self._get_status_display_info(status)
-                    
-                    is_selected = host_name in selected_hosts
-                    is_preselected = host_name in never_deployed_hosts
-                    marker = "✓" if is_selected else " "
-                    prefix = "→ " if is_current else "  "
-                    
-                    if is_current and is_selected:
-                        color = 'yellow'
-                    elif is_current:
-                        color = 'yellow'
-                    elif is_selected:
-                        color = 'green'
-                    else:
-                        color = 'white'
-                    
-                    style = 'bold' if is_current else False
-                    
 
+        # Status
+        all_selected = len(selected_hosts) == len(hosts)
+        if len(selected_hosts) == 0:
+            self.print_colored("⚠️  No hosts selected!", 'red', bold=True)
+        elif all_selected:
+            self.print_colored(f"✅ All {len(hosts)} hosts selected", 'green', bold=True)
+        else:
+            self.print_colored(f"📊 Selected: {len(selected_hosts)}/{len(hosts)} hosts", 'cyan', bold=True)
+            if not interactive:
+                selected_names = ', '.join(sorted(selected_hosts))
+                self.print_colored(f"   Selected hosts: {selected_names}", 'cyan')
+        print()
+
+        # Menu items
+        for i, item in enumerate(host_list):
+            is_current = interactive and (i == current_index)
+
+            if item == "All hosts":
+                all_sel = len(selected_hosts) == len(hosts)
+                marker = "✓" if all_sel else " "
+                prefix = "→ " if is_current else "  "
+                idx_str = f"{prefix}" if interactive else f"  0) "
+                color = 'yellow' if is_current else ('green' if all_sel else 'white')
+                style = 'bold' if is_current or all_sel else False
+                self.print_colored(f"{idx_str}[{marker}] {item} ({len(hosts)} total)", color, bold=style)
+            else:
+                host_name = item
+                is_selected = host_name in selected_hosts
+                is_preselected = initial_selection is not None and host_name in initial_selection and initial_selection != set(hosts.keys())
+                marker = "✓" if is_selected else " "
+
+                if interactive:
+                    prefix = "→ " if is_current else "  "
+                    color = 'yellow' if is_current else ('green' if is_selected else 'white')
+                    style = 'bold' if is_current else False
                     preselect_indicator = " (pre-selected)" if is_preselected else ""
                     self.print_colored(f"{prefix}[{marker}] {host_name}{preselect_indicator}", color, bold=style)
+                else:
+                    idx = host_list.index(item)  # 0 is "All hosts", so real index starts at 1
+                    color = 'green' if is_selected else 'white'
+                    preselect_indicator = " (pre-selected)" if is_preselected else ""
+                    self.print_colored(f"  {idx}) [{marker}] {host_name}{preselect_indicator}", color, bold=is_selected)
 
-            print()
-            self.print_colored("─" * 60, 'blue')
+        print()
+        self.print_colored("─" * 60, 'blue')
 
-        while True:
-            display_menu()
-            
-            try:
-                key = get_key()
-                
-                if key == '\x1b[A':  # Up arrow
-                    current_index = (current_index - 1) % len(host_list)
-                elif key == '\x1b[B':  # Down arrow
-                    current_index = (current_index + 1) % len(host_list)
-                elif key == ' ':  # Space bar - toggle selection
-                    current_item = host_list[current_index]
-                    if current_item == "All hosts":
-                        # Toggle all
-                        if len(selected_hosts) == len(hosts):
-                            selected_hosts = set()
-                        else:
-                            selected_hosts = set(hosts.keys())
-                    else:
-                        # Toggle individual host
-                        host_name = current_item
-                        if host_name in selected_hosts:
-                            selected_hosts.remove(host_name)
-                        else:
-                            selected_hosts.add(host_name)
-                elif key == '\r' or key == '\n':  # Enter - confirm
-                    if len(selected_hosts) == 0:
-                        # Show error and continue
-                        print("\033[2J\033[H", end="")
-                        self.print_colored("❌ Cannot proceed without selecting any hosts!", 'red', bold=True)
-                        self.print_colored("Press any key to continue...", 'yellow')
-                        get_key()
-                        continue
-                    break
-                elif key == 'q' or key == '\x1b':  # q or Esc - cancel
-                    return []
-                
-            except KeyboardInterrupt:
-                return []
-        
-        return list(selected_hosts)
-
-    def _interactive_host_selection(self, hosts: Dict[str, Dict[str, Any]], operation_name: str) -> List[str]:
-        """Interactive host selection with keyboard navigation (arrow keys + space)"""
-        if not hosts:
-            return []
-
-        try:
-            import sys
-            import tty
-            import termios
-        except ImportError:
-            # Fallback to the previous method if termios is not available (Windows)
-            return self._fallback_host_selection(hosts, operation_name)
+    def _interactive_select_hosts(self, hosts, operation_name, initial_selection):
+        """Interactive host selection with keyboard navigation (arrow keys + space)."""
+        import tty
+        import termios
 
         host_list = ["All hosts"] + list(hosts.keys())
-        selected_hosts = set(hosts.keys())  # Start with all selected
+        selected_hosts = initial_selection.copy()
         current_index = 0
-        
+
         def get_key():
-            """Get a single keypress from stdin"""
             fd = sys.stdin.fileno()
             old_settings = termios.tcgetattr(fd)
             try:
                 tty.setraw(sys.stdin.fileno())
                 key = sys.stdin.read(1)
-                if key == '\x1b':  # ESC sequence
+                if key == '\x1b':
                     key += sys.stdin.read(2)
                 return key
             finally:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
-        def display_menu():
-            """Display the selection menu"""
-            # Clear screen and move cursor to top
-            print("\033[2J\033[H", end="")
-            
-            # Header
-            self.print_header(f"Select Hosts for {operation_name.title()}")
-            
-            # Instructions
-            self.print_colored("🎮 Navigation Controls:", 'cyan', bold=True)
-            self.print_colored("   ↑/↓ Arrow keys    - Navigate up/down", 'white')
-            self.print_colored("   Space bar        - Toggle selection", 'white')
-            self.print_colored("   Enter           - Confirm selection", 'white')
-            self.print_colored("   q/Esc           - Cancel operation", 'white')
-            print()
-            
-            # Status
-            all_selected = len(selected_hosts) == len(hosts)
-            if len(selected_hosts) == 0:
-                self.print_colored("⚠️  No hosts selected!", 'red', bold=True)
-            elif all_selected:
-                self.print_colored(f"✅ All {len(hosts)} hosts selected", 'green', bold=True)
-            else:
-                self.print_colored(f"📊 Selected: {len(selected_hosts)}/{len(hosts)} hosts", 'cyan', bold=True)
-            print()
-            
-            # Menu items
-            for i, item in enumerate(host_list):
-                is_current = (i == current_index)
-                
-                if item == "All hosts":
-                    # All hosts option
-                    all_selected = len(selected_hosts) == len(hosts)
-                    marker = "✓" if all_selected else " "
-                    prefix = "→ " if is_current else "  "
-                    color = 'yellow' if is_current else ('green' if all_selected else 'white')
-                    style = 'bold' if is_current else False
-                    
-                    self.print_colored(f"{prefix}[{marker}] {item} ({len(hosts)} total)", color, bold=style)
-                else:
-                    # Individual host
-                    host_name = item
-                    host_config = hosts[host_name]
-                    ip = host_config.get('ansible_host', 'Unknown')
-                    user = host_config.get('ansible_user', 'Unknown')
-                    
-                    # Get status information
-                    status_info = self._get_node_status_info(host_name)
-                    status = status_info['status']
-                    status_emoji, status_color, status_desc = self._get_status_display_info(status)
-                    
-                    is_selected = host_name in selected_hosts
-                    marker = "✓" if is_selected else " "
-                    prefix = "→ " if is_current else "  "
-                    
-                    if is_current and is_selected:
-                        color = 'yellow'
-                    elif is_current:
-                        color = 'yellow'
-                    elif is_selected:
-                        color = 'green'
-                    else:
-                        color = 'white'
-                    
-                    style = 'bold' if is_current else False
-                    
-                    self.print_colored(f"{prefix}[{marker}] {host_name}", color, bold=style)
-
-            print()
-            self.print_colored("─" * 60, 'blue')
-
         while True:
-            display_menu()
-            
+            self._render_host_menu(hosts, host_list, selected_hosts, current_index,
+                                   operation_name, initial_selection, interactive=True)
+
             try:
                 key = get_key()
-                
+
                 if key == '\x1b[A':  # Up arrow
                     current_index = (current_index - 1) % len(host_list)
                 elif key == '\x1b[B':  # Down arrow
@@ -6091,21 +5961,17 @@ class R1Setup:
                 elif key == ' ':  # Space bar - toggle selection
                     current_item = host_list[current_index]
                     if current_item == "All hosts":
-                        # Toggle all
                         if len(selected_hosts) == len(hosts):
                             selected_hosts = set()
                         else:
                             selected_hosts = set(hosts.keys())
                     else:
-                        # Toggle individual host
-                        host_name = current_item
-                        if host_name in selected_hosts:
-                            selected_hosts.remove(host_name)
+                        if current_item in selected_hosts:
+                            selected_hosts.remove(current_item)
                         else:
-                            selected_hosts.add(host_name)
+                            selected_hosts.add(current_item)
                 elif key == '\r' or key == '\n':  # Enter - confirm
                     if len(selected_hosts) == 0:
-                        # Show error and continue
                         print("\033[2J\033[H", end="")
                         self.print_colored("❌ Cannot proceed without selecting any hosts!", 'red', bold=True)
                         self.print_colored("Press any key to continue...", 'yellow')
@@ -6114,133 +5980,61 @@ class R1Setup:
                     break
                 elif key == 'q' or key == '\x1b':  # q or Esc - cancel
                     return []
-                
+
             except KeyboardInterrupt:
                 return []
-        
+
         return list(selected_hosts)
 
-    def _fallback_deployment_host_selection(self, hosts: Dict[str, Dict[str, Any]], operation_name: str, never_deployed_hosts: set) -> List[str]:
-        """Fallback deployment host selection for systems without termios (like Windows)"""
-        if not hosts:
-            return []
+    def _fallback_select_hosts(self, hosts, operation_name, initial_selection):
+        """Fallback host selection for systems without termios."""
+        host_list = ["All hosts"] + list(hosts.keys())
+        selected_hosts = initial_selection.copy()
 
-        host_list = list(hosts.keys())
-        selected_hosts = never_deployed_hosts.copy()  # Start with never-deployed selected
-        
         while True:
-            # Clear screen for better UX
-            print("\033[2J\033[H", end="")
-            
-            self.print_header(f"Host Selection for {operation_name.title()}")
-            
-            if never_deployed_hosts:
-                self.print_colored("💡 Pre-selected nodes that were never deployed or deleted:", 'cyan', bold=True)
-                for host_name in sorted(never_deployed_hosts):
-                    status_info = self._get_node_status_info(host_name)
-                    status_emoji, _, status_desc = self._get_status_display_info(status_info['status'])
-                    self.print_colored(f"   • {host_name} [{status_emoji} {status_desc}]", 'green')
-                print()
-            
-            self.print_colored("📋 Instructions:", 'cyan', bold=True)
-            self.print_colored("   • Enter numbers to toggle selection (e.g., 1, 2, 3)", 'white')
-            self.print_colored("   • Use 'a' to select all hosts", 'white')
-            self.print_colored("   • Use 'n' to deselect all hosts", 'white')
-            self.print_colored("   • Use 'c' to cancel operation", 'white')
-            self.print_colored("   • Press Enter when ready to proceed", 'white')
-            print()
-            
-            # Show "all" option
-            all_selected = len(selected_hosts) == len(host_list)
-            all_marker = "✓" if all_selected else " "
-            all_color = 'green' if all_selected else 'white'
-            self.print_colored(f"  0) [{all_marker}] All hosts ({len(host_list)} total)", all_color, bold=all_selected)
-            
-            self.print_colored(f"\n🖥️  Individual Hosts:", 'cyan', bold=True)
-            
-            # Show individual hosts
-            for i, host_name in enumerate(host_list, 1):
-                host_config = hosts[host_name]
-                ip = host_config.get('ansible_host', 'Unknown')
-                user = host_config.get('ansible_user', 'Unknown')
-                
-                # Get status information
-                status_info = self._get_node_status_info(host_name)
-                status = status_info['status']
-                status_emoji, status_color, status_desc = self._get_status_display_info(status)
+            self._render_host_menu(hosts, host_list, selected_hosts, -1,
+                                   operation_name, initial_selection, interactive=False)
 
-                is_selected = host_name in selected_hosts
-                is_preselected = host_name in never_deployed_hosts
-                marker = "✓" if is_selected else " "
-                color = 'green' if is_selected else 'white'
-                
-                preselect_indicator = " (pre-selected)" if is_preselected else ""
-                self.print_colored(f"  {i}) [{marker}] {host_name}{preselect_indicator}", color, bold=is_selected)
-
-            print()
-            
-            # Status summary
-            if len(selected_hosts) == 0:
-                self.print_colored("⚠️  No hosts selected!", 'red', bold=True)
-                self.print_colored("   Please select at least one host to continue.", 'red')
-            elif len(selected_hosts) == len(host_list):
-                self.print_colored(f"✅ All {len(host_list)} hosts selected", 'green', bold=True)
-            else:
-                self.print_colored(f"📊 Selected: {len(selected_hosts)}/{len(host_list)} hosts", 'cyan', bold=True)
-                selected_names = ', '.join(sorted(selected_hosts))
-                self.print_colored(f"   Selected hosts: {selected_names}", 'cyan')
-            
-            print()
-            self.print_colored("─" * 60, 'blue')
-            
             choice = self.get_input("Enter choice (number/a/n/c/Enter to proceed)", "").strip().lower()
-            
+
             if choice == "":
-                # Proceed with current selection
                 if len(selected_hosts) == 0:
                     self.print_colored("❌ Cannot proceed without selecting any hosts!", 'red')
                     input("Press Enter to continue selection...")
                     continue
                 break
             elif choice == "c":
-                # Cancel operation
                 return []
             elif choice == "a":
-                # Select all
-                selected_hosts = set(host_list)
+                selected_hosts = set(hosts.keys())
                 self.print_colored("✅ All hosts selected", 'green')
             elif choice == "n":
-                # Select none
                 selected_hosts = set()
                 self.print_colored("⚠️  All hosts deselected", 'yellow')
             else:
-                # Try to parse as number or comma-separated numbers
                 try:
-                    # Handle multiple numbers separated by commas/spaces
                     choices = []
                     for part in choice.replace(',', ' ').split():
                         try:
                             choices.append(int(part))
                         except ValueError:
                             continue
-                    
+
                     if not choices:
-                        # Try single number
                         choices = [int(choice)]
-                    
-                    # Process each choice
+
+                    real_host_list = list(hosts.keys())
                     for choice_num in choices:
                         if choice_num == 0:
-                            # Toggle all
+                            all_selected = len(selected_hosts) == len(hosts)
                             if all_selected:
                                 selected_hosts = set()
                                 self.print_colored("⚠️  All hosts deselected", 'yellow')
                             else:
-                                selected_hosts = set(host_list)
+                                selected_hosts = set(hosts.keys())
                                 self.print_colored("✅ All hosts selected", 'green')
-                        elif 1 <= choice_num <= len(host_list):
-                            # Toggle individual host
-                            host_name = host_list[choice_num - 1]
+                        elif 1 <= choice_num <= len(real_host_list):
+                            host_name = real_host_list[choice_num - 1]
                             if host_name in selected_hosts:
                                 selected_hosts.remove(host_name)
                                 self.print_colored(f"➖ Deselected: {host_name}", 'yellow')
@@ -6248,144 +6042,14 @@ class R1Setup:
                                 selected_hosts.add(host_name)
                                 self.print_colored(f"➕ Selected: {host_name}", 'green')
                         else:
-                            self.print_colored(f"❌ Invalid choice: {choice_num} (valid range: 0-{len(host_list)})", 'red')
-                    
+                            self.print_colored(f"❌ Invalid choice: {choice_num} (valid range: 0-{len(real_host_list)})", 'red')
+
                 except ValueError:
                     self.print_colored("❌ Invalid input. Please enter numbers, 'a', 'n', 'c', or press Enter.", 'red')
-            
-            # Small delay to let user see the feedback
+
             import time
             time.sleep(0.8)
-        
-        return list(selected_hosts)
 
-    def _fallback_host_selection(self, hosts: Dict[str, Dict[str, Any]], operation_name: str) -> List[str]:
-        """Fallback host selection for systems without termios (like Windows)"""
-        if not hosts:
-            return []
-
-        host_list = list(hosts.keys())
-        selected_hosts = set(host_list)  # Start with all selected
-        
-        while True:
-            # Clear screen for better UX
-            print("\033[2J\033[H", end="")
-            
-            self.print_header(f"Host Selection for {operation_name.title()}")
-            
-            self.print_colored("📋 Instructions:", 'cyan', bold=True)
-            self.print_colored("   • Enter numbers to toggle selection (e.g., 1, 2, 3)", 'white')
-            self.print_colored("   • Use 'a' to select all hosts", 'white')
-            self.print_colored("   • Use 'n' to deselect all hosts", 'white')
-            self.print_colored("   • Use 'c' to cancel operation", 'white')
-            self.print_colored("   • Press Enter when ready to proceed", 'white')
-            print()
-            
-            # Show "all" option
-            all_selected = len(selected_hosts) == len(host_list)
-            all_marker = "✓" if all_selected else " "
-            all_color = 'green' if all_selected else 'white'
-            self.print_colored(f"  0) [{all_marker}] All hosts ({len(host_list)} total)", all_color, bold=all_selected)
-            
-            self.print_colored(f"\n🖥️  Individual Hosts:", 'cyan', bold=True)
-            
-            # Show individual hosts
-            for i, host_name in enumerate(host_list, 1):
-                host_config = hosts[host_name]
-                ip = host_config.get('ansible_host', 'Unknown')
-                user = host_config.get('ansible_user', 'Unknown')
-                
-                # Get status information
-                status_info = self._get_node_status_info(host_name)
-                status = status_info['status']
-                status_emoji, status_color, status_desc = self._get_status_display_info(status)
-
-                is_selected = host_name in selected_hosts
-                marker = "✓" if is_selected else " "
-                color = 'green' if is_selected else 'white'
-                
-                self.print_colored(f"  {i}) [{marker}] {host_name}", color, bold=is_selected)
-
-            print()
-            
-            # Status summary
-            if len(selected_hosts) == 0:
-                self.print_colored("⚠️  No hosts selected!", 'red', bold=True)
-                self.print_colored("   Please select at least one host to continue.", 'red')
-            elif len(selected_hosts) == len(host_list):
-                self.print_colored(f"✅ All {len(host_list)} hosts selected", 'green', bold=True)
-            else:
-                self.print_colored(f"📊 Selected: {len(selected_hosts)}/{len(host_list)} hosts", 'cyan', bold=True)
-                selected_names = ', '.join(sorted(selected_hosts))
-                self.print_colored(f"   Selected hosts: {selected_names}", 'cyan')
-            
-            print()
-            self.print_colored("─" * 60, 'blue')
-            
-            choice = self.get_input("Enter choice (number/a/n/c/Enter to proceed)", "").strip().lower()
-            
-            if choice == "":
-                # Proceed with current selection
-                if len(selected_hosts) == 0:
-                    self.print_colored("❌ Cannot proceed without selecting any hosts!", 'red')
-                    input("Press Enter to continue selection...")
-                    continue
-                break
-            elif choice == "c":
-                # Cancel operation
-                return []
-            elif choice == "a":
-                # Select all
-                selected_hosts = set(host_list)
-                self.print_colored("✅ All hosts selected", 'green')
-            elif choice == "n":
-                # Select none
-                selected_hosts = set()
-                self.print_colored("⚠️  All hosts deselected", 'yellow')
-            else:
-                # Try to parse as number or comma-separated numbers
-                try:
-                    # Handle multiple numbers separated by commas/spaces
-                    choices = []
-                    for part in choice.replace(',', ' ').split():
-                        try:
-                            choices.append(int(part))
-                        except ValueError:
-                            continue
-                    
-                    if not choices:
-                        # Try single number
-                        choices = [int(choice)]
-                    
-                    # Process each choice
-                    for choice_num in choices:
-                        if choice_num == 0:
-                            # Toggle all
-                            if all_selected:
-                                selected_hosts = set()
-                                self.print_colored("⚠️  All hosts deselected", 'yellow')
-                            else:
-                                selected_hosts = set(host_list)
-                                self.print_colored("✅ All hosts selected", 'green')
-                        elif 1 <= choice_num <= len(host_list):
-                            # Toggle individual host
-                            host_name = host_list[choice_num - 1]
-                            if host_name in selected_hosts:
-                                selected_hosts.remove(host_name)
-                                self.print_colored(f"➖ Deselected: {host_name}", 'yellow')
-                            else:
-                                selected_hosts.add(host_name)
-                                self.print_colored(f"➕ Selected: {host_name}", 'green')
-                        else:
-                            self.print_colored(f"❌ Invalid choice: {choice_num} (valid range: 0-{len(host_list)})", 'red')
-                    
-                except ValueError:
-                    self.print_colored("❌ Invalid input. Please enter numbers, 'a', 'n', 'c', or press Enter.", 'red')
-            
-            # Small delay to let user see the feedback
-            import time
-            time.sleep(0.8)
-        
         return list(selected_hosts)
 
     def _format_timestamp_ago(self, timestamp: str) -> str:
@@ -6638,7 +6302,7 @@ class R1Setup:
 
         # Interactive host selection
         operation_name = action_text.lower()
-        selected_hosts = self._interactive_host_selection(hosts, operation_name)
+        selected_hosts = self.select_hosts(hosts, operation_name, preselect_mode='all')
         
         if not selected_hosts:
             self.print_colored("No hosts selected. Operation cancelled.", 'yellow')
