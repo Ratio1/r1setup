@@ -2092,6 +2092,553 @@ class ConfigurationManager:
         input("\nPress Enter to continue...")
 
 
+
+
+class NodeStatusTracker:
+    """Tracks and displays node deployment/service status.
+
+    Accesses from self.app (R1Setup):
+        - inventory (read)
+        - config_dir, config_file (paths)
+        - print_colored(), print_debug(), print_header(), print_section()
+        - get_input()
+        - run_command()
+        - _save_configuration()
+        - _format_timestamp_ago()
+        - load_configuration()
+        - check_hosts_config()
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    def _should_preserve_node_status(self, node_name: str) -> bool:
+        """Check if a node's status should be preserved (e.g., deleted nodes)"""
+        current_status = self._get_node_status_info(node_name)['status']
+        return current_status == 'deleted'
+
+    def _update_node_status(self, node_name: str, status: str) -> None:
+        """Update the status of a specific node"""
+        hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        if node_name in hosts:
+            old_status = hosts[node_name].get('node_status', 'unknown')
+
+            # Preserve certain statuses (e.g., deleted nodes)
+            if self._should_preserve_node_status(node_name) and status not in ['deploying', 'error']:
+                self.app.print_debug(f"Preserving {node_name} status: {old_status} (requested: {status})")
+                return
+
+            old_update = hosts[node_name].get('last_status_update', 'never')
+            new_update = datetime.now().isoformat()
+
+            hosts[node_name]['node_status'] = status
+            hosts[node_name]['last_status_update'] = new_update
+            self.app._save_configuration()
+
+            self.app.print_debug(f"Updated {node_name} status: {old_status} → {status}")
+            self.app.print_debug(f"  Previous update: {old_update}")
+            self.app.print_debug(f"  New update: {new_update}")
+
+    def _get_node_status_info(self, node_name: str) -> Dict[str, str]:
+        """Get status information for a node"""
+        hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        if node_name in hosts:
+            status = hosts[node_name].get('node_status', 'unknown')
+            last_update = hosts[node_name].get('last_status_update', '')
+            self.app.print_debug(f"Retrieved {node_name} status: {status} (updated: {last_update})")
+            return {'status': status, 'last_update': last_update}
+        self.app.print_debug(f"Node {node_name} not found in hosts configuration")
+        return {'status': 'unknown', 'last_update': ''}
+
+    @staticmethod
+    def _resolve_node_status(service_status, container_status):
+        """Map service/container status to overall (status, result, overwrite) tuple.
+
+        overwrite=True means the result should overwrite existing data
+        (container info takes priority over service-only info).
+        Returns None if no resolution is possible.
+        """
+        if container_status == 'RUNNING':
+            return ('running', 'Container is running', True)
+        elif container_status == 'NOT_RUNNING':
+            if service_status == 'ACTIVE':
+                return ('stopped', 'Service active but container not running', True)
+            elif service_status == 'NOT_FOUND':
+                return ('not_deployed', 'Service not found - not deployed', True)
+            else:
+                return ('stopped', 'Container not running', True)
+        elif service_status == 'ACTIVE':
+            return ('running', 'Service is active', False)
+        elif service_status in ('INACTIVE', 'FAILED'):
+            return ('stopped', 'Service is inactive/failed', False)
+        elif service_status == 'NOT_FOUND':
+            return ('not_deployed', 'Service not found - not deployed', False)
+        return None
+
+    def _apply_resolved_status(self, node_status_data, current_host, service_status, container_status):
+        """Apply resolved status to node_status_data, respecting priority rules."""
+        resolved = self._resolve_node_status(service_status, container_status)
+        if resolved:
+            status, result, overwrite = resolved
+            if overwrite or current_host not in node_status_data:
+                node_status_data[current_host] = {'status': status, 'result': result}
+                self.app.print_debug(f"Set {current_host} to {status} ({result})")
+
+    def _run_status_playbook(self):
+        """Run the ansible service status playbook.
+
+        Returns (success, output) tuple.
+        """
+        playbook_path = self.app.config_dir / 'playbooks/service_status.yml'
+        if not playbook_path.exists():
+            self.app.print_colored(f"❌ Service status playbook not found: {playbook_path}", 'red')
+            return False, ''
+
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.app.config_file} {playbook_path}")
+
+        return self.app.run_command(cmd, show_output=False, timeout=30)
+
+    def _parse_status_fields(self, text):
+        """Parse service and container status from a text block.
+
+        Returns (service_status, container_status) tuple.
+        """
+        service_status = None
+        container_status = None
+
+        if 'Service Status: ACTIVE' in text:
+            service_status = 'ACTIVE'
+        elif 'Service Status: INACTIVE' in text or 'Service Status: INACTIVE/FAILED' in text:
+            service_status = 'INACTIVE'
+        elif 'Service Status: FAILED' in text:
+            service_status = 'FAILED'
+        elif 'Service Status: NOT FOUND' in text:
+            service_status = 'NOT_FOUND'
+
+        if 'Container Status: RUNNING' in text:
+            container_status = 'RUNNING'
+        elif 'Container Status: NOT RUNNING' in text:
+            container_status = 'NOT_RUNNING'
+
+        return service_status, container_status
+
+    def _parse_ansible_status_lines(self, lines):
+        """Parse ansible playbook output lines for node status information.
+
+        Tries multiple parsing strategies:
+        1. Structured message output (msg-based)
+        2. Direct status lines
+        3. Aggressive fallback (broad search)
+
+        Returns dict of {hostname: {status, result}}.
+        """
+        import re
+        node_status_data = {}
+        current_host = None
+        task_pattern = re.compile(r'ok: \[([^\]]+)\] => \{')
+
+        for i, line in enumerate(lines):
+            line = line.strip()
+
+            # Track current host from task results
+            task_match = task_pattern.match(line)
+            if task_match:
+                current_host = task_match.group(1)
+                self.app.print_debug(f"Found task result for host: {current_host}")
+                continue
+
+            # Handle unreachable nodes
+            if 'unreachable:' in line and '[' in line and ']' in line:
+                unreachable_match = re.search(r'unreachable: \[([^\]]+)\]', line)
+                if unreachable_match:
+                    hostname = unreachable_match.group(1)
+                    node_status_data[hostname] = {
+                        'status': 'unreachable',
+                        'result': 'Node unreachable'
+                    }
+                    self.app.print_debug(f"Set {hostname} to unreachable")
+                    continue
+
+            # Handle fatal unreachable nodes
+            if 'fatal:' in line and 'UNREACHABLE!' in line and '[' in line and ']' in line:
+                fatal_match = re.search(r'fatal: \[([^\]]+)\]: UNREACHABLE!', line)
+                if fatal_match:
+                    hostname = fatal_match.group(1)
+                    node_status_data[hostname] = {
+                        'status': 'unreachable',
+                        'result': 'Node unreachable - connection failed'
+                    }
+                    self.app.print_debug(f"Set {hostname} to unreachable (fatal)")
+                    continue
+
+            # Look for structured message output from the playbook
+            if current_host and '"msg":' in line:
+                self.app.print_debug(f"Processing message line for {current_host}: {line}")
+                msg_match = re.search(r'"msg":\s*"([^"]*(?:\\.[^"]*)*)"', line)
+                if msg_match:
+                    msg_content = msg_match.group(1)
+                    msg_content = msg_content.replace('\\n', '\n').replace('\\"', '"')
+                    self.app.print_debug(f"Extracted message for {current_host}: {msg_content}")
+
+                    # Handle truncated messages
+                    if msg_content.endswith('\\n') or not msg_content.endswith('"'):
+                        self.app.print_debug(f"Message appears truncated for {current_host}, looking for continuation")
+                        for j in range(i + 1, min(i + 10, len(lines))):
+                            next_line = lines[j].strip()
+                            if next_line.startswith('"') and next_line.endswith('"'):
+                                msg_content += next_line[1:-1].replace('\\n', '\n').replace('\\"', '"')
+                                break
+                            elif next_line.startswith('"'):
+                                msg_content += next_line[1:].replace('\\n', '\n').replace('\\"', '"')
+                            else:
+                                break
+                        self.app.print_debug(f"Complete message for {current_host}: {msg_content}")
+
+                    if 'Service Status:' in msg_content or 'Container Status:' in msg_content:
+                        self.app.print_debug(f"Found status information in message for {current_host}")
+                    else:
+                        self.app.print_debug(f"No status information found in message for {current_host}")
+                        continue
+
+                    service_status, container_status = self._parse_status_fields(msg_content)
+                    self.app.print_debug(f"Parsed {current_host}: service={service_status}, container={container_status}")
+                    self._apply_resolved_status(node_status_data, current_host, service_status, container_status)
+
+            # Direct status lines
+            elif current_host and ('Service Status:' in line or 'Container Status:' in line):
+                self.app.print_debug(f"Processing status line for {current_host}: {line}")
+                service_status, container_status = self._parse_status_fields(line)
+                self.app.print_debug(f"Parsed {current_host}: service={service_status}, container={container_status}")
+                self._apply_resolved_status(node_status_data, current_host, service_status, container_status)
+
+        self.app.print_debug(f"Initial parse node status data: {node_status_data}")
+
+        # Aggressive fallback if no data found
+        if not node_status_data:
+            self.app.print_debug("No status data found, trying aggressive parsing approach")
+            current_host = None
+            for i, line in enumerate(lines):
+                line = line.strip()
+                host_match = re.search(r'ok:\s*\[([^\]]+)\]', line)
+                if host_match:
+                    current_host = host_match.group(1)
+                    self.app.print_debug(f"Found host mention: {current_host}")
+
+                if current_host and ('Service Status:' in line or 'Container Status:' in line):
+                    self.app.print_debug(f"Found status line for {current_host}: {line}")
+                    service_status, container_status = self._parse_status_fields(line)
+                    self.app.print_debug(f"Aggressive parsing for {current_host}: service={service_status}, container={container_status}")
+                    self._apply_resolved_status(node_status_data, current_host, service_status, container_status)
+
+        self.app.print_debug(f"Final node status data: {node_status_data}")
+        return node_status_data
+
+    @staticmethod
+    def _fill_missing_host_statuses(data, hosts):
+        """Add 'unknown' status for any hosts not in the status data."""
+        for hostname in hosts.keys():
+            if hostname not in data:
+                data[hostname] = {
+                    'status': 'unknown',
+                    'result': 'Unable to determine status'
+                }
+        return data
+
+    def _get_real_time_node_status(self) -> Dict[str, Dict[str, str]]:
+        """Get real-time status for all nodes by running the service status playbook"""
+        success, output = self._run_status_playbook()
+        if not output and not success:
+            return {}
+
+        if success:
+            self.app.print_debug(f"Playbook output length: {len(output)} characters")
+            self.app.print_debug("=== PLAYBOOK OUTPUT ===")
+            self.app.print_debug(output)
+            self.app.print_debug("=== END OUTPUT ===")
+        else:
+            self.app.print_debug(f"Status check failed with output length: {len(output) if output else 0}")
+            if output and "timed out" in output.lower():
+                self.app.print_debug("Status check timed out - some hosts may be offline")
+            elif output:
+                self.app.print_debug(f"Status check failed with error: {output}")
+                self.app.print_debug("=== PARTIAL PLAYBOOK OUTPUT ===")
+                self.app.print_debug(output)
+                self.app.print_debug("=== END PARTIAL OUTPUT ===")
+
+        lines = output.split('\n') if output else []
+        data = self._parse_ansible_status_lines(lines)
+        hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        return self._fill_missing_host_statuses(data, hosts)
+
+    def _get_status_display_info(self, status: str) -> Tuple[str, str, str]:
+        """Get display information for a status (emoji, color, description)"""
+        status_info = {
+            'running': ('🟢', 'green', 'Running'),
+            'stopped': ('🔴', 'red', 'Stopped'),
+            'pending_restart': ('🟡', 'yellow', 'Pending Restart'),
+            'unknown': ('❓', 'white', 'Unknown'),
+            'deploying': ('🔄', 'cyan', 'Deploying'),
+            'error': ('❌', 'red', 'Error'),
+            'never_deployed': ('⚪', 'white', 'Never Deployed'),
+            'deleted': ('🗑️', 'red', 'Deleted'),
+            'unreachable': ('🔌', 'red', 'Unreachable'),
+            'not_deployed': ('📦', 'yellow', 'Not Deployed')
+        }
+        return status_info.get(status, ('❓', 'white', 'Unknown'))
+
+    def _display_node_status(self, node_name: str, compact: bool = False) -> None:
+        """Display the status of a node"""
+        status_info = self._get_node_status_info(node_name)
+        status = status_info['status']
+        emoji, color, description = self._get_status_display_info(status)
+
+        if compact:
+            self.app.print_colored(f"{emoji} {description}", color, end='')
+        else:
+            self.app.print_colored(f"Status: {emoji} {description}", color)
+
+    def check_and_update_node_status(self) -> None:
+        """Check actual service status and update node statuses accordingly"""
+        if not self.app.check_hosts_config():
+            self.app.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        self.app.print_header("Check & Update Node Status")
+
+        # Load configuration to show current statuses
+        self.app.load_configuration()
+        hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+
+        # Show current statuses
+        self.app.print_colored(f"🔍 Current Node Statuses:", 'cyan', bold=True)
+        self.app.print_debug(f"Debug: Checking status for {len(hosts)} nodes")
+        for name in hosts.keys():
+            status_info = self._get_node_status_info(name)
+            status = status_info['status']
+            last_update = status_info['last_update']
+            emoji, color, description = self._get_status_display_info(status)
+            last_update_str = self.app._format_timestamp_ago(last_update)
+            self.app.print_colored(f"   • {name}: {emoji} {description}", color, end='')
+            self.app.print_colored(f" (Last updated: {last_update_str})", 'white')
+            self.app.print_debug(f"  {name}: status={status}, last_update={last_update}")
+
+        self.app.print_colored(f"\n📋 This will:", 'yellow', bold=True)
+        self.app.print_colored("   • Check the actual service status on all nodes", 'yellow')
+        self.app.print_colored("   • Update node statuses based on real service state", 'yellow')
+        self.app.print_colored("   • Preserve 'Pending Restart' status (requires manual restart)", 'yellow')
+        self.app.print_colored("   • Show differences between tracked and actual status", 'yellow')
+
+        if self.app.get_input(f"\n🔍 Continue with status check on {len(hosts)} node(s)? (y/n)", "y").lower() != 'y':
+            self.app.print_colored("Status check cancelled.", 'yellow')
+            return
+
+        playbook_path = self.app.config_dir / 'playbooks/service_status.yml'
+        if not playbook_path.exists():
+            self.app.print_colored(f"Service status playbook not found: {playbook_path}", 'red')
+            input("Press Enter to continue...")
+            return
+
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.app.config_file} {playbook_path}")
+
+        self.app.print_colored("\n🔍 Checking actual service status on all nodes...", 'cyan')
+        self.app.print_debug(f"Running ansible command: {cmd}")
+        success, output = self.app.run_command(cmd, show_output=False)
+
+        if success:
+            self.app.print_colored("✅ Service status check completed!", 'green')
+            self.app.print_debug(f"Ansible output length: {len(output)} characters")
+            if DEBUG and output:
+                self.app.print_debug("Raw ansible output (first 1000 chars):")
+                self.app.print_debug(output[:1000] + ("..." if len(output) > 1000 else ""))
+
+            # Parse the output to determine actual service states
+            actual_statuses = self._parse_service_status_output(output)
+
+            # Update node statuses based on results
+            status_changes = []
+            self.app.print_debug(f"Processing status updates for {len(actual_statuses)} nodes")
+
+            # Update last_update timestamp for all nodes that were checked
+            for node_name in actual_statuses.keys():
+                self._update_node_status(node_name, actual_statuses[node_name])
+
+            for node_name, actual_status in actual_statuses.items():
+                current_status_info = self._get_node_status_info(node_name)
+                current_status = current_status_info['status']
+
+                # Determine new status based on actual service state and current tracked status
+                new_status = self._determine_updated_status(current_status, actual_status)
+
+                self.app.print_debug(f"Node {node_name}: current={current_status}, actual={actual_status}, new={new_status}")
+
+                if new_status != current_status:
+                    self._update_node_status(node_name, new_status)
+                    status_changes.append({
+                        'node': node_name,
+                        'old': current_status,
+                        'new': new_status,
+                        'actual': actual_status
+                    })
+                    self.app.print_debug(f"  Status change recorded for {node_name}")
+                else:
+                    self.app.print_debug(f"  No status change needed for {node_name}")
+
+            # Show results
+            self.app.print_colored(f"\n📊 Status Update Results:", 'cyan', bold=True)
+
+            if status_changes:
+                self.app.print_colored(f"Updated {len(status_changes)} node(s):", 'green')
+                for change in status_changes:
+                    old_emoji, old_color, old_desc = self._get_status_display_info(change['old'])
+                    new_emoji, new_color, new_desc = self._get_status_display_info(change['new'])
+                    self.app.print_colored(f"   • {change['node']}: ", 'white', end='')
+                    self.app.print_colored(f"{old_emoji} {old_desc}", old_color, end='')
+                    self.app.print_colored(" → ", 'white', end='')
+                    self.app.print_colored(f"{new_emoji} {new_desc}", new_color)
+                    if change['actual'] == 'service_missing':
+                        self.app.print_colored(f"     (Service not found - node may not be deployed)", 'yellow')
+                    elif change['actual'] == 'connection_failed':
+                        self.app.print_colored(f"     (Connection failed - node may be unreachable)", 'yellow')
+            else:
+                self.app.print_colored("No status changes needed - all nodes are correctly tracked.", 'green')
+
+            # Show final status summary
+            self.app.print_colored(f"\n🖥️  Final Node Statuses:", 'cyan', bold=True)
+            for name in hosts.keys():
+                status_info = self._get_node_status_info(name)
+                status = status_info['status']
+                last_update = status_info['last_update']
+                emoji, color, description = self._get_status_display_info(status)
+                last_update_str = self.app._format_timestamp_ago(last_update)
+                self.app.print_colored(f"   • {name}: {emoji} {description}", color, end='')
+                self.app.print_colored(f" (Last updated: {last_update_str})", 'white')
+
+        else:
+            self.app.print_colored("❌ Service status check failed. Please check network connectivity and node access.", 'red')
+            self.app.print_colored("Output for debugging:", 'yellow')
+            if output:
+                print(output[:500] + "..." if len(output) > 500 else output)
+
+        input("\nPress Enter to continue...")
+
+    def _parse_service_status_output(self, output: str) -> Dict[str, str]:
+        """Parse ansible service status output to determine actual service states"""
+        node_statuses = {}
+
+        try:
+            lines = output.split('\n')
+            current_node = None
+            self.app.print_debug(f"Parsing ansible output with {len(lines)} lines")
+
+            for i, line in enumerate(lines):
+                line = line.strip()
+
+                # Look for node task execution patterns
+                if 'TASK [' in line and 'Check service status' in line:
+                    self.app.print_debug(f"Line {i}: Found task header: {line}")
+                    continue
+
+                # Look for node results
+                if line.startswith(('ok: [', 'changed: [', 'fatal: [', 'unreachable: [')):
+                    start = line.find('[') + 1
+                    end = line.find(']')
+                    if start > 0 and end > start:
+                        current_node = line[start:end]
+                        self.app.print_debug(f"Line {i}: Found node result for {current_node}: {line}")
+
+                        if line.startswith('unreachable:'):
+                            node_statuses[current_node] = 'connection_failed'
+                            self.app.print_debug(f"  Set {current_node} to connection_failed")
+                        elif line.startswith('fatal:'):
+                            if 'could not be found' in line.lower() or 'not found' in line.lower():
+                                node_statuses[current_node] = 'service_missing'
+                                self.app.print_debug(f"  Set {current_node} to service_missing")
+                            else:
+                                node_statuses[current_node] = 'error'
+                                self.app.print_debug(f"  Set {current_node} to error")
+                        continue
+
+                # Look for systemctl status output patterns
+                # Avoid Ansible summary lines (e.g., "my-node : ok=10 changed=3 failed=0")
+                if current_node and not (':' in line and 'ok=' in line and 'changed=' in line):
+                    if any(keyword in line.lower() for keyword in ['active', 'inactive', 'failed', 'running']):
+                        self.app.print_debug(f"Line {i}: Status line for {current_node}: {line}")
+                        if 'active (running)' in line.lower():
+                            node_statuses[current_node] = 'running'
+                            self.app.print_debug(f"  Set {current_node} to running")
+                        elif 'inactive' in line.lower() or 'stopped' in line.lower():
+                            node_statuses[current_node] = 'stopped'
+                            self.app.print_debug(f"  Set {current_node} to stopped")
+                        elif 'failed' in line.lower() and 'failed=' not in line.lower():
+                            node_statuses[current_node] = 'error'
+                            self.app.print_debug(f"  Set {current_node} to error")
+
+                # Look for service status in structured output
+                elif current_node and 'service status:' in line.lower():
+                    self.app.print_debug(f"Line {i}: Service status line for {current_node}: {line}")
+                    if 'active' in line.lower():
+                        node_statuses[current_node] = 'running'
+                        self.app.print_debug(f"  Set {current_node} to running (from service status)")
+                    elif 'inactive' in line.lower() or 'inactive/failed' in line.lower():
+                        node_statuses[current_node] = 'stopped'
+                        self.app.print_debug(f"  Set {current_node} to stopped (from service status)")
+
+            # Broader fallback approach
+            if not node_statuses:
+                self.app.print_debug("No statuses parsed, trying broader approach")
+                import re
+                node_pattern = r'(?:ok|changed|fatal|unreachable): \[([^\]]+)\]'
+                matches = re.findall(node_pattern, output)
+                self.app.print_debug(f"Found node mentions: {matches}")
+                for node_name in set(matches):
+                    if node_name not in node_statuses:
+                        node_statuses[node_name] = 'unknown'
+                        self.app.print_debug(f"  Set {node_name} to unknown (fallback)")
+
+        except Exception as e:
+            self.app.print_debug(f"Error parsing service status output: {e}")
+
+        self.app.print_debug(f"Final parsed node statuses: {node_statuses}")
+        return node_statuses
+
+    def _determine_updated_status(self, current_status: str, actual_status: str) -> str:
+        """Determine the new status based on current tracked status and actual service state"""
+
+        self.app.print_debug(f"Determining status: current='{current_status}', actual='{actual_status}'")
+
+        # Special handling for pending_restart
+        if current_status == 'pending_restart':
+            if actual_status == 'stopped' or actual_status == 'service_missing':
+                result = 'stopped' if actual_status == 'stopped' else 'never_deployed'
+                self.app.print_debug(f"  Pending restart cleared: {current_status} → {result}")
+                return result
+            else:
+                self.app.print_debug(f"  Pending restart preserved (service state: {actual_status})")
+                return 'pending_restart'
+
+        # For other statuses, update based on actual service state
+        status_mapping = {
+            'running': 'running',
+            'stopped': 'stopped',
+            'error': 'error',
+            'service_missing': 'never_deployed',
+            'connection_failed': 'error',
+            'unknown': 'unknown'
+        }
+
+        result = status_mapping.get(actual_status, 'unknown')
+        self.app.print_debug(f"  Status mapping: {actual_status} → {result}")
+        return result
+
+
+
 class R1Setup:
     def __init__(self):
         self.colors = {
@@ -2157,6 +2704,7 @@ class R1Setup:
         # Component instances (order matters)
         self.version_manager = VersionManager(self)
         self.config_manager = ConfigurationManager(self)
+        self.status_tracker = NodeStatusTracker(self)
 
         # Load or initialize active configuration
         self.config_manager._load_active_config()
@@ -2498,6 +3046,35 @@ class R1Setup:
 
     def _quick_export_current(self):
         return self.config_manager._quick_export_current()
+
+    # -- NodeStatusTracker delegation stubs --
+    def _should_preserve_node_status(self, node_name):
+        return self.status_tracker._should_preserve_node_status(node_name)
+
+    def _update_node_status(self, node_name, status):
+        return self.status_tracker._update_node_status(node_name, status)
+
+    def _get_node_status_info(self, node_name):
+        return self.status_tracker._get_node_status_info(node_name)
+
+    def _get_real_time_node_status(self):
+        return self.status_tracker._get_real_time_node_status()
+
+    def _get_status_display_info(self, status):
+        return self.status_tracker._get_status_display_info(status)
+
+    def _display_node_status(self, node_name, compact=False):
+        return self.status_tracker._display_node_status(node_name, compact)
+
+    def check_and_update_node_status(self):
+        return self.status_tracker.check_and_update_node_status()
+
+    def _parse_service_status_output(self, output):
+        return self.status_tracker._parse_service_status_output(output)
+
+    def _determine_updated_status(self, current_status, actual_status):
+        return self.status_tracker._determine_updated_status(current_status, actual_status)
+
 
     def show_main_menu(self) -> None:
         """Display the main menu"""
@@ -3220,484 +3797,6 @@ class R1Setup:
                 return host
 
             self.print_colored("Let's reconfigure this node...", 'yellow')
-
-    def _should_preserve_node_status(self, node_name: str) -> bool:
-        """Check if a node's status should be preserved (e.g., deleted nodes)"""
-        current_status = self._get_node_status_info(node_name)['status']
-        return current_status == 'deleted'
-
-    def _update_node_status(self, node_name: str, status: str) -> None:
-        """Update the status of a specific node"""
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
-        if node_name in hosts:
-            old_status = hosts[node_name].get('node_status', 'unknown')
-            
-            # Preserve certain statuses (e.g., deleted nodes)
-            if self._should_preserve_node_status(node_name) and status not in ['deploying', 'error']:
-                self.print_debug(f"Preserving {node_name} status: {old_status} (requested: {status})")
-                return
-            
-            old_update = hosts[node_name].get('last_status_update', 'never')
-            new_update = datetime.now().isoformat()
-            
-            hosts[node_name]['node_status'] = status
-            hosts[node_name]['last_status_update'] = new_update
-            self._save_configuration()
-            
-            self.print_debug(f"Updated {node_name} status: {old_status} → {status}")
-            self.print_debug(f"  Previous update: {old_update}")
-            self.print_debug(f"  New update: {new_update}")
-
-    def _get_node_status_info(self, node_name: str) -> Dict[str, str]:
-        """Get status information for a node"""
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
-        if node_name in hosts:
-            status = hosts[node_name].get('node_status', 'unknown')
-            last_update = hosts[node_name].get('last_status_update', '')
-            self.print_debug(f"Retrieved {node_name} status: {status} (updated: {last_update})")
-            return {'status': status, 'last_update': last_update}
-        self.print_debug(f"Node {node_name} not found in hosts configuration")
-        return {'status': 'unknown', 'last_update': ''}
-
-    def _get_real_time_node_status(self) -> Dict[str, Dict[str, str]]:
-        """Get real-time status for all nodes by running the service status playbook"""
-        # Run service status playbook
-        playbook_path = self.config_dir / 'playbooks/service_status.yml'
-        if not playbook_path.exists():
-            self.print_colored(f"❌ Service status playbook not found: {playbook_path}", 'red')
-            return {}
-
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} {playbook_path}")
-
-        # Use a reasonable timeout for status checking (30 seconds should be enough for most cases)
-        success, output = self.run_command(cmd, show_output=False, timeout=30)
-        
-        # Process results for real-time status
-        node_status_data = {}
-        
-        if success:
-            self.print_debug(f"Playbook output length: {len(output)} characters")
-            self.print_debug("=== PLAYBOOK OUTPUT ===")
-            self.print_debug(output)
-            self.print_debug("=== END OUTPUT ===")
-            
-            # Parse the output for service status information
-            lines = output.split('\n')
-            current_host = None
-            
-            # Use regex to find all task result blocks
-            import re
-        else:
-            # Handle timeout or other failure cases
-            self.print_debug(f"Status check failed with output length: {len(output) if output else 0}")
-            if "timed out" in output.lower():
-                self.print_debug("Status check timed out - some hosts may be offline")
-            else:
-                self.print_debug(f"Status check failed with error: {output}")
-            
-            # We'll still try to parse whatever output we got - partial output is valuable
-            if output:
-                self.print_debug("=== PARTIAL PLAYBOOK OUTPUT ===")
-                self.print_debug(output)
-                self.print_debug("=== END PARTIAL OUTPUT ===")
-            
-            lines = output.split('\n') if output else []
-            current_host = None
-            
-            # Use regex to find all task result blocks
-            import re
-            
-            # Look for pattern: ok: [hostname] => {
-            task_pattern = re.compile(r'ok: \[([^\]]+)\] => \{')
-            
-            for i, line in enumerate(lines):
-                line = line.strip()
-                
-                # Track current host being processed from task results
-                task_match = task_pattern.match(line)
-                if task_match:
-                    current_host = task_match.group(1)
-                    self.print_debug(f"Found task result for host: {current_host}")
-                    continue
-                
-                # Handle unreachable nodes - both patterns
-                if 'unreachable:' in line and '[' in line and ']' in line:
-                    unreachable_match = re.search(r'unreachable: \[([^\]]+)\]', line)
-                    if unreachable_match:
-                        hostname = unreachable_match.group(1)
-                        node_status_data[hostname] = {
-                            'status': 'unreachable',
-                            'result': 'Node unreachable'
-                        }
-                        self.print_debug(f"Set {hostname} to unreachable")
-                        continue
-                
-                # Handle fatal unreachable nodes (ansible format: fatal: [hostname]: UNREACHABLE!)
-                if 'fatal:' in line and 'UNREACHABLE!' in line and '[' in line and ']' in line:
-                    fatal_match = re.search(r'fatal: \[([^\]]+)\]: UNREACHABLE!', line)
-                    if fatal_match:
-                        hostname = fatal_match.group(1)
-                        node_status_data[hostname] = {
-                            'status': 'unreachable',
-                            'result': 'Node unreachable - connection failed'
-                        }
-                        self.print_debug(f"Set {hostname} to unreachable (fatal)")
-                        continue
-                
-                # Look for the structured message output from the playbook
-                if current_host and '"msg":' in line:
-                    self.print_debug(f"Processing message line for {current_host}: {line}")
-                    
-                    # Extract the message content - it contains the status information
-                    msg_match = re.search(r'"msg":\s*"([^"]*(?:\\.[^"]*)*)"', line)
-                    if msg_match:
-                        msg_content = msg_match.group(1)
-                        # Decode escaped characters (like \n)
-                        msg_content = msg_content.replace('\\n', '\n').replace('\\"', '"')
-                        self.print_debug(f"Extracted message for {current_host}: {msg_content}")
-                        
-                        # If the message is truncated, try to get the full message from subsequent lines
-                        if msg_content.endswith('\\n') or not msg_content.endswith('"'):
-                            self.print_debug(f"Message appears truncated for {current_host}, looking for continuation")
-                            # Look ahead for more message content
-                            for j in range(i + 1, min(i + 10, len(lines))):
-                                next_line = lines[j].strip()
-                                if next_line.startswith('"') and next_line.endswith('"'):
-                                    # End of message
-                                    msg_content += next_line[1:-1].replace('\\n', '\n').replace('\\"', '"')
-                                    break
-                                elif next_line.startswith('"'):
-                                    # Continuation of message
-                                    msg_content += next_line[1:].replace('\\n', '\n').replace('\\"', '"')
-                                else:
-                                    # Not part of message
-                                    break
-                            self.print_debug(f"Complete message for {current_host}: {msg_content}")
-                        
-                        # Check if this message contains status information
-                        if 'Service Status:' in msg_content or 'Container Status:' in msg_content:
-                            self.print_debug(f"Found status information in message for {current_host}")
-                        else:
-                            self.print_debug(f"No status information found in message for {current_host}")
-                            continue
-                        
-                        # Parse the decoded message content for status information
-                        service_status = None
-                        container_status = None
-                        
-                        # Look for Service Status in the message
-                        if 'Service Status: ACTIVE' in msg_content:
-                            service_status = 'ACTIVE'
-                            self.print_debug(f"Found ACTIVE service status for {current_host}")
-                        elif 'Service Status: INACTIVE' in msg_content or 'Service Status: INACTIVE/FAILED' in msg_content:
-                            service_status = 'INACTIVE'
-                            self.print_debug(f"Found INACTIVE service status for {current_host}")
-                        elif 'Service Status: FAILED' in msg_content:
-                            service_status = 'FAILED'
-                            self.print_debug(f"Found FAILED service status for {current_host}")
-                        elif 'Service Status: NOT FOUND' in msg_content:
-                            service_status = 'NOT_FOUND'
-                            self.print_debug(f"Found NOT_FOUND service status for {current_host}")
-                        else:
-                            self.print_debug(f"No service status found in message for {current_host}")
-                        
-                        # Look for Container Status in the message
-                        if 'Container Status: RUNNING' in msg_content:
-                            container_status = 'RUNNING'
-                            self.print_debug(f"Found RUNNING container status for {current_host}")
-                        elif 'Container Status: NOT RUNNING' in msg_content:
-                            container_status = 'NOT_RUNNING'
-                            self.print_debug(f"Found NOT_RUNNING container status for {current_host}")
-                        else:
-                            self.print_debug(f"No container status found in message for {current_host}")
-                        
-                        self.print_debug(f"Parsed {current_host}: service={service_status}, container={container_status}")
-                        
-                        # Determine overall status based on service and container status
-                        self.print_debug(f"Determining status for {current_host}: container={container_status}, service={service_status}")
-                        if container_status == 'RUNNING':
-                            node_status_data[current_host] = {
-                                'status': 'running',
-                                'result': 'Container is running'
-                            }
-                            self.print_debug(f"Set {current_host} to running (container running)")
-                        elif container_status == 'NOT_RUNNING':
-                            if service_status == 'ACTIVE':
-                                node_status_data[current_host] = {
-                                    'status': 'stopped',
-                                    'result': 'Service active but container not running'
-                                }
-                                self.print_debug(f"Set {current_host} to stopped (service active, container not running)")
-                            elif service_status == 'NOT_FOUND':
-                                node_status_data[current_host] = {
-                                    'status': 'not_deployed',
-                                    'result': 'Service not found - not deployed'
-                                }
-                                self.print_debug(f"Set {current_host} to not_deployed (service not found)")
-                            else:
-                                node_status_data[current_host] = {
-                                    'status': 'stopped',
-                                    'result': 'Container not running'
-                                }
-                                self.print_debug(f"Set {current_host} to stopped (container not running)")
-                        elif service_status == 'ACTIVE' and current_host not in node_status_data:
-                            node_status_data[current_host] = {
-                                'status': 'running',
-                                'result': 'Service is active'
-                            }
-                            self.print_debug(f"Set {current_host} to running (service active)")
-                        elif service_status in ['INACTIVE', 'FAILED'] and current_host not in node_status_data:
-                            node_status_data[current_host] = {
-                                'status': 'stopped',
-                                'result': 'Service is inactive/failed'
-                            }
-                            self.print_debug(f"Set {current_host} to stopped (service inactive/failed)")
-                        elif service_status == 'NOT_FOUND' and current_host not in node_status_data:
-                            node_status_data[current_host] = {
-                                'status': 'not_deployed',
-                                'result': 'Service not found - not deployed'
-                            }
-                            self.print_debug(f"Set {current_host} to not_deployed (service not found)")
-                
-                # Look for status information in the task output directly (new format)
-                elif current_host and ('Service Status:' in line or 'Container Status:' in line):
-                    self.print_debug(f"Processing status line for {current_host}: {line}")
-                    
-                    # Parse service status
-                    if 'Service Status: ACTIVE' in line:
-                        service_status = 'ACTIVE'
-                    elif 'Service Status: INACTIVE' in line or 'Service Status: INACTIVE/FAILED' in line:
-                        service_status = 'INACTIVE'
-                    elif 'Service Status: FAILED' in line:
-                        service_status = 'FAILED'
-                    elif 'Service Status: NOT FOUND' in line:
-                        service_status = 'NOT_FOUND'
-                    
-                    # Parse container status
-                    if 'Container Status: RUNNING' in line:
-                        container_status = 'RUNNING'
-                    elif 'Container Status: NOT RUNNING' in line:
-                        container_status = 'NOT_RUNNING'
-                    
-                    self.print_debug(f"Parsed {current_host}: service={service_status}, container={container_status}")
-                    
-                    # Determine overall status based on service and container status
-                    if container_status == 'RUNNING':
-                        node_status_data[current_host] = {
-                            'status': 'running',
-                            'result': 'Container is running'
-                        }
-                        self.print_debug(f"Set {current_host} to running (container running)")
-                    elif container_status == 'NOT_RUNNING':
-                        if service_status == 'ACTIVE':
-                            node_status_data[current_host] = {
-                                'status': 'stopped',
-                                'result': 'Service active but container not running'
-                            }
-                            self.print_debug(f"Set {current_host} to stopped (service active, container not running)")
-                        elif service_status == 'NOT_FOUND':
-                            node_status_data[current_host] = {
-                                'status': 'not_deployed',
-                                'result': 'Service not found - not deployed'
-                            }
-                            self.print_debug(f"Set {current_host} to not_deployed (service not found)")
-                        else:
-                            node_status_data[current_host] = {
-                                'status': 'stopped',
-                                'result': 'Container not running'
-                            }
-                            self.print_debug(f"Set {current_host} to stopped (container not running)")
-                    elif service_status == 'ACTIVE' and current_host not in node_status_data:
-                        node_status_data[current_host] = {
-                            'status': 'running',
-                            'result': 'Service is active'
-                        }
-                        self.print_debug(f"Set {current_host} to running (service active)")
-                    elif service_status in ['INACTIVE', 'FAILED'] and current_host not in node_status_data:
-                        node_status_data[current_host] = {
-                            'status': 'stopped',
-                            'result': 'Service is inactive/failed'
-                        }
-                        self.print_debug(f"Set {current_host} to stopped (service inactive/failed)")
-                    elif service_status == 'NOT_FOUND' and current_host not in node_status_data:
-                        node_status_data[current_host] = {
-                            'status': 'not_deployed',
-                            'result': 'Service not found - not deployed'
-                        }
-                        self.print_debug(f"Set {current_host} to not_deployed (service not found)")
-                
-                # Fallback: Look for debug output with container and service status (legacy format)
-                elif current_host and ('Container Status:' in line or 'Service Status:' in line):
-                    # Parse container status
-                    if 'Container Status: RUNNING' in line:
-                        node_status_data[current_host] = {
-                            'status': 'running',
-                            'result': 'Container is running'
-                        }
-                        self.print_debug(f"Set {current_host} to running (legacy format)")
-                    elif 'Container Status: NOT RUNNING' in line:
-                        # Check if we have service status info
-                        if 'Service Status: ACTIVE' in line:
-                            node_status_data[current_host] = {
-                                'status': 'stopped',
-                                'result': 'Service active but container not running'
-                            }
-                        elif 'Service Status: NOT FOUND' in line:
-                            node_status_data[current_host] = {
-                                'status': 'not_deployed',
-                                'result': 'Service not found - not deployed'
-                            }
-                        else:
-                            node_status_data[current_host] = {
-                                'status': 'stopped',
-                                'result': 'Container not running'
-                            }
-                        self.print_debug(f"Set {current_host} to stopped (legacy format)")
-                    
-                    # Parse service status when container info is not available
-                    elif 'Service Status: ACTIVE' in line and current_host not in node_status_data:
-                        node_status_data[current_host] = {
-                            'status': 'running',
-                            'result': 'Service is active'
-                        }
-                        self.print_debug(f"Set {current_host} to running (service active, legacy format)")
-                    elif 'Service Status: INACTIVE' in line or 'Service Status: FAILED' in line or 'Service Status: INACTIVE/FAILED' in line:
-                        node_status_data[current_host] = {
-                            'status': 'stopped',
-                            'result': 'Service is inactive/failed'
-                        }
-                        self.print_debug(f"Set {current_host} to stopped (service inactive/failed, legacy format)")
-                    elif 'Service Status: NOT FOUND' in line:
-                        node_status_data[current_host] = {
-                            'status': 'not_deployed',
-                            'result': 'Service not found - not deployed'
-                        }
-                        self.print_debug(f"Set {current_host} to not_deployed (service not found, legacy format)")
-        
-        self.print_debug(f"Final node status data: {node_status_data}")
-        
-        # If we still don't have status data, try a more aggressive approach
-        if not node_status_data:
-            self.print_debug("No status data found, trying aggressive parsing approach")
-            # Look for any lines containing status information in the entire output
-            for i, line in enumerate(lines):
-                line = line.strip()
-                
-                # Look for any host mention
-                host_match = re.search(r'ok:\s*\[([^\]]+)\]', line)
-                if host_match:
-                    current_host = host_match.group(1)
-                    self.print_debug(f"Found host mention: {current_host}")
-                
-                # Look for status information anywhere in the output
-                if current_host and ('Service Status:' in line or 'Container Status:' in line):
-                    self.print_debug(f"Found status line for {current_host}: {line}")
-                    
-                    # Parse service status
-                    service_status = None
-                    if 'Service Status: ACTIVE' in line:
-                        service_status = 'ACTIVE'
-                    elif 'Service Status: INACTIVE' in line or 'Service Status: INACTIVE/FAILED' in line:
-                        service_status = 'INACTIVE'
-                    elif 'Service Status: FAILED' in line:
-                        service_status = 'FAILED'
-                    elif 'Service Status: NOT FOUND' in line:
-                        service_status = 'NOT_FOUND'
-                    
-                    # Parse container status
-                    container_status = None
-                    if 'Container Status: RUNNING' in line:
-                        container_status = 'RUNNING'
-                    elif 'Container Status: NOT RUNNING' in line:
-                        container_status = 'NOT_RUNNING'
-                    
-                    self.print_debug(f"Aggressive parsing for {current_host}: service={service_status}, container={container_status}")
-                    
-                    # Determine overall status based on service and container status
-                    if container_status == 'RUNNING':
-                        node_status_data[current_host] = {
-                            'status': 'running',
-                            'result': 'Container is running'
-                        }
-                        self.print_debug(f"Set {current_host} to running (container running)")
-                    elif container_status == 'NOT_RUNNING':
-                        if service_status == 'ACTIVE':
-                            node_status_data[current_host] = {
-                                'status': 'stopped',
-                                'result': 'Service active but container not running'
-                            }
-                            self.print_debug(f"Set {current_host} to stopped (service active, container not running)")
-                        elif service_status == 'NOT_FOUND':
-                            node_status_data[current_host] = {
-                                'status': 'not_deployed',
-                                'result': 'Service not found - not deployed'
-                            }
-                            self.print_debug(f"Set {current_host} to not_deployed (service not found)")
-                        else:
-                            node_status_data[current_host] = {
-                                'status': 'stopped',
-                                'result': 'Container not running'
-                            }
-                            self.print_debug(f"Set {current_host} to stopped (container not running)")
-                    elif service_status == 'ACTIVE' and current_host not in node_status_data:
-                        node_status_data[current_host] = {
-                            'status': 'running',
-                            'result': 'Service is active'
-                        }
-                        self.print_debug(f"Set {current_host} to running (service active)")
-                    elif service_status in ['INACTIVE', 'FAILED'] and current_host not in node_status_data:
-                        node_status_data[current_host] = {
-                            'status': 'stopped',
-                            'result': 'Service is inactive/failed'
-                        }
-                        self.print_debug(f"Set {current_host} to stopped (service inactive/failed)")
-                    elif service_status == 'NOT_FOUND' and current_host not in node_status_data:
-                        node_status_data[current_host] = {
-                            'status': 'not_deployed',
-                            'result': 'Service not found - not deployed'
-                        }
-                        self.print_debug(f"Set {current_host} to not_deployed (service not found)")
-        
-        # Fill in any missing hosts with unknown status
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
-        for hostname in hosts.keys():
-            if hostname not in node_status_data:
-                node_status_data[hostname] = {
-                    'status': 'unknown',
-                    'result': 'Unable to determine status'
-                }
-        
-        return node_status_data
-
-    def _get_status_display_info(self, status: str) -> Tuple[str, str, str]:
-        """Get display information for a status (emoji, color, description)"""
-        status_info = {
-            'running': ('🟢', 'green', 'Running'),
-            'stopped': ('🔴', 'red', 'Stopped'),
-            'pending_restart': ('🟡', 'yellow', 'Pending Restart'),
-            'unknown': ('❓', 'white', 'Unknown'),
-            'deploying': ('🔄', 'cyan', 'Deploying'),
-            'error': ('❌', 'red', 'Error'),
-            'never_deployed': ('⚪', 'white', 'Never Deployed'),
-            'deleted': ('🗑️', 'red', 'Deleted'),
-            'unreachable': ('🔌', 'red', 'Unreachable'),
-            'not_deployed': ('📦', 'yellow', 'Not Deployed')
-        }
-        return status_info.get(status, ('❓', 'white', 'Unknown'))
-
-    def _display_node_status(self, node_name: str, compact: bool = False) -> None:
-        """Display the status of a node"""
-        status_info = self._get_node_status_info(node_name)
-        status = status_info['status']
-        emoji, color, description = self._get_status_display_info(status)
-        
-        if compact:
-            self.print_colored(f"{emoji} {description}", color, end='')
-        else:
-            self.print_colored(f"Status: {emoji} {description}", color)
 
     def _add_node(self) -> None:
         """Add a new node to existing configuration"""
@@ -4588,250 +4687,6 @@ class R1Setup:
         self.print_colored(f"Network environment changed to: {env}", 'green')
 
         input("Press Enter to continue...")
-
-    def check_and_update_node_status(self) -> None:
-        """Check actual service status and update node statuses accordingly"""
-        if not self.check_hosts_config():
-            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
-            return
-
-        self.print_header("Check & Update Node Status")
-
-        # Load configuration to show current statuses
-        self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
-
-        # Show current statuses
-        self.print_colored(f"🔍 Current Node Statuses:", 'cyan', bold=True)
-        self.print_debug(f"Debug: Checking status for {len(hosts)} nodes")
-        for name in hosts.keys():
-            status_info = self._get_node_status_info(name)
-            status = status_info['status']
-            last_update = status_info['last_update']
-            emoji, color, description = self._get_status_display_info(status)
-            last_update_str = self._format_timestamp_ago(last_update)
-            self.print_colored(f"   • {name}: {emoji} {description}", color, end='')
-            self.print_colored(f" (Last updated: {last_update_str})", 'white')
-            self.print_debug(f"  {name}: status={status}, last_update={last_update}")
-
-        self.print_colored(f"\n📋 This will:", 'yellow', bold=True)
-        self.print_colored("   • Check the actual service status on all nodes", 'yellow')
-        self.print_colored("   • Update node statuses based on real service state", 'yellow')
-        self.print_colored("   • Preserve 'Pending Restart' status (requires manual restart)", 'yellow')
-        self.print_colored("   • Show differences between tracked and actual status", 'yellow')
-
-        if self.get_input(f"\n🔍 Continue with status check on {len(hosts)} node(s)? (y/n)", "y").lower() != 'y':
-            self.print_colored("Status check cancelled.", 'yellow')
-            return
-
-        playbook_path = self.config_dir / 'playbooks/service_status.yml'
-        if not playbook_path.exists():
-            self.print_colored(f"Service status playbook not found: {playbook_path}", 'red')
-            input("Press Enter to continue...")
-            return
-
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} {playbook_path}")
-
-        self.print_colored("\n🔍 Checking actual service status on all nodes...", 'cyan')
-        self.print_debug(f"Running ansible command: {cmd}")
-        success, output = self.run_command(cmd, show_output=False)
-
-        if success:
-            self.print_colored("✅ Service status check completed!", 'green')
-            self.print_debug(f"Ansible output length: {len(output)} characters")
-            if DEBUG and output:
-                self.print_debug("Raw ansible output (first 1000 chars):")
-                self.print_debug(output[:1000] + ("..." if len(output) > 1000 else ""))
-            
-            # Parse the output to determine actual service states
-            actual_statuses = self._parse_service_status_output(output)
-            
-            # Update node statuses based on results
-            status_changes = []
-            self.print_debug(f"Processing status updates for {len(actual_statuses)} nodes")
-            
-            # Update last_update timestamp for all nodes that were checked
-            for node_name in actual_statuses.keys():
-                self._update_node_status(node_name, actual_statuses[node_name])
-            
-            for node_name, actual_status in actual_statuses.items():
-                current_status_info = self._get_node_status_info(node_name)
-                current_status = current_status_info['status']
-                
-                # Determine new status based on actual service state and current tracked status
-                new_status = self._determine_updated_status(current_status, actual_status)
-                
-                self.print_debug(f"Node {node_name}: current={current_status}, actual={actual_status}, new={new_status}")
-                
-                if new_status != current_status:
-                    self._update_node_status(node_name, new_status)
-                    status_changes.append({
-                        'node': node_name,
-                        'old': current_status,
-                        'new': new_status,
-                        'actual': actual_status
-                    })
-                    self.print_debug(f"  Status change recorded for {node_name}")
-                else:
-                    self.print_debug(f"  No status change needed for {node_name}")
-            
-            # Show results
-            self.print_colored(f"\n📊 Status Update Results:", 'cyan', bold=True)
-            
-            if status_changes:
-                self.print_colored(f"Updated {len(status_changes)} node(s):", 'green')
-                for change in status_changes:
-                    old_emoji, old_color, old_desc = self._get_status_display_info(change['old'])
-                    new_emoji, new_color, new_desc = self._get_status_display_info(change['new'])
-                    self.print_colored(f"   • {change['node']}: ", 'white', end='')
-                    self.print_colored(f"{old_emoji} {old_desc}", old_color, end='')
-                    self.print_colored(" → ", 'white', end='')
-                    self.print_colored(f"{new_emoji} {new_desc}", new_color)
-                    if change['actual'] == 'service_missing':
-                        self.print_colored(f"     (Service not found - node may not be deployed)", 'yellow')
-                    elif change['actual'] == 'connection_failed':
-                        self.print_colored(f"     (Connection failed - node may be unreachable)", 'yellow')
-            else:
-                self.print_colored("No status changes needed - all nodes are correctly tracked.", 'green')
-            
-            # Show final status summary
-            self.print_colored(f"\n🖥️  Final Node Statuses:", 'cyan', bold=True)
-            for name in hosts.keys():
-                status_info = self._get_node_status_info(name)
-                status = status_info['status']
-                last_update = status_info['last_update']
-                emoji, color, description = self._get_status_display_info(status)
-                last_update_str = self._format_timestamp_ago(last_update)
-                self.print_colored(f"   • {name}: {emoji} {description}", color, end='')
-                self.print_colored(f" (Last updated: {last_update_str})", 'white')
-                
-        else:
-            self.print_colored("❌ Service status check failed. Please check network connectivity and node access.", 'red')
-            self.print_colored("Output for debugging:", 'yellow')
-            if output:
-                print(output[:500] + "..." if len(output) > 500 else output)
-
-        input("\nPress Enter to continue...")
-
-    def _parse_service_status_output(self, output: str) -> Dict[str, str]:
-        """Parse ansible service status output to determine actual service states"""
-        node_statuses = {}
-        
-        try:
-            lines = output.split('\n')
-            current_node = None
-            self.print_debug(f"Parsing ansible output with {len(lines)} lines")
-            
-            for i, line in enumerate(lines):
-                line = line.strip()
-                
-                # Look for node task execution patterns
-                if 'TASK [' in line and 'Check service status' in line:
-                    self.print_debug(f"Line {i}: Found task header: {line}")
-                    continue
-                    
-                # Look for node results - patterns like "ok: [node-name]" or "fatal: [node-name]"
-                if line.startswith(('ok: [', 'changed: [', 'fatal: [', 'unreachable: [')):
-                    # Extract node name
-                    start = line.find('[') + 1
-                    end = line.find(']')
-                    if start > 0 and end > start:
-                        current_node = line[start:end]
-                        self.print_debug(f"Line {i}: Found node result for {current_node}: {line}")
-                        
-                        if line.startswith('unreachable:'):
-                            node_statuses[current_node] = 'connection_failed'
-                            self.print_debug(f"  Set {current_node} to connection_failed")
-                        elif line.startswith('fatal:'):
-                            # Could be service not found or other error
-                            if 'could not be found' in line.lower() or 'not found' in line.lower():
-                                node_statuses[current_node] = 'service_missing'
-                                self.print_debug(f"  Set {current_node} to service_missing")
-                            else:
-                                node_statuses[current_node] = 'error'
-                                self.print_debug(f"  Set {current_node} to error")
-                        continue
-                
-                # Look for systemctl status output patterns
-                # Avoid Ansible summary lines (e.g., "my-node : ok=10 changed=3 failed=0")
-                if current_node and not (':' in line and 'ok=' in line and 'changed=' in line):
-                    if any(keyword in line.lower() for keyword in ['active', 'inactive', 'failed', 'running']):
-                        self.print_debug(f"Line {i}: Status line for {current_node}: {line}")
-                        if 'active (running)' in line.lower():
-                            node_statuses[current_node] = 'running'
-                            self.print_debug(f"  Set {current_node} to running")
-                        elif 'inactive' in line.lower() or 'stopped' in line.lower():
-                            node_statuses[current_node] = 'stopped'
-                            self.print_debug(f"  Set {current_node} to stopped")
-                        elif 'failed' in line.lower() and 'failed=' not in line.lower():
-                            # Only treat as error if it's not an Ansible stats line like "failed=0"
-                            node_statuses[current_node] = 'error'
-                            self.print_debug(f"  Set {current_node} to error")
-                        
-                # Look for service status in structured output (Service Status: ACTIVE)
-                elif current_node and 'service status:' in line.lower():
-                    self.print_debug(f"Line {i}: Service status line for {current_node}: {line}")
-                    if 'active' in line.lower():
-                        node_statuses[current_node] = 'running'
-                        self.print_debug(f"  Set {current_node} to running (from service status)")
-                    elif 'inactive' in line.lower() or 'inactive/failed' in line.lower():
-                        node_statuses[current_node] = 'stopped'
-                        self.print_debug(f"  Set {current_node} to stopped (from service status)")
-                        
-            # If we couldn't parse specific statuses, try a broader approach
-            if not node_statuses:
-                self.print_debug("No statuses parsed, trying broader approach")
-                # Look for any node mentions and assume unknown status
-                import re
-                node_pattern = r'(?:ok|changed|fatal|unreachable): \[([^\]]+)\]'
-                matches = re.findall(node_pattern, output)
-                self.print_debug(f"Found node mentions: {matches}")
-                for node_name in set(matches):
-                    if node_name not in node_statuses:
-                        # If we see the node but can't determine status, mark as unknown
-                        node_statuses[node_name] = 'unknown'
-                        self.print_debug(f"  Set {node_name} to unknown (fallback)")
-                        
-        except Exception as e:
-            self.print_debug(f"Error parsing service status output: {e}")
-            
-        self.print_debug(f"Final parsed node statuses: {node_statuses}")
-        return node_statuses
-
-    def _determine_updated_status(self, current_status: str, actual_status: str) -> str:
-        """Determine the new status based on current tracked status and actual service state"""
-        
-        self.print_debug(f"Determining status: current='{current_status}', actual='{actual_status}'")
-        
-        # Special handling for pending_restart - preserve it unless service is confirmed stopped
-        if current_status == 'pending_restart':
-            if actual_status == 'stopped' or actual_status == 'service_missing':
-                # If service is actually stopped/missing, we can clear pending_restart
-                result = 'stopped' if actual_status == 'stopped' else 'never_deployed'
-                self.print_debug(f"  Pending restart cleared: {current_status} → {result}")
-                return result
-            else:
-                # Keep pending_restart status - the service might be running but with old config
-                self.print_debug(f"  Pending restart preserved (service state: {actual_status})")
-                return 'pending_restart'
-        
-        # For other statuses, update based on actual service state
-        status_mapping = {
-            'running': 'running',
-            'stopped': 'stopped',
-            'error': 'error',
-            'service_missing': 'never_deployed',
-            'connection_failed': 'error',
-            'unknown': 'unknown'
-        }
-        
-        result = status_mapping.get(actual_status, 'unknown')
-        self.print_debug(f"  Status mapping: {actual_status} → {result}")
-        return result
 
     def _parse_connectivity_output(self, output: str) -> Dict[str, Dict[str, Any]]:
         """Parse ansible connectivity test output to extract connection results"""
