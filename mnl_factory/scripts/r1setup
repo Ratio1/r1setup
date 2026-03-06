@@ -1406,15 +1406,33 @@ class ConfigurationManager:
 
         # Configure each node
         hosts = self.app.inventory['all']['children']['gpu_nodes']['hosts']
+        previous_config = None
+        configured_nodes = []
         for i in range(num_nodes):
+            # Show progress of previously configured nodes
+            if configured_nodes:
+                self.app.print_colored("")
+                for idx, (n, ip, user) in enumerate(configured_nodes, 1):
+                    self.app.print_colored(f"  \u2713 {idx}/{num_nodes}: {n} ({user}@{ip})", 'green')
             self.app.print_section(f"Configuring Node {i + 1} of {num_nodes}")
             name = self.app._get_valid_hostname(f"Enter name for node {i + 1}", f"gpu-node-{i + 1}")
-            hosts[name] = self.app._configure_single_node()
-            self.app.print_colored(f"Node '{name}' configured successfully!", 'green')
+            node_config = self.app._configure_single_node(previous_config=previous_config)
+            hosts[name] = node_config
+            previous_config = node_config
+            configured_nodes.append((name, node_config.get('ansible_host', ''), node_config.get('ansible_user', '')))
+            self.app.print_colored(f"\u2713 Node {i + 1}/{num_nodes} configured: {name} ({node_config.get('ansible_user', '')}@{node_config.get('ansible_host', '')})", 'green')
 
         # Save configuration with metadata
         self._save_config_with_metadata(config_name, env, num_nodes)
         self.app.print_colored(f"Configuration '{config_name}' created and activated!", 'green')
+
+        # Offer to deploy immediately
+        self.app.print_colored("\n\U0001f4a1 Your nodes are configured and ready for deployment!", 'cyan')
+        deploy_choice = self.app.get_input("Would you like to deploy now? (y/n)", "y")
+        if deploy_choice.lower() == 'y':
+            input("Press Enter to continue to deployment...")
+            self.app.deployment_menu()
+            return
         input("Press Enter to continue...")
 
     def _switch_configuration(self, configs: List[Tuple[str, Dict]]) -> None:
@@ -3523,6 +3541,20 @@ class R1Setup:
 
 
 
+    def _get_suggested_action(self):
+        """Return (default_option, hint_text) based on current state."""
+        has_config = self.check_hosts_config()
+        if not has_config:
+            return '1', '\U0001f4a1 Suggested: Configure your nodes first'
+        deployment_status = self.active_config.get('deployment_status', 'never_deployed')
+        if deployment_status in ('never_deployed', 'deleted'):
+            return '2', '\U0001f4a1 Suggested: Deploy your configured nodes'
+        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        error_count = sum(1 for h in hosts.values() if h.get('node_status') == 'error')
+        if error_count > 0:
+            return '6', f'\U0001f4a1 Suggested: Check {error_count} node(s) with errors'
+        return '0', ''
+
     def show_main_menu(self) -> None:
         """Display the main menu"""
         # Reload active config to ensure deployment status is current
@@ -3615,6 +3647,12 @@ class R1Setup:
         print()
         self.print_colored("  0) Exit")
         print()
+
+        # Show contextual suggestion
+        _, hint = self._get_suggested_action()
+        if hint:
+            self.print_colored(hint, 'cyan')
+            print()
 
     def configuration_menu(self) -> None:
         """Show configuration submenu"""
@@ -3770,7 +3808,8 @@ class R1Setup:
             self.print_colored("  0) Back to Main Menu")
             print()
 
-            choice = self.get_input("Select option", "0")
+            deploy_default = '2' if deployment_status in ('never_deployed', 'deleted') else '0'
+            choice = self.get_input("Select option", deploy_default)
 
             if choice == '0':
                 break
@@ -4056,15 +4095,54 @@ class R1Setup:
             else:
                 self.print_colored("Invalid choice. Please enter 1, 2, or 3", 'red')
 
-    def _configure_single_node(self, existing_config: Dict[str, Any] = None) -> Dict[str, Any]:
+    def _configure_single_node(self, existing_config: Dict[str, Any] = None, previous_config: Dict[str, Any] = None) -> Dict[str, Any]:
         """Configure a single node"""
         while True:
             host = {}
 
+            # "Use same credentials" shortcut for batch configuration
+            if previous_config and not existing_config:
+                prev_user = previous_config.get('ansible_user', '')
+                prev_auth = 'SSH Key' if 'ansible_ssh_private_key_file' in previous_config else 'Password'
+                self.print_colored(f"\nPrevious node used: {prev_user}, {prev_auth} auth", 'cyan')
+                use_same = self.get_input("Use same credentials as previous node? (y/n)", "y")
+                if use_same.lower() == 'y':
+                    # Ask for IP and username (with previous as default)
+                    host_address = self.get_input("Enter host (IP address or URL)", "", required=True)
+                    username = self.get_input("Enter SSH username", prev_user)
+                    # Copy credentials from previous config
+                    host['ansible_host'] = host_address
+                    host['ansible_user'] = username or prev_user
+                    host['ansible_ssh_common_args'] = previous_config.get('ansible_ssh_common_args', '-o StrictHostKeyChecking=no')
+                    for key in ('ansible_ssh_pass', 'ansible_become_password', 'ansible_ssh_private_key_file'):
+                        if key in previous_config:
+                            host[key] = previous_config[key]
+                    # Set new node status
+                    timestamp = datetime.now().isoformat()
+                    host['node_status'] = 'never_deployed'
+                    host['last_status_update'] = timestamp
+                    # Show summary and confirm
+                    auth_type = 'SSH Key' if 'ansible_ssh_private_key_file' in host else 'Password'
+                    self.print_colored("\nConfiguration Summary:", 'yellow')
+                    self.print_colored(f"Host: {host['ansible_host']}")
+                    self.print_colored(f"User: {host['ansible_user']}")
+                    self.print_colored(f"Auth: {auth_type}")
+                    if self.get_input("\nConfirm this configuration? (y/n)", "y").lower() == 'y':
+                        return host
+                    self.print_colored("Let's configure this node manually...", 'yellow')
+                    previous_config = None  # Don't offer shortcut again
+                    continue
+                # If "no", fall through to normal flow with previous values as defaults
+
             # Get existing values for defaults
             existing_ip = existing_config.get('ansible_host', '') if existing_config else ''
-            existing_user = existing_config.get('ansible_user', '') if existing_config else ''
+            existing_user = existing_config.get('ansible_user', '') if existing_config else 'root'
             existing_auth_type = 'password' if existing_config and 'ansible_ssh_pass' in existing_config else 'key' if existing_config else None
+
+            # Use previous config values as defaults when available
+            if previous_config and not existing_config:
+                existing_user = previous_config.get('ansible_user', existing_user)
+                existing_auth_type = 'password' if 'ansible_ssh_pass' in previous_config else 'key'
 
             # Show current values if updating
             if existing_config:
@@ -4081,15 +4159,16 @@ class R1Setup:
             host_address = self.get_input(host_prompt, existing_ip, required=True)
             host['ansible_host'] = host_address
 
-            # Get username
-            user_prompt = f"Enter SSH username"
-            if existing_user:
-                user_prompt += f" (current: {existing_user})"
-            username = self.get_input(user_prompt, existing_user)
-            if not username.strip() and not existing_user:
-                self.print_colored("Username cannot be empty for new nodes", 'red')
+            # Get username (default: root for new nodes, previous value for subsequent)
+            default_user = existing_user if existing_user else 'root'
+            user_prompt = "Enter SSH username"
+            if existing_config:
+                user_prompt += f" (current: {default_user})"
+            username = self.get_input(user_prompt, default_user)
+            if not username.strip():
+                self.print_colored("Username cannot be empty", 'red')
                 continue
-            host['ansible_user'] = username or existing_user
+            host['ansible_user'] = username
 
             # Authentication method selection (with retry loop)
             auth_configured = False
@@ -4145,7 +4224,12 @@ class R1Setup:
                     auth_configured = True
                 else:
                     # Key authentication
-                    existing_key = existing_config.get('ansible_ssh_private_key_file', '~/.ssh/id_rsa') if existing_config else '~/.ssh/id_rsa'
+                    if existing_config:
+                        existing_key = existing_config.get('ansible_ssh_private_key_file', '~/.ssh/id_rsa')
+                    elif previous_config and 'ansible_ssh_private_key_file' in previous_config:
+                        existing_key = previous_config['ansible_ssh_private_key_file']
+                    else:
+                        existing_key = '~/.ssh/id_rsa'
 
                     key_auth_success = False
                     while not key_auth_success:
@@ -4257,7 +4341,12 @@ class R1Setup:
                 continue
             break
 
-        hosts[name] = self._configure_single_node()
+        # Use last existing node's config as previous_config for defaults
+        last_node_config = None
+        if hosts:
+            last_node_name = list(hosts.keys())[-1]
+            last_node_config = hosts[last_node_name]
+        hosts[name] = self._configure_single_node(previous_config=last_node_config)
         self._save_configuration()
         self.print_colored(f"Node '{name}' added successfully!", 'green')
 
@@ -5416,7 +5505,8 @@ class R1Setup:
         while True:
             try:
                 self.show_main_menu()
-                choice = self.get_input("Select option (0-11)", "0")
+                suggested_default, _ = self._get_suggested_action()
+                choice = self.get_input("Select option (0-10)", suggested_default)
 
                 if choice == '0':
                     self.print_colored("Thank you for using Ratio1 Multi-Node Launcher Setup!", 'green')
