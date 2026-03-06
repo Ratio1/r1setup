@@ -2639,6 +2639,438 @@ class NodeStatusTracker:
 
 
 
+
+
+class DeploymentService:
+    """Handles deployment, deletion, and deployment status operations.
+
+    Accesses from self.app (R1Setup):
+        - inventory (read)
+        - config_dir, config_file, configs_dir (paths)
+        - active_config (read/write)
+        - print_colored(), print_debug(), print_header(), print_section()
+        - get_input()
+        - run_command()
+        - check_hosts_config()
+        - load_configuration()
+        - _save_active_config(), _save_configuration()
+        - get_mnl_app_env()
+        - select_hosts()
+        - _get_node_status_info(), _get_status_display_info()
+        - _update_node_status(), _display_node_status()
+        - _get_real_time_node_status()
+        - _display_copy_friendly_addresses()
+        - _load_active_config()
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    def deploy_full(self) -> None:
+        """Deploy full setup (Docker + NVIDIA + GPU)"""
+        self._deploy_setup("site.yml", "Full Deployment", "Docker + NVIDIA drivers + GPU setup")
+
+    def deploy_docker_only(self) -> None:
+        """Deploy Docker only"""
+        self._deploy_setup("site.yml", "Docker-Only Deployment", "Docker without GPU setup", extra_vars="skip_gpu=true")
+
+    def delete_edge_node(self) -> None:
+        """Delete deployed Edge Node with host selection"""
+        if not self.app.check_hosts_config():
+            self.app.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        self.app.print_header("Delete Edge Node Deployment")
+
+        # Load configuration to show target hosts
+        self.app.load_configuration()
+        all_hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        env = self.app.get_mnl_app_env()
+
+        # Interactive host selection for deletion
+        selected_host_names = self.app.select_hosts(all_hosts, "Edge Node deletion", preselect_mode='all')
+
+        if not selected_host_names:
+            self.app.print_colored("Deletion cancelled - no hosts selected.", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Filter hosts to only include selected ones
+        selected_hosts = {name: config for name, config in all_hosts.items() if name in selected_host_names}
+
+        # Show deletion details
+        self.app.print_colored(f"🗑️  Deletion Details:", 'cyan', bold=True)
+        self.app.print_colored(f"   • Network: {env if env else 'Not set'}", 'white')
+        self.app.print_colored(f"   • Selected Nodes: {len(selected_hosts)}/{len(all_hosts)}", 'white')
+
+        self.app.print_colored(f"\n🖥️  Edge Nodes will be deleted from these selected machines:", 'cyan', bold=True)
+        for name in selected_host_names:
+            config = all_hosts[name]
+            ip = config.get('ansible_host', 'Unknown')
+            user = config.get('ansible_user', 'Unknown')
+            # Show current status
+            status_info = self.app._get_node_status_info(name)
+            status_emoji, _, status_desc = self.app._get_status_display_info(status_info['status'])
+            self.app.print_colored(f"   • {name}: {user}@{ip} [{status_emoji} {status_desc}]", 'white')
+
+        self.app.print_colored("\n⚠️  WARNING: This will completely remove the Edge Node deployment including:", 'red', bold=True)
+        self.app.print_colored("   • Systemd service and Docker containers", 'yellow')
+        self.app.print_colored("   • Docker images and application data", 'yellow')
+        self.app.print_colored("   • Created command scripts", 'yellow')
+        self.app.print_colored("   • Docker daemon configuration", 'yellow')
+
+        if self.app.get_input(f"\n⚠️  Are you sure you want to delete Edge Node deployment from {len(selected_hosts)} selected machine(s) (y/n)", "n").lower() != 'y':
+            self.app.print_colored("Deletion cancelled.", 'yellow')
+            return
+
+        # Final confirmation
+        if self.app.get_input(f"⚠️  Type 'DELETE' to confirm deletion from {len(selected_hosts)} selected node(s)", "").upper() != 'DELETE':
+            self.app.print_colored("Deletion cancelled - confirmation not received.", 'yellow')
+            return
+
+        playbook_path = self.app.config_dir / 'playbooks/delete_edge_node.yml'
+        if not playbook_path.exists():
+            self.app.print_colored(f"Delete Edge Node playbook not found: {playbook_path}", 'red')
+            input("Press Enter to continue...")
+            return
+
+        # Create host limit for selected hosts
+        host_limit = ','.join(selected_host_names)
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.app.config_file} --limit {host_limit} {playbook_path}")
+
+        # Update selected node statuses to deploying (deletion is a deployment operation)
+        for host_name in selected_host_names:
+            self.app._update_node_status(host_name, 'deploying')
+
+        self.app.print_colored("\nStarting Edge Node deletion on selected nodes...", 'cyan')
+        success, _ = self.app.run_command(cmd, show_output=True)
+
+        if success:
+            self.app.print_colored("\nEdge Node deleted successfully!", 'green')
+            # Update deployment metadata after successful deletion
+            self._update_deletion_metadata()
+
+            # Update selected node statuses to deleted after successful deletion
+            for host_name in selected_host_names:
+                self.app._update_node_status(host_name, 'deleted')
+
+            # Show updated statuses
+            self.app.print_colored(f"\n📊 Node Deletion Status:", 'cyan', bold=True)
+            for host_name in selected_host_names:
+                self.app.print_colored(f"   • {host_name}: ", 'white', end='')
+                self.app._display_node_status(host_name, compact=True)
+                print()  # New line after each status
+
+            self.app.print_colored(f"\n💡 Note: Deleted nodes will maintain their 'deleted' status.", 'cyan')
+            self.app.print_colored("   This status will not change automatically to preserve the deletion history.", 'white')
+        else:
+            self.app.print_colored("\nEdge Node deletion encountered issues. Please check the output above.", 'red')
+            # Update selected node statuses to error after failed deletion
+            for host_name in selected_host_names:
+                self.app._update_node_status(host_name, 'error')
+            self.app.print_colored(f"\n📊 Selected node statuses updated to Error due to deletion failure.", 'yellow')
+
+        input("Press Enter to continue...")
+
+    def _deploy_setup(self, playbook: str, title: str, description: str, extra_vars: str = "") -> None:
+        """Common deployment logic with host selection"""
+        if not self.app.check_hosts_config():
+            self.app.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        self.app.print_header(title)
+
+        # Load configuration to show deployment details
+        self.app.load_configuration()
+        all_hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        env = self.app.get_mnl_app_env()
+
+        if not env:
+            self.app.print_colored("\n⚠️  WARNING: Network environment is not set!", 'red', bold=True)
+            self.app.print_colored("   Please set the network environment before deploying.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        # Interactive host selection with preselection of never-deployed nodes
+        selected_host_names = self.app.select_hosts(all_hosts, title.lower(), preselect_mode='undeployed')
+
+        if not selected_host_names:
+            self.app.print_colored("Deployment cancelled - no hosts selected.", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Filter hosts to only include selected ones
+        selected_hosts = {name: config for name, config in all_hosts.items() if name in selected_host_names}
+
+        # Show deployment details
+        self.app.print_colored(f"📋 Deployment Details:", 'cyan', bold=True)
+        self.app.print_colored(f"   • Action: {description}", 'white')
+        self.app.print_colored(f"   • Network: {env}", 'green')
+        self.app.print_colored(f"   • Selected Nodes: {len(selected_hosts)}/{len(all_hosts)}", 'white')
+
+        self.app.print_colored(f"\n🖥️  Selected Target Machines:", 'cyan', bold=True)
+        for name in selected_host_names:
+            config = all_hosts[name]
+            ip = config.get('ansible_host', 'Unknown')
+            user = config.get('ansible_user', 'Unknown')
+            # Show status
+            status_info = self.app._get_node_status_info(name)
+            status_emoji, _, status_desc = self.app._get_status_display_info(status_info['status'])
+            self.app.print_colored(f"   • {name}: {user}@{ip} [{status_emoji} {status_desc}]", 'white')
+
+        self.app.print_colored(f"\n⚠️  This will:", 'yellow', bold=True)
+        if "Docker + NVIDIA" in description:
+            self.app.print_colored("   • Install Docker and Docker Compose", 'yellow')
+            self.app.print_colored("   • Install NVIDIA drivers and CUDA toolkit", 'yellow')
+            self.app.print_colored("   • Configure GPU access for containers", 'yellow')
+            self.app.print_colored("   • Deploy and start the Edge Node", 'yellow')
+        elif "Docker only" in description:
+            self.app.print_colored("   • Install Docker and Docker Compose", 'yellow')
+            self.app.print_colored("   • Deploy and start the Edge Node (CPU mode)", 'yellow')
+        else:
+            self.app.print_colored(f"   • {description}", 'yellow')
+
+        # Check for network change warning for selected hosts
+        deployment_status = self.app.active_config.get('deployment_status', 'never_deployed')
+        last_deployed_network = self.app.active_config.get('last_deployed_network')
+
+        if deployment_status == 'deployed' and last_deployed_network and last_deployed_network != env:
+            self.app.print_colored(f"\n🚨 NETWORK CHANGE DETECTED!", 'red', bold=True)
+            self.app.print_colored(f"   This configuration was previously deployed on: {last_deployed_network}", 'yellow')
+            self.app.print_colored(f"   You are now deploying to: {env}", 'cyan')
+            self.app.print_colored(f"\n⚠️  Important Information:", 'yellow', bold=True)
+            self.app.print_colored(f"   • The Edge Node will run on the NEW network: {env}", 'white')
+            self.app.print_colored(f"   • Selected node addresses will be used:", 'white')
+            for name in selected_host_names:
+                config = all_hosts[name]
+                ip = config.get('ansible_host', 'Unknown')
+                self.app.print_colored(f"     - {name}: {ip}", 'white')
+            self.app.print_colored(f"   • Node configuration and credentials remain the same", 'white')
+            self.app.print_colored(f"   • Only the blockchain network environment changes", 'white')
+
+            if self.app.get_input(f"\n❓ Are you sure you want to deploy to {env} (different from previous {last_deployed_network})? (y/n)", "n").lower() != 'y':
+                self.app.print_colored("Deployment cancelled due to network change.", 'yellow')
+                return
+
+        if self.app.get_input(f"\n🚀 Continue with deployment to {len(selected_hosts)} selected node(s) on {env}? (y/n)", "y").lower() != 'y':
+            self.app.print_colored("Deployment cancelled.", 'yellow')
+            return
+
+        playbook_path = self.app.config_dir / f'playbooks/{playbook}'
+        if not playbook_path.exists():
+            self.app.print_colored(f"Playbook not found: {playbook_path}", 'red')
+            input("Press Enter to continue...")
+            return
+
+        # Create host limit for selected hosts
+        host_limit = ','.join(selected_host_names)
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.app.config_file} --limit {host_limit} {playbook_path}")
+
+        if extra_vars:
+            cmd += f' --extra-vars "{extra_vars}"'
+
+        # Update selected node statuses to deploying
+        for host_name in selected_host_names:
+            self.app._update_node_status(host_name, 'deploying')
+
+        self.app.print_colored(f"\nStarting {title.lower()} on selected nodes...", 'cyan')
+        success, _ = self.app.run_command(cmd, show_output=True)
+
+        if success:
+            self.app.print_colored(f"\n{title} completed successfully!", 'green')
+            # Update deployment metadata after successful deployment
+            deployment_type = "full" if "NVIDIA" in description else "docker_only"
+            self._update_deployment_metadata(deployment_type)
+
+            # Update selected node statuses to running after successful deployment
+            for host_name in selected_host_names:
+                self.app._update_node_status(host_name, 'running')
+
+            # Show updated statuses
+            self.app.print_colored(f"\n📊 Node Deployment Status:", 'cyan', bold=True)
+            for host_name in selected_host_names:
+                self.app.print_colored(f"   • {host_name}: ", 'white', end='')
+                self.app._display_node_status(host_name, compact=True)
+                print()  # New line after each status
+
+            # Display copy-friendly node addresses after successful deployment
+            self.app._display_copy_friendly_addresses(selected_host_names)
+        else:
+            self.app.print_colored(f"\n{title} encountered issues. Please check the output above.", 'red')
+            # Update selected node statuses to error after failed deployment
+            for host_name in selected_host_names:
+                self.app._update_node_status(host_name, 'error')
+            self.app.print_colored(f"\n📊 Selected node statuses updated to Error due to deployment failure.", 'yellow')
+
+        input("Press Enter to continue...")
+
+    def _update_deployment_metadata(self, deployment_type: str) -> None:
+        """Update deployment metadata after successful deployment"""
+        self.app.print_debug(f"Updating deployment metadata with type: {deployment_type}")
+        self.app.print_debug(f"Active config: {self.app.active_config}")
+
+        if not self.app.active_config.get('config_name'):
+            self.app.print_debug("No config_name in active_config, cannot update deployment metadata")
+            self.app.print_colored("Warning: No configuration name found, cannot update deployment tracking", 'yellow')
+            return
+
+        config_name = self.app.active_config['config_name']
+        metadata_path = self.app.configs_dir / f"{config_name}.json"
+        self.app.print_debug(f"Looking for metadata file: {metadata_path}")
+
+        if not metadata_path.exists():
+            self.app.print_debug(f"Metadata file does not exist: {metadata_path}")
+            self.app.print_colored(f"Warning: Metadata file not found: {metadata_path}", 'yellow')
+            return
+
+        try:
+            # Load existing metadata
+            with open(metadata_path) as f:
+                metadata = json.load(f)
+
+            self.app.print_debug(f"Loaded existing metadata: {metadata}")
+
+            # Update deployment info
+            current_network = self.app.get_mnl_app_env()
+            metadata['last_deployed_date'] = datetime.now().isoformat()
+            metadata['last_deployed_network'] = current_network
+            metadata['deployment_status'] = 'deployed'
+            metadata['last_deployment_type'] = deployment_type
+
+            self.app.print_debug(f"Updated metadata: {metadata}")
+
+            # Save updated metadata
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+            # Update active config
+            self.app.active_config.update(metadata)
+            self.app._save_active_config()
+
+            self.app.print_colored(f"✅ Deployment tracking updated for configuration: {config_name}", 'green')
+            self.app.print_debug(f"Successfully updated deployment metadata for {config_name}")
+        except Exception as e:
+            self.app.print_colored(f"Warning: Could not update deployment metadata: {e}", 'yellow')
+            self.app.print_debug(f"Error updating deployment metadata: {e}")
+
+    def _update_deletion_metadata(self) -> None:
+        """Update deployment metadata after successful deletion"""
+        if not self.app.active_config.get('config_name'):
+            return
+
+        config_name = self.app.active_config['config_name']
+        metadata_path = self.app.configs_dir / f"{config_name}.json"
+
+        if not metadata_path.exists():
+            return
+
+        try:
+            # Load existing metadata
+            with open(metadata_path) as f:
+                metadata = json.load(f)
+
+            # Update deletion info
+            metadata['last_deleted_date'] = datetime.now().isoformat()
+            metadata['deployment_status'] = 'deleted'
+            # Keep the last deployment info for reference but mark as deleted
+
+            # Save updated metadata
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+            # Update active config
+            self.app.active_config.update(metadata)
+            self.app._save_active_config()
+
+            self.app.print_colored(f"✅ Deletion tracking updated for configuration: {config_name}", 'green')
+        except Exception as e:
+            self.app.print_colored(f"Warning: Could not update deletion metadata: {e}", 'yellow')
+
+    def deployment_status(self) -> None:
+        """Show deployment status for all nodes"""
+        if not self.app.check_hosts_config():
+            self.app.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            input("Press Enter to continue...")
+            return
+
+        # Reload active config to ensure deployment status is current
+        self.app._load_active_config()
+
+        self.app.print_header("Deployment Status")
+
+        # Load configuration
+        self.app.load_configuration()
+        hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+
+        if not hosts:
+            self.app.print_colored("No nodes configured.", 'yellow')
+            input("Press Enter to continue...")
+            return
+
+        # Show deployment status overview
+        deployment_status = self.app.active_config.get('deployment_status', 'never_deployed')
+        last_deployed_date = self.app.active_config.get('last_deployed_date')
+        last_deployed_network = self.app.active_config.get('last_deployed_network')
+        last_deployment_type = self.app.active_config.get('last_deployment_type')
+        last_deleted_date = self.app.active_config.get('last_deleted_date')
+
+        # Overall deployment status
+        self.app.print_section("Overall Deployment Status")
+
+        if deployment_status == 'deployed' and last_deployed_date:
+            try:
+                deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
+                deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
+                self.app.print_colored(f"🚀 Status: Deployed on {deployed_str}", 'green')
+                if last_deployed_network:
+                    self.app.print_colored(f"🌐 Network: {last_deployed_network}", 'cyan')
+                if last_deployment_type:
+                    self.app.print_colored(f"🔧 Type: {last_deployment_type}", 'cyan')
+            except:
+                self.app.print_colored("🚀 Status: Deployed", 'green')
+        elif deployment_status == 'deleted' and last_deleted_date:
+            try:
+                deleted_dt = datetime.fromisoformat(last_deleted_date.replace('Z', '+00:00'))
+                deleted_str = deleted_dt.strftime('%Y-%m-%d %H:%M')
+                self.app.print_colored(f"🗑️ Status: Deleted on {deleted_str}", 'red')
+            except:
+                self.app.print_colored("🗑️ Status: Deleted", 'red')
+        else:
+            self.app.print_colored("📋 Status: Never deployed", 'yellow')
+
+        # Individual node status - check in real-time
+        self.app.print_section(f"Node Status Overview ({len(hosts)} nodes)")
+        self.app.print_colored("🔍 Checking current status (max 30s timeout)...", 'cyan')
+
+        # Get real-time status for each node
+        real_time_status = self.app._get_real_time_node_status()
+
+        print()  # Add a blank line after the checking message
+
+        for host_name in hosts.keys():
+            if host_name in real_time_status:
+                status = real_time_status[host_name]['status']
+                result = real_time_status[host_name]['result']
+                emoji, color, description = self.app._get_status_display_info(status)
+
+                self.app.print_colored(f"  • {host_name}: {emoji} {description}", color, end='')
+                self.app.print_colored(f" (Current status)", 'white')
+            else:
+                self.app.print_colored(f"  • {host_name}: ❓ Unable to check", 'yellow', end='')
+                self.app.print_colored(f" (Current status)", 'white')
+
+        input("\nPress Enter to continue...")
+
+
+
 class R1Setup:
     def __init__(self):
         self.colors = {
@@ -2705,6 +3137,7 @@ class R1Setup:
         self.version_manager = VersionManager(self)
         self.config_manager = ConfigurationManager(self)
         self.status_tracker = NodeStatusTracker(self)
+        self.deployment_service = DeploymentService(self)
 
         # Load or initialize active configuration
         self.config_manager._load_active_config()
@@ -3074,6 +3507,20 @@ class R1Setup:
 
     def _determine_updated_status(self, current_status, actual_status):
         return self.status_tracker._determine_updated_status(current_status, actual_status)
+
+    # -- DeploymentService delegation stubs --
+    def deploy_full(self):
+        return self.deployment_service.deploy_full()
+
+    def deploy_docker_only(self):
+        return self.deployment_service.deploy_docker_only()
+
+    def delete_edge_node(self):
+        return self.deployment_service.delete_edge_node()
+
+    def deployment_status(self):
+        return self.deployment_service.deployment_status()
+
 
 
     def show_main_menu(self) -> None:
@@ -4042,254 +4489,6 @@ class R1Setup:
 
         input("\nPress Enter to continue...")
 
-    def deploy_full(self) -> None:
-        """Deploy full setup (Docker + NVIDIA + GPU)"""
-        self._deploy_setup("site.yml", "Full Deployment", "Docker + NVIDIA drivers + GPU setup")
-
-    def deploy_docker_only(self) -> None:
-        """Deploy Docker only"""
-        self._deploy_setup("site.yml", "Docker-Only Deployment", "Docker without GPU setup", extra_vars="skip_gpu=true")
-
-    def delete_edge_node(self) -> None:
-        """Delete deployed Edge Node with host selection"""
-        if not self.check_hosts_config():
-            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
-            return
-
-        self.print_header("Delete Edge Node Deployment")
-
-        # Load configuration to show target hosts
-        self.load_configuration()
-        all_hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
-        env = self.get_mnl_app_env()
-
-        # Interactive host selection for deletion
-        selected_host_names = self.select_hosts(all_hosts, "Edge Node deletion", preselect_mode='all')
-        
-        if not selected_host_names:
-            self.print_colored("Deletion cancelled - no hosts selected.", 'yellow')
-            input("Press Enter to continue...")
-            return
-
-        # Filter hosts to only include selected ones
-        selected_hosts = {name: config for name, config in all_hosts.items() if name in selected_host_names}
-
-        # Show deletion details
-        self.print_colored(f"🗑️  Deletion Details:", 'cyan', bold=True)
-        self.print_colored(f"   • Network: {env if env else 'Not set'}", 'white')
-        self.print_colored(f"   • Selected Nodes: {len(selected_hosts)}/{len(all_hosts)}", 'white')
-
-        self.print_colored(f"\n🖥️  Edge Nodes will be deleted from these selected machines:", 'cyan', bold=True)
-        for name in selected_host_names:
-            config = all_hosts[name]
-            ip = config.get('ansible_host', 'Unknown')
-            user = config.get('ansible_user', 'Unknown')
-            # Show current status
-            status_info = self._get_node_status_info(name)
-            status_emoji, _, status_desc = self._get_status_display_info(status_info['status'])
-            self.print_colored(f"   • {name}: {user}@{ip} [{status_emoji} {status_desc}]", 'white')
-
-        self.print_colored("\n⚠️  WARNING: This will completely remove the Edge Node deployment including:", 'red', bold=True)
-        self.print_colored("   • Systemd service and Docker containers", 'yellow')
-        self.print_colored("   • Docker images and application data", 'yellow')
-        self.print_colored("   • Created command scripts", 'yellow')
-        self.print_colored("   • Docker daemon configuration", 'yellow')
-
-        if self.get_input(f"\n⚠️  Are you sure you want to delete Edge Node deployment from {len(selected_hosts)} selected machine(s) (y/n)", "n").lower() != 'y':
-            self.print_colored("Deletion cancelled.", 'yellow')
-            return
-
-        # Final confirmation
-        if self.get_input(f"⚠️  Type 'DELETE' to confirm deletion from {len(selected_hosts)} selected node(s)", "").upper() != 'DELETE':
-            self.print_colored("Deletion cancelled - confirmation not received.", 'yellow')
-            return
-
-        playbook_path = self.config_dir / 'playbooks/delete_edge_node.yml'
-        if not playbook_path.exists():
-            self.print_colored(f"Delete Edge Node playbook not found: {playbook_path}", 'red')
-            input("Press Enter to continue...")
-            return
-
-        # Create host limit for selected hosts
-        host_limit = ','.join(selected_host_names)
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} --limit {host_limit} {playbook_path}")
-
-        # Update selected node statuses to deploying (deletion is a deployment operation)
-        for host_name in selected_host_names:
-            self._update_node_status(host_name, 'deploying')
-
-        self.print_colored("\nStarting Edge Node deletion on selected nodes...", 'cyan')
-        success, _ = self.run_command(cmd, show_output=True)
-
-        if success:
-            self.print_colored("\nEdge Node deleted successfully!", 'green')
-            # Update deployment metadata after successful deletion
-            self._update_deletion_metadata()
-            
-            # Update selected node statuses to deleted after successful deletion
-            for host_name in selected_host_names:
-                self._update_node_status(host_name, 'deleted')
-            
-            # Show updated statuses
-            self.print_colored(f"\n📊 Node Deletion Status:", 'cyan', bold=True)
-            for host_name in selected_host_names:
-                self.print_colored(f"   • {host_name}: ", 'white', end='')
-                self._display_node_status(host_name, compact=True)
-                print()  # New line after each status
-            
-            self.print_colored(f"\n💡 Note: Deleted nodes will maintain their 'deleted' status.", 'cyan')
-            self.print_colored("   This status will not change automatically to preserve the deletion history.", 'white')
-        else:
-            self.print_colored("\nEdge Node deletion encountered issues. Please check the output above.", 'red')
-            # Update selected node statuses to error after failed deletion
-            for host_name in selected_host_names:
-                self._update_node_status(host_name, 'error')
-            self.print_colored(f"\n📊 Selected node statuses updated to Error due to deletion failure.", 'yellow')
-
-        input("Press Enter to continue...")
-
-
-
-    def _deploy_setup(self, playbook: str, title: str, description: str, extra_vars: str = "") -> None:
-        """Common deployment logic with host selection"""
-        if not self.check_hosts_config():
-            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
-            return
-
-        self.print_header(title)
-
-        # Load configuration to show deployment details
-        self.load_configuration()
-        all_hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
-        env = self.get_mnl_app_env()
-
-        if not env:
-            self.print_colored("\n⚠️  WARNING: Network environment is not set!", 'red', bold=True)
-            self.print_colored("   Please set the network environment before deploying.", 'red')
-            input("Press Enter to continue...")
-            return
-
-        # Interactive host selection with preselection of never-deployed nodes
-        selected_host_names = self.select_hosts(all_hosts, title.lower(), preselect_mode='undeployed')
-        
-        if not selected_host_names:
-            self.print_colored("Deployment cancelled - no hosts selected.", 'yellow')
-            input("Press Enter to continue...")
-            return
-
-        # Filter hosts to only include selected ones
-        selected_hosts = {name: config for name, config in all_hosts.items() if name in selected_host_names}
-
-        # Show deployment details
-        self.print_colored(f"📋 Deployment Details:", 'cyan', bold=True)
-        self.print_colored(f"   • Action: {description}", 'white')
-        self.print_colored(f"   • Network: {env}", 'green')
-        self.print_colored(f"   • Selected Nodes: {len(selected_hosts)}/{len(all_hosts)}", 'white')
-
-        self.print_colored(f"\n🖥️  Selected Target Machines:", 'cyan', bold=True)
-        for name in selected_host_names:
-            config = all_hosts[name]
-            ip = config.get('ansible_host', 'Unknown')
-            user = config.get('ansible_user', 'Unknown')
-            # Show status
-            status_info = self._get_node_status_info(name)
-            status_emoji, _, status_desc = self._get_status_display_info(status_info['status'])
-            self.print_colored(f"   • {name}: {user}@{ip} [{status_emoji} {status_desc}]", 'white')
-
-        self.print_colored(f"\n⚠️  This will:", 'yellow', bold=True)
-        if "Docker + NVIDIA" in description:
-            self.print_colored("   • Install Docker and Docker Compose", 'yellow')
-            self.print_colored("   • Install NVIDIA drivers and CUDA toolkit", 'yellow')
-            self.print_colored("   • Configure GPU access for containers", 'yellow')
-            self.print_colored("   • Deploy and start the Edge Node", 'yellow')
-        elif "Docker only" in description:
-            self.print_colored("   • Install Docker and Docker Compose", 'yellow')
-            self.print_colored("   • Deploy and start the Edge Node (CPU mode)", 'yellow')
-        else:
-            self.print_colored(f"   • {description}", 'yellow')
-
-        # Check for network change warning for selected hosts
-        deployment_status = self.active_config.get('deployment_status', 'never_deployed')
-        last_deployed_network = self.active_config.get('last_deployed_network')
-
-        if deployment_status == 'deployed' and last_deployed_network and last_deployed_network != env:
-            self.print_colored(f"\n🚨 NETWORK CHANGE DETECTED!", 'red', bold=True)
-            self.print_colored(f"   This configuration was previously deployed on: {last_deployed_network}", 'yellow')
-            self.print_colored(f"   You are now deploying to: {env}", 'cyan')
-            self.print_colored(f"\n⚠️  Important Information:", 'yellow', bold=True)
-            self.print_colored(f"   • The Edge Node will run on the NEW network: {env}", 'white')
-            self.print_colored(f"   • Selected node addresses will be used:", 'white')
-            for name in selected_host_names:
-                config = all_hosts[name]
-                ip = config.get('ansible_host', 'Unknown')
-                self.print_colored(f"     - {name}: {ip}", 'white')
-            self.print_colored(f"   • Node configuration and credentials remain the same", 'white')
-            self.print_colored(f"   • Only the blockchain network environment changes", 'white')
-
-            if self.get_input(f"\n❓ Are you sure you want to deploy to {env} (different from previous {last_deployed_network})? (y/n)", "n").lower() != 'y':
-                self.print_colored("Deployment cancelled due to network change.", 'yellow')
-                return
-
-        if self.get_input(f"\n🚀 Continue with deployment to {len(selected_hosts)} selected node(s) on {env}? (y/n)", "y").lower() != 'y':
-            self.print_colored("Deployment cancelled.", 'yellow')
-            return
-
-        playbook_path = self.config_dir / f'playbooks/{playbook}'
-        if not playbook_path.exists():
-            self.print_colored(f"Playbook not found: {playbook_path}", 'red')
-            input("Press Enter to continue...")
-            return
-
-        # Create host limit for selected hosts
-        host_limit = ','.join(selected_host_names)
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} --limit {host_limit} {playbook_path}")
-
-        if extra_vars:
-            cmd += f' --extra-vars "{extra_vars}"'
-
-        # Update selected node statuses to deploying
-        for host_name in selected_host_names:
-            self._update_node_status(host_name, 'deploying')
-
-        self.print_colored(f"\nStarting {title.lower()} on selected nodes...", 'cyan')
-        success, _ = self.run_command(cmd, show_output=True)
-
-        if success:
-            self.print_colored(f"\n{title} completed successfully!", 'green')
-            # Update deployment metadata after successful deployment
-            deployment_type = "full" if "NVIDIA" in description else "docker_only"
-            self._update_deployment_metadata(deployment_type)
-            
-            # Update selected node statuses to running after successful deployment
-            for host_name in selected_host_names:
-                self._update_node_status(host_name, 'running')
-            
-            # Show updated statuses
-            self.print_colored(f"\n📊 Node Deployment Status:", 'cyan', bold=True)
-            for host_name in selected_host_names:
-                self.print_colored(f"   • {host_name}: ", 'white', end='')
-                self._display_node_status(host_name, compact=True)
-                print()  # New line after each status
-            
-            # Display copy-friendly node addresses after successful deployment
-            self._display_copy_friendly_addresses(selected_host_names)
-        else:
-            self.print_colored(f"\n{title} encountered issues. Please check the output above.", 'red')
-            # Update selected node statuses to error after failed deployment
-            for host_name in selected_host_names:
-                self._update_node_status(host_name, 'error')
-            self.print_colored(f"\n📊 Selected node statuses updated to Error due to deployment failure.", 'yellow')
-
-        input("Press Enter to continue...")
-
     def _display_copy_friendly_addresses(self, host_names: List[str]) -> None:
         """Display copy-friendly node addresses after successful deployment"""
         self.print_colored(f"\n🎉 Deployment Complete! Getting node addresses...", 'green', bold=True)
@@ -4997,89 +5196,6 @@ class R1Setup:
         self._manage_service("service_restart.yml", "Restart Edge Node", "🔄 Restarting Edge Node")
 
 
-    def _update_deployment_metadata(self, deployment_type: str) -> None:
-        """Update deployment metadata after successful deployment"""
-        self.print_debug(f"Updating deployment metadata with type: {deployment_type}")
-        self.print_debug(f"Active config: {self.active_config}")
-        
-        if not self.active_config.get('config_name'):
-            self.print_debug("No config_name in active_config, cannot update deployment metadata")
-            self.print_colored("Warning: No configuration name found, cannot update deployment tracking", 'yellow')
-            return
-
-        config_name = self.active_config['config_name']
-        metadata_path = self.configs_dir / f"{config_name}.json"
-        self.print_debug(f"Looking for metadata file: {metadata_path}")
-
-        if not metadata_path.exists():
-            self.print_debug(f"Metadata file does not exist: {metadata_path}")
-            self.print_colored(f"Warning: Metadata file not found: {metadata_path}", 'yellow')
-            return
-
-        try:
-            # Load existing metadata
-            with open(metadata_path) as f:
-                metadata = json.load(f)
-
-            self.print_debug(f"Loaded existing metadata: {metadata}")
-
-            # Update deployment info
-            current_network = self.get_mnl_app_env()
-            metadata['last_deployed_date'] = datetime.now().isoformat()
-            metadata['last_deployed_network'] = current_network
-            metadata['deployment_status'] = 'deployed'
-            metadata['last_deployment_type'] = deployment_type
-
-            self.print_debug(f"Updated metadata: {metadata}")
-
-            # Save updated metadata
-            with open(metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
-
-            # Update active config
-            self.active_config.update(metadata)
-            self._save_active_config()
-
-            self.print_colored(f"✅ Deployment tracking updated for configuration: {config_name}", 'green')
-            self.print_debug(f"Successfully updated deployment metadata for {config_name}")
-        except Exception as e:
-            self.print_colored(f"Warning: Could not update deployment metadata: {e}", 'yellow')
-            self.print_debug(f"Error updating deployment metadata: {e}")
-
-    def _update_deletion_metadata(self) -> None:
-        """Update deployment metadata after successful deletion"""
-        if not self.active_config.get('config_name'):
-            return
-
-        config_name = self.active_config['config_name']
-        metadata_path = self.configs_dir / f"{config_name}.json"
-
-        if not metadata_path.exists():
-            return
-
-        try:
-            # Load existing metadata
-            with open(metadata_path) as f:
-                metadata = json.load(f)
-
-            # Update deletion info
-            metadata['last_deleted_date'] = datetime.now().isoformat()
-            metadata['deployment_status'] = 'deleted'
-            # Keep the last deployment info for reference but mark as deleted
-
-            # Save updated metadata
-            with open(metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
-
-            # Update active config
-            self.active_config.update(metadata)
-            self._save_active_config()
-
-            self.print_colored(f"✅ Deletion tracking updated for configuration: {config_name}", 'green')
-        except Exception as e:
-            self.print_colored(f"Warning: Could not update deletion metadata: {e}", 'yellow')
-
-    # -- VersionManager delegation stubs --
     def _auto_update_check(self):
         return self.version_manager._auto_update_check()
 
@@ -5339,81 +5455,6 @@ class R1Setup:
     def switch_environment(self) -> None:
         """Switch network environment (wrapper for change_network_environment)"""
         self.change_network_environment()
-
-    def deployment_status(self) -> None:
-        """Show deployment status for all nodes"""
-        if not self.check_hosts_config():
-            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
-            return
-
-        # Reload active config to ensure deployment status is current
-        self._load_active_config()
-        
-        self.print_header("Deployment Status")
-        
-        # Load configuration
-        self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
-        
-        if not hosts:
-            self.print_colored("No nodes configured.", 'yellow')
-            input("Press Enter to continue...")
-            return
-        
-        # Show deployment status overview
-        deployment_status = self.active_config.get('deployment_status', 'never_deployed')
-        last_deployed_date = self.active_config.get('last_deployed_date')
-        last_deployed_network = self.active_config.get('last_deployed_network')
-        last_deployment_type = self.active_config.get('last_deployment_type')
-        last_deleted_date = self.active_config.get('last_deleted_date')
-        
-        # Overall deployment status
-        self.print_section("Overall Deployment Status")
-        
-        if deployment_status == 'deployed' and last_deployed_date:
-            try:
-                deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
-                deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
-                self.print_colored(f"🚀 Status: Deployed on {deployed_str}", 'green')
-                if last_deployed_network:
-                    self.print_colored(f"🌐 Network: {last_deployed_network}", 'cyan')
-                if last_deployment_type:
-                    self.print_colored(f"🔧 Type: {last_deployment_type}", 'cyan')
-            except:
-                self.print_colored("🚀 Status: Deployed", 'green')
-        elif deployment_status == 'deleted' and last_deleted_date:
-            try:
-                deleted_dt = datetime.fromisoformat(last_deleted_date.replace('Z', '+00:00'))
-                deleted_str = deleted_dt.strftime('%Y-%m-%d %H:%M')
-                self.print_colored(f"🗑️ Status: Deleted on {deleted_str}", 'red')
-            except:
-                self.print_colored("🗑️ Status: Deleted", 'red')
-        else:
-            self.print_colored("📋 Status: Never deployed", 'yellow')
-        
-        # Individual node status - check in real-time
-        self.print_section(f"Node Status Overview ({len(hosts)} nodes)")
-        self.print_colored("🔍 Checking current status (max 30s timeout)...", 'cyan')
-        
-        # Get real-time status for each node
-        real_time_status = self._get_real_time_node_status()
-        
-        print()  # Add a blank line after the checking message
-        
-        for host_name in hosts.keys():
-            if host_name in real_time_status:
-                status = real_time_status[host_name]['status']
-                result = real_time_status[host_name]['result']
-                emoji, color, description = self._get_status_display_info(status)
-                
-                self.print_colored(f"  • {host_name}: {emoji} {description}", color, end='')
-                self.print_colored(f" (Current status)", 'white')
-            else:
-                self.print_colored(f"  • {host_name}: ❓ Unable to check", 'yellow', end='')
-                self.print_colored(f" (Current status)", 'white')
-        
-        input("\nPress Enter to continue...")
 
     def get_logs(self) -> None:
         """Stream logs from selected nodes"""
