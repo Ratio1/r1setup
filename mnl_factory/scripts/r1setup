@@ -71,6 +71,29 @@ UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/
 DOWNLOAD_BASE_URL = "https://github.com/Ratio1/multi_node_launcher/releases/download"
 
 
+def _get_gpu_hosts(inventory: dict) -> dict:
+    """Extract gpu_nodes hosts from an inventory dict."""
+    return inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+
+
+def _parse_iso_to_datetime(value) -> Optional[datetime]:
+    """Parse ISO datetime string to datetime object. Returns None on failure."""
+    if not value:
+        return None
+    try:
+        if isinstance(value, str):
+            return datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return datetime.fromtimestamp(value)
+    except (ValueError, TypeError, OSError):
+        return None
+
+
+def _parse_iso_datetime(value, fmt: str = '%Y-%m-%d %H:%M') -> Optional[str]:
+    """Parse ISO datetime string, return formatted string or None."""
+    dt = _parse_iso_to_datetime(value)
+    return dt.strftime(fmt) if dt else None
+
+
 class VersionManager:
     """Handles CLI and Ansible collection version checking and updates.
 
@@ -616,7 +639,7 @@ sys.path.insert(0, '{self.app.ansible_config_root / "collections"}')
 try:
     from ansible_collections.ratio1.multi_node_launcher import __version__
     print(__version__)
-except:
+except Exception:
     try:
         import os
         galaxy_path = '{self.app.ansible_config_root / "collections" / "ansible_collections" / "ratio1" / "multi_node_launcher" / "galaxy.yml"}'
@@ -625,7 +648,7 @@ except:
             with open(galaxy_path) as f:
                 data = yaml.safe_load(f)
                 print(data.get('version', ''))
-    except:
+    except Exception:
         pass
 """
                 result = subprocess.run([sys.executable, '-c', python_check],
@@ -856,7 +879,7 @@ except:
 
         if updates_performed:
             self.app.print_colored("\n\u2705 Auto-update completed successfully!", 'green')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
 
 
 class SettingsManager:
@@ -869,6 +892,7 @@ class SettingsManager:
     DEFAULT_SETTINGS = {
         'show_node_status': False,
         'status_refresh_cooldown': 60,  # seconds
+        'connection_timeout': 30,  # seconds (30-600); base timeout for node-facing operations
     }
 
     def __init__(self, app):
@@ -923,6 +947,21 @@ class SettingsManager:
         import time
         self._last_status_refresh = time.time()
 
+    @property
+    def connection_timeout(self) -> int:
+        """Base timeout (seconds) for node-facing operations. Clamped to [30, 600]."""
+        val = self.get('connection_timeout')
+        try:
+            val = int(val)
+        except (TypeError, ValueError):
+            val = self.DEFAULT_SETTINGS['connection_timeout']
+        return max(30, min(600, val))
+
+    @property
+    def ssh_connect_timeout(self) -> int:
+        """SSH ConnectTimeout derived from connection_timeout. Floor of 10s."""
+        return max(10, self.connection_timeout // 3)
+
     def settings_menu(self):
         """Interactive toggle UI for user preferences."""
         while True:
@@ -940,6 +979,14 @@ class SettingsManager:
                 'white'
             )
             print()
+            self.app.print_colored(
+                f"  2) Connection Timeout: [{self.connection_timeout}s]", 'white'
+            )
+            self.app.print_colored(
+                f"     Base timeout for SSH/playbook operations on remote nodes (30-600s)",
+                'white'
+            )
+            print()
             self.app.print_colored("  0) Back", 'white')
             print()
 
@@ -952,10 +999,25 @@ class SettingsManager:
                 self.set('show_node_status', new_value)
                 state = "ON" if new_value else "OFF"
                 self.app.print_colored(f"Live node status display: {state}", 'green')
-                input("Press Enter to continue...")
+                self.app.wait_for_enter()
+            elif choice == '2':
+                val = self.app.get_input(
+                    f"Enter connection timeout in seconds (30-600, current: {self.connection_timeout}s)",
+                    str(self.connection_timeout)
+                )
+                try:
+                    val = int(val)
+                    if 30 <= val <= 600:
+                        self.set('connection_timeout', val)
+                        self.app.print_colored(f"Connection timeout set to {val}s (SSH connect timeout: {self.ssh_connect_timeout}s)", 'green')
+                    else:
+                        self.app.print_colored("Invalid value. Must be between 30 and 600 seconds.", 'red')
+                except ValueError:
+                    self.app.print_colored("Invalid input. Please enter a number.", 'red')
+                self.app.wait_for_enter()
             else:
-                self.app.print_colored("Invalid option. Valid choices are 0-1.", 'red')
-                input("Press Enter to continue...")
+                self.app.print_colored("Invalid option. Valid choices are 0-2.", 'red')
+                self.app.wait_for_enter()
 
 
 class ConfigurationManager:
@@ -1073,7 +1135,7 @@ class ConfigurationManager:
                     continue
 
                 # Extract metadata from config
-                hosts = config_data.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+                hosts = _get_gpu_hosts(config_data)
                 metadata_file = config_file.with_suffix('.json')
 
                 metadata = {
@@ -1229,7 +1291,7 @@ class ConfigurationManager:
                 self.app.print_debug(f"Network environment synchronized to: {env}")
 
             # Initialize status fields for existing nodes that don't have them
-            hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+            hosts = _get_gpu_hosts(self.app.inventory)
             updated = False
             self.app.print_debug(f"Checking status field initialization for {len(hosts)} nodes")
 
@@ -1304,7 +1366,7 @@ class ConfigurationManager:
         """Save configuration to file (legacy method - now uses new config management)"""
         # Get current environment and node count
         env = self.get_mnl_app_env() or 'mainnet'
-        hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.app.inventory)
         nodes_count = len(hosts)
 
         # Generate config name if not set
@@ -1348,14 +1410,7 @@ class ConfigurationManager:
                                     break
 
                     # Format creation date
-                    try:
-                        if isinstance(created, str):
-                            created_dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
-                            created_str = created_dt.strftime('%Y-%m-%d %H:%M')
-                        else:
-                            created_str = datetime.fromtimestamp(created).strftime('%Y-%m-%d %H:%M')
-                    except:
-                        created_str = "Unknown"
+                    created_str = _parse_iso_datetime(created) or "Unknown"
 
                     # Mark active configuration
                     active_marker = " ← ACTIVE" if display_name == active_config_name else ""
@@ -1373,9 +1428,8 @@ class ConfigurationManager:
                     last_deleted_date = metadata.get('last_deleted_date')
 
                     if deployment_status == 'deployed' and last_deployed_date:
-                        try:
-                            deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
-                            deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
+                        deployed_str = _parse_iso_datetime(last_deployed_date)
+                        if deployed_str:
                             deployment_info = f"🚀 Last deployed: {deployed_str}"
                             if last_deployed_network:
                                 deployment_info += f" ({last_deployed_network}"
@@ -1383,14 +1437,13 @@ class ConfigurationManager:
                                 deployment_info += f", {last_deployment_type})"
                             elif last_deployed_network:
                                 deployment_info += ")"
-                        except:
+                        else:
                             deployment_info = "🚀 Deployed"
                     elif deployment_status == 'deleted' and last_deleted_date:
-                        try:
-                            deleted_dt = datetime.fromisoformat(last_deleted_date.replace('Z', '+00:00'))
-                            deleted_str = deleted_dt.strftime('%Y-%m-%d %H:%M')
+                        deleted_str = _parse_iso_datetime(last_deleted_date)
+                        if deleted_str:
                             deployment_info = f"🗑️ Last deleted: {deleted_str}"
-                        except:
+                        else:
                             deployment_info = "🗑️ Deleted"
                     else:
                         deployment_info = "📋 Never deployed"
@@ -1441,14 +1494,14 @@ class ConfigurationManager:
                     self._export_configuration(configs)
                 else:
                     self.app.print_colored("No configurations available to export.", 'yellow')
-                    input("Press Enter to continue...")
+                    self.app.wait_for_enter()
             elif choice == '8':
                 self._quick_export_current()
             elif choice == '9':
                 self._import_configuration()
             else:
                 self.app.print_colored("Invalid option. Valid choices are 0-9.", 'red')
-                input("Press Enter to continue...")
+                self.app.wait_for_enter()
 
     def _create_new_configuration_with_management(self) -> None:
         """Create a new configuration with proper management"""
@@ -1521,10 +1574,10 @@ class ConfigurationManager:
         self.app.print_colored("\n\U0001f4a1 Your nodes are configured and ready for deployment!", 'cyan')
         deploy_choice = self.app.get_input("Would you like to deploy now? (y/n)", "y")
         if deploy_choice.lower() == 'y':
-            input("Press Enter to continue to deployment...")
+            self.app.wait_for_enter("Press Enter to continue to deployment...")
             self.app.deployment_menu()
             return
-        input("Press Enter to continue...")
+        self.app.wait_for_enter()
 
     def _switch_configuration(self, configs: List[Tuple[str, Dict]]) -> None:
         """Switch to a different configuration"""
@@ -1551,7 +1604,7 @@ class ConfigurationManager:
         else:
             self.app.print_colored("Failed to switch configuration", 'red')
 
-        input("Press Enter to continue...")
+        self.app.wait_for_enter()
 
     def _delete_configuration(self, configs: List[Tuple[str, Dict]]) -> None:
         """Delete a configuration"""
@@ -1607,7 +1660,7 @@ class ConfigurationManager:
             except Exception as e:
                 self.app.print_colored(f"Error deleting configuration: {e}", 'red')
 
-        input("Press Enter to continue...")
+        self.app.wait_for_enter()
 
     def _rename_configuration(self, configs: List[Tuple[str, Dict]]) -> None:
         """Rename a configuration"""
@@ -1634,7 +1687,7 @@ class ConfigurationManager:
         # Validate new name
         if not re.match(r'^[a-zA-Z0-9_-]+$', new_name):
             self.app.print_colored("Invalid name. Use only letters, numbers, underscore, and hyphen.", 'red')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         # Generate new config name with timestamp and metadata (like the original creation)
@@ -1657,7 +1710,7 @@ class ConfigurationManager:
         # Check if new name already exists
         if (self.app.configs_dir / f"{new_config_name}.yml").exists():
             self.app.print_colored("A configuration with this name already exists!", 'red')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         try:
@@ -1689,7 +1742,7 @@ class ConfigurationManager:
         except Exception as e:
             self.app.print_colored(f"Error renaming configuration: {e}", 'red')
 
-        input("Press Enter to continue...")
+        self.app.wait_for_enter()
 
     def _backup_configuration(self, configs: List[Tuple[str, Dict]]) -> None:
         """Create a backup of a configuration"""
@@ -1738,7 +1791,7 @@ class ConfigurationManager:
         except Exception as e:
             self.app.print_colored(f"❌ Error creating backup: {e}", 'red')
 
-        input("Press Enter to continue...")
+        self.app.wait_for_enter()
 
     def _restore_configuration(self) -> None:
         """Restore a configuration from backup"""
@@ -1748,14 +1801,14 @@ class ConfigurationManager:
         backup_dir = self.app.configs_dir / 'backups'
         if not backup_dir.exists():
             self.app.print_colored("No backups found. Backup directory doesn't exist.", 'yellow')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         # Get list of backup files
         backup_files = list(backup_dir.glob('*_backup_*.yml'))
         if not backup_files:
             self.app.print_colored("No backup files found.", 'yellow')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         # Parse backup information
@@ -1776,7 +1829,7 @@ class ConfigurationManager:
 
         if not backups:
             self.app.print_colored("No valid backup files found.", 'yellow')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         # Sort backups by timestamp (newest first)
@@ -1808,7 +1861,7 @@ class ConfigurationManager:
         # Validate new name
         if not re.match(r'^[a-zA-Z0-9_-]+$', new_name):
             self.app.print_colored("Invalid name. Use only letters, numbers, underscore, and hyphen.", 'red')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         try:
@@ -1832,7 +1885,7 @@ class ConfigurationManager:
             # Check if restored name already exists
             if (self.app.configs_dir / f"{restored_config_name}.yml").exists():
                 self.app.print_colored("A configuration with this name already exists!", 'red')
-                input("Press Enter to continue...")
+                self.app.wait_for_enter()
                 return
 
             # Copy backup files to main config directory
@@ -1863,7 +1916,7 @@ class ConfigurationManager:
         except Exception as e:
             self.app.print_colored(f"❌ Error restoring configuration: {e}", 'red')
 
-        input("Press Enter to continue...")
+        self.app.wait_for_enter()
 
     def _export_configuration(self, configs: List[Tuple[str, Dict]]) -> None:
         """Export configuration to a portable file for transfer between machines"""
@@ -1871,7 +1924,7 @@ class ConfigurationManager:
 
         if not configs:
             self.app.print_colored("No configurations available to export.", 'yellow')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         # Show available configurations
@@ -1881,11 +1934,7 @@ class ConfigurationManager:
             env = metadata.get('environment', 'unknown')
             nodes = metadata.get('nodes_count', 0)
             created = metadata.get('created_at', 'unknown')
-            if isinstance(created, str) and 'T' in created:
-                try:
-                    created = datetime.fromisoformat(created.replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
-                except:
-                    pass
+            created = _parse_iso_datetime(created) or created
             self.app.print_colored(f"  {i}) {display_name} ({env}, {nodes} nodes, created: {created})")
 
         # Select configuration to export
@@ -1966,7 +2015,7 @@ class ConfigurationManager:
             self.app.print_colored(f"📝 File size: {export_path.stat().st_size} bytes", 'white')
 
             # Show what was exported
-            hosts_count = len(config_data.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {}))
+            hosts_count = len(_get_gpu_hosts(config_data))
             self.app.print_colored(f"🔧 Exported: {hosts_count} nodes, {metadata.get('environment', 'unknown')} environment", 'cyan')
 
             self.app.print_colored("\n💡 To import on another machine:", 'yellow')
@@ -1976,7 +2025,7 @@ class ConfigurationManager:
         except Exception as e:
             self.app.print_colored(f"❌ Error exporting configuration: {e}", 'red')
 
-        input("\nPress Enter to continue...")
+        self.app.wait_for_enter()
 
     def _import_configuration(self) -> None:
         """Import configuration from a portable file"""
@@ -1994,7 +2043,7 @@ class ConfigurationManager:
 
         if not import_path.exists():
             self.app.print_colored(f"❌ File not found: {import_path}", 'red')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         try:
@@ -2005,7 +2054,7 @@ class ConfigurationManager:
             # Validate format
             if not isinstance(import_data, dict) or 'configuration' not in import_data:
                 self.app.print_colored("❌ Invalid configuration file format", 'red')
-                input("Press Enter to continue...")
+                self.app.wait_for_enter()
                 return
 
             config_info = import_data['configuration']
@@ -2016,7 +2065,7 @@ class ConfigurationManager:
 
             # Show import details
             original_name = config_info.get('name', 'unknown')
-            nodes_count = len(inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {}))
+            nodes_count = len(_get_gpu_hosts(inventory))
             environment = metadata.get('environment', 'unknown')
             exported_at = import_data.get('exported_at', 'unknown')
             exported_by = import_data.get('exported_by', 'unknown')
@@ -2029,7 +2078,7 @@ class ConfigurationManager:
             self.app.print_colored(f"   Exported by: {exported_by}")
 
             # Show nodes that will be imported
-            hosts = inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+            hosts = _get_gpu_hosts(inventory)
             if hosts:
                 self.app.print_colored(f"\n🖥️  Nodes to import:", 'yellow', bold=True)
                 for hostname, config in hosts.items():
@@ -2040,7 +2089,7 @@ class ConfigurationManager:
             # Confirm import
             if self.app.get_input(f"\nProceed with import? (y/n)", "y").lower() != 'y':
                 self.app.print_colored("Import cancelled.", 'yellow')
-                input("Press Enter to continue...")
+                self.app.wait_for_enter()
                 return
 
             # Get new configuration name
@@ -2053,7 +2102,7 @@ class ConfigurationManager:
             if (self.app.configs_dir / f"{final_config_name}.yml").exists():
                 if self.app.get_input(f"Configuration '{final_config_name}' already exists. Overwrite? (y/n)", "n").lower() != 'y':
                     self.app.print_colored("Import cancelled.", 'yellow')
-                    input("Press Enter to continue...")
+                    self.app.wait_for_enter()
                     return
 
             # Save imported configuration
@@ -2083,7 +2132,7 @@ class ConfigurationManager:
                     try:
                         with open(self.app.vars_file) as f:
                             current_env_vars = yaml.safe_load(f) or {}
-                    except:
+                    except (yaml.YAMLError, IOError, OSError):
                         pass
 
                 # Merge environment variables (imported ones take precedence)
@@ -2131,13 +2180,13 @@ class ConfigurationManager:
         except Exception as e:
             self.app.print_colored(f"❌ Error importing configuration: {e}", 'red')
 
-        input("\nPress Enter to continue...")
+        self.app.wait_for_enter()
 
     def _quick_export_current(self) -> None:
         """Quick export of current active configuration"""
         if not self.app.check_hosts_config():
             self.app.print_colored("No active configuration to export.", 'yellow')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         # Generate filename based on active config
@@ -2191,14 +2240,14 @@ class ConfigurationManager:
                 json.dump(export_data, f, indent=2, default=str)
 
             self.app.print_colored(f"✅ Current configuration exported to: {filename}", 'green')
-            nodes = len(config_data.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {}))
+            nodes = len(_get_gpu_hosts(config_data))
             env = self.active_config.get('environment', 'unknown')
             self.app.print_colored(f"🔧 Exported: {nodes} nodes, {env} environment", 'cyan')
 
         except Exception as e:
             self.app.print_colored(f"❌ Error exporting configuration: {e}", 'red')
 
-        input("\nPress Enter to continue...")
+        self.app.wait_for_enter()
 
 
 
@@ -2228,7 +2277,7 @@ class NodeStatusTracker:
 
     def _update_node_status(self, node_name: str, status: str) -> None:
         """Update the status of a specific node"""
-        hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.app.inventory)
         if node_name in hosts:
             old_status = hosts[node_name].get('node_status', 'unknown')
 
@@ -2250,7 +2299,7 @@ class NodeStatusTracker:
 
     def _get_node_status_info(self, node_name: str) -> Dict[str, str]:
         """Get status information for a node"""
-        hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.app.inventory)
         if node_name in hosts:
             status = hosts[node_name].get('node_status', 'unknown')
             last_update = hosts[node_name].get('last_status_update', '')
@@ -2308,7 +2357,7 @@ class NodeStatusTracker:
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
                f"ansible-playbook -i {self.app.config_file} {playbook_path}")
 
-        return self.app.run_command(cmd, show_output=False, timeout=30)
+        return self.app.run_command(cmd, show_output=False, timeout=self.app.connection_timeout)
 
     def _parse_status_fields(self, text):
         """Parse service and container status from a text block.
@@ -2479,7 +2528,7 @@ class NodeStatusTracker:
 
         lines = output.split('\n') if output else []
         data = self._parse_ansible_status_lines(lines)
-        hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.app.inventory)
         return self._fill_missing_host_statuses(data, hosts)
 
     def _get_status_display_info(self, status: str) -> Tuple[str, str, str]:
@@ -2513,14 +2562,14 @@ class NodeStatusTracker:
         """Check actual service status and update node statuses accordingly"""
         if not self.app.check_hosts_config():
             self.app.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         self.app.print_header("Check & Update Node Status")
 
         # Load configuration to show current statuses
         self.app.load_configuration()
-        hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.app.inventory)
 
         # Show current statuses
         self.app.print_colored(f"🔍 Current Node Statuses:", 'cyan', bold=True)
@@ -2548,7 +2597,7 @@ class NodeStatusTracker:
         playbook_path = self.app.config_dir / 'playbooks/service_status.yml'
         if not playbook_path.exists():
             self.app.print_colored(f"Service status playbook not found: {playbook_path}", 'red')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
@@ -2558,7 +2607,7 @@ class NodeStatusTracker:
 
         self.app.print_colored("\n🔍 Checking actual service status on all nodes...", 'cyan')
         self.app.print_debug(f"Running ansible command: {cmd}")
-        success, output = self.app.run_command(cmd, show_output=False)
+        success, output = self.app.run_command(cmd, show_output=False, timeout=self.app.connection_timeout)
 
         if success:
             self.app.print_colored("✅ Service status check completed!", 'green')
@@ -2635,7 +2684,7 @@ class NodeStatusTracker:
             if output:
                 print(output[:500] + "..." if len(output) > 500 else output)
 
-        input("\nPress Enter to continue...")
+        self.app.wait_for_enter()
 
     def _parse_service_status_output(self, output: str) -> Dict[str, str]:
         """Parse ansible service status output to determine actual service states"""
@@ -2787,14 +2836,14 @@ class DeploymentService:
         """Delete deployed Edge Node with host selection"""
         if not self.app.check_hosts_config():
             self.app.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         self.app.print_header("Delete Edge Node Deployment")
 
         # Load configuration to show target hosts
         self.app.load_configuration()
-        all_hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        all_hosts = _get_gpu_hosts(self.app.inventory)
         env = self.app.get_mnl_app_env()
 
         # Interactive host selection for deletion
@@ -2802,7 +2851,7 @@ class DeploymentService:
 
         if not selected_host_names:
             self.app.print_colored("Deletion cancelled - no hosts selected.", 'yellow')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         # Filter hosts to only include selected ones
@@ -2841,7 +2890,7 @@ class DeploymentService:
         playbook_path = self.app.config_dir / 'playbooks/delete_edge_node.yml'
         if not playbook_path.exists():
             self.app.print_colored(f"Delete Edge Node playbook not found: {playbook_path}", 'red')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         # Create host limit for selected hosts
@@ -2883,26 +2932,26 @@ class DeploymentService:
                 self.app._update_node_status(host_name, 'error')
             self.app.print_colored(f"\n📊 Selected node statuses updated to Error due to deletion failure.", 'yellow')
 
-        input("Press Enter to continue...")
+        self.app.wait_for_enter()
 
     def _deploy_setup(self, playbook: str, title: str, description: str, extra_vars: str = "") -> None:
         """Common deployment logic with host selection"""
         if not self.app.check_hosts_config():
             self.app.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         self.app.print_header(title)
 
         # Load configuration to show deployment details
         self.app.load_configuration()
-        all_hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        all_hosts = _get_gpu_hosts(self.app.inventory)
         env = self.app.get_mnl_app_env()
 
         if not env:
             self.app.print_colored("\n⚠️  WARNING: Network environment is not set!", 'red', bold=True)
             self.app.print_colored("   Please set the network environment before deploying.", 'red')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         # Interactive host selection with preselection of never-deployed nodes
@@ -2910,7 +2959,7 @@ class DeploymentService:
 
         if not selected_host_names:
             self.app.print_colored("Deployment cancelled - no hosts selected.", 'yellow')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         # Filter hosts to only include selected ones
@@ -2974,7 +3023,7 @@ class DeploymentService:
         playbook_path = self.app.config_dir / f'playbooks/{playbook}'
         if not playbook_path.exists():
             self.app.print_colored(f"Playbook not found: {playbook_path}", 'red')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         # Create host limit for selected hosts
@@ -3020,7 +3069,7 @@ class DeploymentService:
                 self.app._update_node_status(host_name, 'error')
             self.app.print_colored(f"\n📊 Selected node statuses updated to Error due to deployment failure.", 'yellow')
 
-        input("Press Enter to continue...")
+        self.app.wait_for_enter()
 
     def _update_deployment_metadata(self, deployment_type: str) -> None:
         """Update deployment metadata after successful deployment"""
@@ -3108,7 +3157,7 @@ class DeploymentService:
         """Show deployment status for all nodes"""
         if not self.app.check_hosts_config():
             self.app.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         # Reload active config to ensure deployment status is current
@@ -3118,11 +3167,11 @@ class DeploymentService:
 
         # Load configuration
         self.app.load_configuration()
-        hosts = self.app.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.app.inventory)
 
         if not hosts:
             self.app.print_colored("No nodes configured.", 'yellow')
-            input("Press Enter to continue...")
+            self.app.wait_for_enter()
             return
 
         # Show deployment status overview
@@ -3136,29 +3185,27 @@ class DeploymentService:
         self.app.print_section("Overall Deployment Status")
 
         if deployment_status == 'deployed' and last_deployed_date:
-            try:
-                deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
-                deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
+            deployed_str = _parse_iso_datetime(last_deployed_date)
+            if deployed_str:
                 self.app.print_colored(f"🚀 Status: Deployed on {deployed_str}", 'green')
                 if last_deployed_network:
                     self.app.print_colored(f"🌐 Network: {last_deployed_network}", 'cyan')
                 if last_deployment_type:
                     self.app.print_colored(f"🔧 Type: {last_deployment_type}", 'cyan')
-            except:
+            else:
                 self.app.print_colored("🚀 Status: Deployed", 'green')
         elif deployment_status == 'deleted' and last_deleted_date:
-            try:
-                deleted_dt = datetime.fromisoformat(last_deleted_date.replace('Z', '+00:00'))
-                deleted_str = deleted_dt.strftime('%Y-%m-%d %H:%M')
+            deleted_str = _parse_iso_datetime(last_deleted_date)
+            if deleted_str:
                 self.app.print_colored(f"🗑️ Status: Deleted on {deleted_str}", 'red')
-            except:
+            else:
                 self.app.print_colored("🗑️ Status: Deleted", 'red')
         else:
             self.app.print_colored("📋 Status: Never deployed", 'yellow')
 
         # Individual node status - check in real-time
         self.app.print_section(f"Node Status Overview ({len(hosts)} nodes)")
-        self.app.print_colored("🔍 Checking current status (max 30s timeout)...", 'cyan')
+        self.app.print_colored(f"🔍 Checking current status (max {self.app.connection_timeout}s timeout)...", 'cyan')
 
         # Get real-time status for each node
         real_time_status = self.app._get_real_time_node_status()
@@ -3177,7 +3224,7 @@ class DeploymentService:
                 self.app.print_colored(f"  • {host_name}: ❓ Unable to check", 'yellow', end='')
                 self.app.print_colored(f" (Current status)", 'white')
 
-        input("\nPress Enter to continue...")
+        self.app.wait_for_enter()
 
 
 
@@ -3279,6 +3326,9 @@ class R1Setup:
         os.environ['ANSIBLE_CONFIG'] = str(self.ansible_config_root / 'ansible.cfg')
         os.environ['ANSIBLE_COLLECTIONS_PATH'] = str(self.ansible_config_root / 'collections')
         os.environ['ANSIBLE_HOME'] = str(self.ansible_config_root)
+
+    def wait_for_enter(self, message: str = "Press Enter to continue...") -> None:
+        input(f"\n{message}")
 
     def print_colored(self, text: str, color: str = 'white', bold: bool = False, end: str = '\n') -> None:
         """Print colored text"""
@@ -3524,7 +3574,7 @@ class R1Setup:
                 config = yaml.safe_load(f)
                 if not config or 'all' not in config:
                     return False
-                hosts = config.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+                hosts = _get_gpu_hosts(config)
                 return len(hosts) > 0
         except Exception:
             return False
@@ -3638,6 +3688,14 @@ class R1Setup:
     def settings_menu(self):
         return self.settings_manager.settings_menu()
 
+    @property
+    def connection_timeout(self) -> int:
+        return self.settings_manager.connection_timeout
+
+    @property
+    def ssh_connect_timeout(self) -> int:
+        return self.settings_manager.ssh_connect_timeout
+
     def _get_suggested_action(self):
         """Return (default_option, hint_text) based on current state."""
         has_config = self.check_hosts_config()
@@ -3646,7 +3704,7 @@ class R1Setup:
         deployment_status = self.active_config.get('deployment_status', 'never_deployed')
         if deployment_status in ('never_deployed', 'deleted'):
             return '2', '\U0001f4a1 Suggested: Deploy your configured nodes'
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.inventory)
         error_count = sum(1 for h in hosts.values() if h.get('node_status') == 'error')
         if error_count > 0:
             return '4', f'\U0001f4a1 Suggested: Check {error_count} node(s) with errors'
@@ -3671,12 +3729,12 @@ class R1Setup:
         last_deleted_date = self.active_config.get('last_deleted_date')
 
         if deployment_status == 'deployed' and last_deployed_date:
-            try:
-                deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
-                deploy_str = f"\U0001f680 deployed {deployed_dt.strftime('%Y-%m-%d %H:%M')}"
+            deployed_str = _parse_iso_datetime(last_deployed_date)
+            if deployed_str:
+                deploy_str = f"\U0001f680 deployed {deployed_str}"
                 if last_deployed_network:
                     deploy_str += f" ({last_deployed_network})"
-            except:
+            else:
                 deploy_str = "\u2713 deployed"
         elif deployment_status == 'deleted':
             deploy_str = "\U0001f5d1\ufe0f deleted"
@@ -3689,7 +3747,7 @@ class R1Setup:
         # Line 2: node status summary (only when configured)
         if has_config:
             self.load_configuration()
-            hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+            hosts = _get_gpu_hosts(self.inventory)
             if hosts:
                 status_counts = {}
                 oldest_update = None
@@ -3762,7 +3820,7 @@ class R1Setup:
             # Show node count if configured
             if has_config:
                 self.load_configuration()
-                hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+                hosts = _get_gpu_hosts(self.inventory)
                 self.print_colored(f"Nodes: {len(hosts)} configured", 'cyan')
 
             self.print_colored("Configuration Menu", 'cyan', bold=True)
@@ -3789,7 +3847,7 @@ class R1Setup:
                 self.switch_environment()
             else:
                 self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
-                input("Press Enter to continue...")
+                self.wait_for_enter()
 
     def configure_nodes_menu(self) -> None:
         """Show node configuration submenu"""
@@ -3798,7 +3856,7 @@ class R1Setup:
 
             # Load current configuration
             self.load_configuration()
-            hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+            hosts = _get_gpu_hosts(self.inventory)
 
             if hosts:
                 self.print_section(f"Current Nodes ({len(hosts)})")
@@ -3849,7 +3907,7 @@ class R1Setup:
                 self._create_new_configuration()
             else:
                 self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
-                input("Press Enter to continue...")
+                self.wait_for_enter()
 
     def deployment_menu(self) -> None:
         """Show deployment submenu"""
@@ -3869,22 +3927,20 @@ class R1Setup:
             # Show current deployment status
             self.print_section("Current Deployment Status")
             if deployment_status == 'deployed' and last_deployed_date:
-                try:
-                    deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
-                    deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
+                deployed_str = _parse_iso_datetime(last_deployed_date)
+                if deployed_str:
                     self.print_colored(f"🚀 Status: Deployed on {deployed_str}", 'green')
                     if last_deployed_network:
                         self.print_colored(f"🌐 Network: {last_deployed_network}", 'cyan')
                     if last_deployment_type:
                         self.print_colored(f"🔧 Type: {last_deployment_type}", 'cyan')
-                except:
+                else:
                     self.print_colored("🚀 Status: Deployed", 'green')
             elif deployment_status == 'deleted' and last_deleted_date:
-                try:
-                    deleted_dt = datetime.fromisoformat(last_deleted_date.replace('Z', '+00:00'))
-                    deleted_str = deleted_dt.strftime('%Y-%m-%d %H:%M')
+                deleted_str = _parse_iso_datetime(last_deleted_date)
+                if deleted_str:
                     self.print_colored(f"🗑️ Status: Deleted on {deleted_str}", 'red')
-                except:
+                else:
                     self.print_colored("🗑️ Status: Deleted", 'red')
             else:
                 self.print_colored("📋 Status: Never deployed", 'yellow')
@@ -3914,7 +3970,7 @@ class R1Setup:
                 self.deployment_status()
             else:
                 self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
-                input("Press Enter to continue...")
+                self.wait_for_enter()
 
     def operations_menu(self) -> None:
         """Show operations submenu for service management and connectivity"""
@@ -3925,7 +3981,7 @@ class R1Setup:
             has_config = self.check_hosts_config()
             if has_config:
                 self.load_configuration()
-                hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+                hosts = _get_gpu_hosts(self.inventory)
                 self.print_section(f"Available for {len(hosts)} configured node(s)")
             else:
                 self.print_section("No nodes configured")
@@ -3950,7 +4006,7 @@ class R1Setup:
                 break
             elif choice in ('1', '2', '3', '4') and not has_config:
                 self.print_colored("No nodes configured. Please configure nodes first (Main Menu \u2192 1).", 'red')
-                input("Press Enter to continue...")
+                self.wait_for_enter()
                 continue
             elif choice == '1':
                 self.start_edge_node_service()
@@ -3962,7 +4018,7 @@ class R1Setup:
                 self.test_connectivity()
             else:
                 self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
-                input("Press Enter to continue...")
+                self.wait_for_enter()
 
     def advanced_menu(self) -> None:
         """Show advanced menu with utilities and expert tools"""
@@ -3973,7 +4029,7 @@ class R1Setup:
             has_config = self.check_hosts_config()
             if has_config:
                 self.load_configuration()
-                hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+                hosts = _get_gpu_hosts(self.inventory)
                 self.print_section(f"Available for {len(hosts)} configured node(s)")
             else:
                 self.print_section("No nodes configured")
@@ -3998,7 +4054,7 @@ class R1Setup:
                 break
             elif choice in ('1', '2', '3', '4') and not has_config:
                 self.print_colored("No nodes configured. Please configure nodes first (Main Menu \u2192 1).", 'red')
-                input("Press Enter to continue...")
+                self.wait_for_enter()
                 continue
             elif choice == '1':
                 self.ssh_into_node_machine()
@@ -4010,7 +4066,7 @@ class R1Setup:
                 self.import_nodes_private_keys()
             else:
                 self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
-                input("Press Enter to continue...")
+                self.wait_for_enter()
 
 
 
@@ -4018,7 +4074,7 @@ class R1Setup:
         """Import private keys from all configured nodes"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
 
         self.print_header("Import Nodes Private Keys")
@@ -4032,11 +4088,11 @@ class R1Setup:
         
         # Load configuration
         self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.inventory)
         
         if not hosts:
             self.print_colored("No nodes configured.", 'yellow')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
         
         # Show nodes that will be processed
@@ -4059,7 +4115,7 @@ class R1Setup:
         confirm = self.get_input("Type 'yes' to proceed", "")
         if confirm.lower() != 'yes':
             self.print_colored("Operation cancelled.", 'yellow')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
         
         # Create keys directory
@@ -4069,7 +4125,7 @@ class R1Setup:
             self.print_colored(f"Created keys directory: {keys_dir}", 'green')
         except Exception as e:
             self.print_colored(f"Failed to create keys directory: {e}", 'red')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
         
         # Process each node
@@ -4111,14 +4167,14 @@ class R1Setup:
             ssh_cmd.extend([
                 '-o', 'StrictHostKeyChecking=no',
                 '-o', 'UserKnownHostsFile=/dev/null',
-                '-o', 'ConnectTimeout=10',
+                '-o', f'ConnectTimeout={self.ssh_connect_timeout}',
                 f"{user}@{ip}",
                 'cat /var/cache/edge_node/_local_cache/_data/e2.pem'
             ])
-            
+
             try:
                 # Execute SSH command to get the private key
-                result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=30)
+                result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=self.connection_timeout)
                 
                 if result.returncode == 0 and result.stdout.strip():
                     # Save the private key to file
@@ -4163,7 +4219,7 @@ class R1Setup:
             self.print_colored("  • Keep these files secure and delete when no longer needed", 'red')
             self.print_colored("  • These keys provide full access to node wallets", 'red')
         
-        input("\nPress Enter to continue...")
+        self.wait_for_enter()
 
     def _create_initial_configuration(self) -> None:
         """Create initial configuration"""
@@ -4630,12 +4686,8 @@ class R1Setup:
             self.print_colored(f"Nodes Count: {self.active_config.get('nodes_count', 0)}", 'green')
             created_at = self.active_config.get('created_at')
             if created_at:
-                try:
-                    created_dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                    created_str = created_dt.strftime('%Y-%m-%d %H:%M')
-                    self.print_colored(f"Created: {created_str}", 'green')
-                except:
-                    self.print_colored(f"Created: {created_at}", 'green')
+                created_str = _parse_iso_datetime(created_at) or str(created_at)
+                self.print_colored(f"Created: {created_str}", 'green')
         else:
             self.print_colored("No active configuration", 'red')
 
@@ -4646,7 +4698,7 @@ class R1Setup:
 
         # Load and show hosts
         self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.inventory)
 
         if not hosts:
             self.print_colored("\nNo nodes configured!", 'red')
@@ -4669,20 +4721,20 @@ class R1Setup:
                         value = "********"
                     self.print_colored(f"  {key}: {value}")
 
-        input("\nPress Enter to continue...")
+        self.wait_for_enter()
 
     def test_connectivity(self) -> None:
         """Test connectivity to configured nodes"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
 
         self.print_header("Testing Node Connectivity")
 
         # Load configuration to show nodes being tested
         self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.inventory)
         env = self.get_mnl_app_env()
 
         # Show pre-test information
@@ -4700,7 +4752,7 @@ class R1Setup:
         playbook_path = self.config_dir / 'playbooks/test_connection.yml'
         if not playbook_path.exists():
             self.print_colored(f"❌ Test playbook not found: {playbook_path}", 'red')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
 
         cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
@@ -4709,7 +4761,7 @@ class R1Setup:
                f"ansible-playbook -i {self.config_file} {playbook_path}")
 
         self.print_colored(f"\n🔍 Running connectivity test...", 'yellow')
-        success, output = self.run_command(cmd, show_output=False)
+        success, output = self.run_command(cmd, show_output=False, timeout=self.connection_timeout)
 
         # Parse the results
         connectivity_results = self._parse_connectivity_output(output)
@@ -4717,7 +4769,7 @@ class R1Setup:
         # Display formatted results
         self._display_connectivity_results(connectivity_results, hosts)
 
-        input("\nPress Enter to continue...")
+        self.wait_for_enter()
 
     def _display_copy_friendly_addresses(self, host_names: List[str]) -> None:
         """Display copy-friendly node addresses after successful deployment"""
@@ -4734,11 +4786,11 @@ class R1Setup:
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
                f"ansible-playbook -i {self.config_file} {playbook_path}")
 
-        success, output = self.run_command(cmd, show_output=False, timeout=30)
-        
+        success, output = self.run_command(cmd, show_output=False, timeout=self.connection_timeout)
+
         if success:
             node_results = self._parse_node_info_output(output)
-            
+
             # Filter results to only show the successfully deployed nodes
             successful_deployed_nodes = []
             for host_name in host_names:
@@ -4957,7 +5009,7 @@ class R1Setup:
         """Get and display node addresses, with optional CSV export"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
 
         self.print_header("Node Addresses & Export")
@@ -4965,7 +5017,7 @@ class R1Setup:
         playbook_path = self.config_dir / 'playbooks/get_node_info.yml'
         if not playbook_path.exists():
             self.print_colored(f"Node info playbook not found: {playbook_path}", 'red')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
 
         cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
@@ -4975,13 +5027,13 @@ class R1Setup:
 
         self.print_colored("Retrieving node addresses...", 'yellow')
 
-        success, output = self.run_command(cmd, show_output=False, timeout=60)
+        success, output = self.run_command(cmd, show_output=False, timeout=self.connection_timeout * 2)
 
         # Check for timeout specifically
         if not success and "timed out" in output.lower():
-            self.print_colored("Node address retrieval timed out after 60 seconds", 'red')
+            self.print_colored(f"Node address retrieval timed out after {self.connection_timeout * 2} seconds", 'red')
             self.print_colored("Some nodes may be offline or not responding", 'yellow')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
 
         # Parse the output to extract both successful and failed nodes
@@ -4991,7 +5043,7 @@ class R1Setup:
         if not node_results:
             self.print_colored("No node information could be parsed from the playbook output.", 'yellow')
             self.print_colored("This might be because the nodes are not running or not accessible.", 'yellow')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
 
         # Display the addresses in a formatted table
@@ -5026,7 +5078,7 @@ class R1Setup:
         if export_choice.lower() == 'y':
             self._write_addresses_csv(node_results)
 
-        input("\nPress Enter to continue...")
+        self.wait_for_enter()
 
     def _write_addresses_csv(self, node_results: dict) -> None:
         """Write pre-fetched node results to a CSV file"""
@@ -5052,7 +5104,7 @@ class R1Setup:
 
                 # Load configuration to get SSH details
                 self.load_configuration()
-                hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+                hosts = _get_gpu_hosts(self.inventory)
 
                 for node_name, result in node_results.items():
                     # Get SSH info from configuration
@@ -5090,7 +5142,7 @@ class R1Setup:
         self.set_mnl_app_env(env)
         self.print_colored(f"Network environment changed to: {env}", 'green')
 
-        input("Press Enter to continue...")
+        self.wait_for_enter()
 
     def _parse_connectivity_output(self, output: str) -> Dict[str, Dict[str, Any]]:
         """Parse ansible connectivity test output to extract connection results"""
@@ -5240,14 +5292,14 @@ class R1Setup:
         """SSH into a selected node's machine"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
 
         self.print_header("SSH Into Node's Machine")
 
         # Load configuration
         self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.inventory)
         env = self.get_mnl_app_env()
 
         # Show SSH connection details
@@ -5319,7 +5371,7 @@ class R1Setup:
         
         if not ip or not user:
             self.print_colored(f"❌ Missing connection details for {selected_host}. Please reconfigure the node.", 'red')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
 
         # Build SSH command
@@ -5354,7 +5406,7 @@ class R1Setup:
         ssh_cmd.extend([
             '-o', 'StrictHostKeyChecking=no',  # Don't prompt for host key verification
             '-o', 'UserKnownHostsFile=/dev/null',  # Don't save host keys
-            '-o', 'ConnectTimeout=10',  # 10 second connection timeout
+            '-o', f'ConnectTimeout={self.ssh_connect_timeout}',
         ])
         
         # Add user@host
@@ -5362,8 +5414,7 @@ class R1Setup:
 
         self.print_colored(f"\n🚀 Connecting to {selected_host} ({user}@{ip})...", 'cyan', bold=True)
         self.print_colored("   Type 'exit' to return to r1setup", 'white')
-        self.print_colored("   Press Enter to continue...", 'yellow')
-        input()
+        self.wait_for_enter()
 
         try:
             # Execute SSH command
@@ -5386,7 +5437,7 @@ class R1Setup:
             self.print_colored("   • Firewall blocking SSH port", 'white')
             self.print_colored("   • Node is not reachable", 'white')
         
-        input("\nPress Enter to continue...")
+        self.wait_for_enter()
 
     def start_edge_node_service(self) -> None:
         """Start Edge Node on all configured nodes"""
@@ -5442,7 +5493,7 @@ class R1Setup:
                 if self._load_config_by_name(display_name):
                     self.print_colored(f"✅ Successfully activated configuration: {custom_name}", 'green')
                     self.print_colored("Proceeding to main menu...", 'green')
-                    input("Press Enter to continue...")
+                    self.wait_for_enter()
                     return True
                 else:
                     self.print_colored(f"❌ Failed to activate configuration: {custom_name}", 'red')
@@ -5476,25 +5527,15 @@ class R1Setup:
                                 break
 
                 # Format creation date
-                created_str = "Unknown"
-                if created_at:
-                    try:
-                        if isinstance(created_at, str):
-                            created_dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                            created_str = created_dt.strftime('%Y-%m-%d %H:%M')
-                        else:
-                            created_str = datetime.fromtimestamp(created_at).strftime('%Y-%m-%d %H:%M')
-                    except:
-                        created_str = "Unknown"
+                created_str = _parse_iso_datetime(created_at) or "Unknown"
 
                 # Format deployment status
                 deployment_str = ""
                 if deployment_status == 'deployed' and last_deployed_date:
-                    try:
-                        deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
-                        deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
+                    deployed_str = _parse_iso_datetime(last_deployed_date)
+                    if deployed_str:
                         deployment_str = f" | 🚀 Last deployed: {deployed_str}"
-                    except:
+                    else:
                         deployment_str = " | 🚀 Deployed"
                 elif deployment_status == 'deleted':
                     deployment_str = " | 🗑️ Deleted"
@@ -5532,12 +5573,12 @@ class R1Setup:
                     if self._load_config_by_name(selected_config):
                         self.print_colored(f"✅ Successfully activated configuration: {selected_config}", 'green')
                         self.print_colored("You can now access the main menu.", 'green')
-                        input("Press Enter to continue...")
+                        self.wait_for_enter()
                         return True
                     else:
                         self.print_colored(f"❌ Failed to activate configuration: {selected_config}", 'red')
                         self.print_colored("Please try another configuration or create a new one.", 'red')
-                        input("Press Enter to continue...")
+                        self.wait_for_enter()
                         continue
                 elif choice == '2':
                     # Create new configuration
@@ -5549,11 +5590,11 @@ class R1Setup:
                     # Check if import was successful by seeing if we now have an active config
                     if self.check_hosts_config():
                         self.print_colored("You can now access the main menu.", 'green')
-                        input("Press Enter to continue...")
+                        self.wait_for_enter()
                         return True
                     else:
                         self.print_colored("Import was cancelled or failed. Please try again.", 'yellow')
-                        input("Press Enter to continue...")
+                        self.wait_for_enter()
                         continue
                 else:
                     self.print_colored("Invalid option. Please enter 0, 1, 2, or 3.", 'red')
@@ -5585,11 +5626,11 @@ class R1Setup:
                     if self.check_hosts_config():
                         self.print_colored("Welcome to r1setup! Your configuration has been imported successfully.", 'green')
                         self.print_colored("You can now access the main menu.", 'green')
-                        input("Press Enter to continue...")
+                        self.wait_for_enter()
                         return True
                     else:
                         self.print_colored("Import was cancelled or failed. Please try again.", 'yellow')
-                        input("Press Enter to continue...")
+                        self.wait_for_enter()
                         continue
                 else:
                     self.print_colored("Invalid option. Please enter 0, 1, or 2.", 'red')
@@ -5631,8 +5672,7 @@ class R1Setup:
         while True:
             try:
                 self.show_main_menu()
-                suggested_default, _ = self._get_suggested_action()
-                choice = self.get_input("Select option (0-7)", suggested_default)
+                choice = self.get_input("Select option (0-7)", "0")
 
                 if choice == '0':
                     self.print_colored("Thank you for using Ratio1 Multi-Node Launcher Setup!", 'green')
@@ -5653,14 +5693,14 @@ class R1Setup:
                     self.advanced_menu()
                 else:
                     self.print_colored("Invalid option. Valid choices are 0-7.", 'red')
-                    input("Press Enter to continue...")
+                    self.wait_for_enter()
 
             except KeyboardInterrupt:
                 self.print_colored("\n\nOperation cancelled by user.", 'yellow')
                 break
             except Exception as e:
                 self.print_colored(f"An error occurred: {e}", 'red')
-                input("Press Enter to continue...")
+                self.wait_for_enter()
 
     def switch_environment(self) -> None:
         """Switch network environment (wrapper for change_network_environment)"""
@@ -5670,18 +5710,18 @@ class R1Setup:
         """Stream logs from selected nodes"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
 
         self.print_header("Get Node Logs")
         
         # Load configuration
         self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.inventory)
         
         if not hosts:
             self.print_colored("No nodes configured.", 'yellow')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
         
         # Show available nodes
@@ -5728,7 +5768,7 @@ class R1Setup:
         
         # Get node connection details first to validate before asking user to proceed
         self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.inventory)
         node_config = hosts.get(node_name, {})
         
         host = node_config.get('ansible_host', '')
@@ -5736,7 +5776,7 @@ class R1Setup:
         
         if not host or not user:
             self.print_colored("Error: Node configuration incomplete.", 'red')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
         
         self.print_colored(f"📡 Ready to stream logs from: {user}@{host}", 'cyan')
@@ -5745,7 +5785,7 @@ class R1Setup:
         print()
         
         # Ask user to confirm before starting
-        input("Press Enter to start streaming logs...")
+        self.wait_for_enter("Press Enter to start streaming logs...")
         print()
         
         try:
@@ -5784,24 +5824,24 @@ class R1Setup:
         except Exception as e:
             self.print_colored(f"Error streaming logs: {e}", 'red')
         
-        input("\nPress Enter to continue...")
+        self.wait_for_enter()
 
     def write_logs_to_file(self) -> None:
         """Save node logs to a local file"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
 
         self.print_header("Write Logs to File")
         
         # Load configuration
         self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.inventory)
         
         if not hosts:
             self.print_colored("No nodes configured.", 'yellow')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
         
         # Show available nodes
@@ -5876,7 +5916,7 @@ class R1Setup:
         try:
             # Get node connection details
             self.load_configuration()
-            hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+            hosts = _get_gpu_hosts(self.inventory)
             node_config = hosts.get(node_name, {})
             
             host = node_config.get('ansible_host', '')
@@ -5884,7 +5924,7 @@ class R1Setup:
             
             if not host or not user:
                 self.print_colored("Error: Node configuration incomplete.", 'red')
-                input("Press Enter to continue...")
+                self.wait_for_enter()
                 return
             
             # Construct SSH command to get logs using the deployed get_logs script
@@ -5898,8 +5938,8 @@ class R1Setup:
             self.print_colored(f"Connecting to {user}@{host} and retrieving {lines_count} log lines...", 'yellow')
             
             # Execute the command
-            result = subprocess.run(ssh_cmd, shell=True, capture_output=True, text=True)
-            
+            result = subprocess.run(ssh_cmd, shell=True, capture_output=True, text=True, timeout=self.connection_timeout)
+
             if result.returncode == 0:
                 # Save logs to file
                 with open(filename, 'w') as f:
@@ -5919,7 +5959,7 @@ class R1Setup:
         except Exception as e:
             self.print_colored(f"Error saving logs: {e}", 'red')
         
-        input("\nPress Enter to continue...")
+        self.wait_for_enter()
 
     def select_hosts(self, hosts: Dict[str, Dict[str, Any]], operation_name: str,
                      preselect_mode: str = 'all') -> List[str]:
@@ -6106,7 +6146,7 @@ class R1Setup:
             if choice == "":
                 if len(selected_hosts) == 0:
                     self.print_colored("❌ Cannot proceed without selecting any hosts!", 'red')
-                    input("Press Enter to continue selection...")
+                    self.wait_for_enter("Press Enter to continue selection...")
                     continue
                 break
             elif choice == "c":
@@ -6163,48 +6203,42 @@ class R1Setup:
         if not timestamp:
             return "Never"
             
-        try:
-            from datetime import datetime
-            if isinstance(timestamp, str):
-                timestamp_dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-            else:
-                timestamp_dt = datetime.fromtimestamp(timestamp)
-            
-            # Calculate time difference
-            now = datetime.now(timestamp_dt.tzinfo) if timestamp_dt.tzinfo else datetime.now()
-            time_diff = now - timestamp_dt
-            
-            if time_diff.days > 0:
-                return f"{time_diff.days} day(s) ago"
-            elif time_diff.seconds > 3600:
-                hours = time_diff.seconds // 3600
-                return f"{hours} hour(s) ago"
-            elif time_diff.seconds > 60:
-                minutes = time_diff.seconds // 60
-                return f"{minutes} minute(s) ago"
-            else:
-                return "Just now"
-                
-        except Exception as e:
-            self.print_debug(f"Error parsing timestamp '{timestamp}': {e}")
+        timestamp_dt = _parse_iso_to_datetime(timestamp)
+        if not timestamp_dt:
+            self.print_debug(f"Error parsing timestamp '{timestamp}'")
             return "Unknown"
+
+        # Calculate time difference
+        now = datetime.now(timestamp_dt.tzinfo) if timestamp_dt.tzinfo else datetime.now()
+        time_diff = now - timestamp_dt
+
+        if time_diff.days > 0:
+            return f"{time_diff.days} day(s) ago"
+        elif time_diff.seconds > 3600:
+            hours = time_diff.seconds // 3600
+            return f"{hours} hour(s) ago"
+        elif time_diff.seconds > 60:
+            minutes = time_diff.seconds // 60
+            return f"{minutes} minute(s) ago"
+        else:
+            return "Just now"
 
     def combined_node_status_and_info(self) -> None:
         """Display beautiful live container status overview - checks if Edge Node containers are running"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
 
         # Load configuration
         self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.inventory)
         env = self.get_mnl_app_env()
 
         # Clear screen and show loading
         print("\033[2J\033[H", end="")
         self.print_header("Container Status")
-        self.print_colored("🔍 Checking container status (max 30s timeout)...", 'cyan')
+        self.print_colored(f"🔍 Checking container status (max {self.connection_timeout}s timeout)...", 'cyan')
         
         # Use the same deployment status workflow - get real-time status
         node_status_data = self._get_real_time_node_status()
@@ -6228,22 +6262,20 @@ class R1Setup:
         
         # Overall deployment status
         if deployment_status == 'deployed' and last_deployed_date:
-            try:
-                deployed_dt = datetime.fromisoformat(last_deployed_date.replace('Z', '+00:00'))
-                deployed_str = deployed_dt.strftime('%Y-%m-%d %H:%M')
+            deployed_str = _parse_iso_datetime(last_deployed_date)
+            if deployed_str:
                 deployment_text = f"🚀 Last deployed: {deployed_str}"
                 if last_deployed_network:
                     deployment_text += f" ({last_deployed_network})"
                 self.print_colored(f"Deployment: {deployment_text}", 'green')
-            except:
+            else:
                 self.print_colored("Deployment: ✓ Deployed", 'green')
         elif deployment_status == 'deleted' and last_deleted_date:
-            try:
-                deleted_dt = datetime.fromisoformat(last_deleted_date.replace('Z', '+00:00'))
-                deleted_str = deleted_dt.strftime('%Y-%m-%d %H:%M')
+            deleted_str = _parse_iso_datetime(last_deleted_date)
+            if deleted_str:
                 deployment_text = f"🗑️ Last deleted: {deleted_str}"
                 self.print_colored(f"Deployment: {deployment_text}", 'red')
-            except:
+            else:
                 self.print_colored("Deployment: ✓ Deleted", 'red')
         else:
             self.print_colored("Deployment: ✗ Never deployed", 'yellow')
@@ -6349,20 +6381,20 @@ class R1Setup:
         # Quick actions
         self.print_colored("\U0001f4a1 Quick Actions: Main Menu \u2192 3 (Operations Menu)", 'white')
 
-        input("\nPress Enter to continue...")
+        self.wait_for_enter()
 
     def _manage_service(self, playbook_name: str, title: str, action_text: str) -> None:
         """Common method to manage Edge Nodes"""
         if not self.check_hosts_config():
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
 
         self.print_header(title)
 
         # Load configuration to show service management details
         self.load_configuration()
-        hosts = self.inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+        hosts = _get_gpu_hosts(self.inventory)
         env = self.get_mnl_app_env()
 
         # Show service management details
@@ -6436,7 +6468,7 @@ class R1Setup:
         playbook_path = self.config_dir / f'playbooks/{playbook_name}'
         if not playbook_path.exists():
             self.print_colored(f"Service management playbook not found: {playbook_path}", 'red')
-            input("Press Enter to continue...")
+            self.wait_for_enter()
             return
 
         # Build Ansible command with host limitation
@@ -6503,7 +6535,7 @@ class R1Setup:
             elif "stop" in playbook_name or "restart" in playbook_name:
                 self.print_colored("This might be normal if the service was not running on some nodes.", 'yellow')
 
-        input("Press Enter to continue...")
+        self.wait_for_enter()
 
 
 if __name__ == "__main__":
