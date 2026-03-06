@@ -950,7 +950,7 @@ class ConfigurationManager:
             self.app.print_colored("Examples: 'production-cluster', 'test-env', 'gpu-farm-1'", 'white')
 
             while True:
-                custom_name = self.app.get_input("Enter configuration name", required=True)
+                custom_name = self.app.get_input("Enter configuration name (letters, numbers, -, _)", required=True)
                 # Validate name (allow letters, numbers, hyphens, underscores)
                 if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
                     break
@@ -1356,7 +1356,7 @@ class ConfigurationManager:
             elif choice == '9':
                 self._import_configuration()
             else:
-                self.app.print_colored("Invalid option. Please try again.", 'red')
+                self.app.print_colored("Invalid option. Valid choices are 0-9.", 'red')
                 input("Press Enter to continue...")
 
     def _create_new_configuration_with_management(self) -> None:
@@ -1369,7 +1369,7 @@ class ConfigurationManager:
         self.app.print_colored("Examples: 'production-cluster', 'test-env', 'gpu-farm-1'", 'white')
 
         while True:
-            custom_name = self.app.get_input("Enter configuration name", required=True)
+            custom_name = self.app.get_input("Enter configuration name (letters, numbers, -, _)", required=True)
             # Validate name (allow letters, numbers, hyphens, underscores)
             if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
                 break
@@ -2768,7 +2768,7 @@ class DeploymentService:
         success, _ = self.app.run_command(cmd, show_output=True)
 
         if success:
-            self.app.print_colored("\nEdge Node deleted successfully!", 'green')
+            self.app.print_colored(f"\n✅ Deletion succeeded on {len(selected_host_names)} node(s)", 'green')
             # Update deployment metadata after successful deletion
             self._update_deletion_metadata()
 
@@ -2786,7 +2786,7 @@ class DeploymentService:
             self.app.print_colored(f"\n💡 Note: Deleted nodes will maintain their 'deleted' status.", 'cyan')
             self.app.print_colored("   This status will not change automatically to preserve the deletion history.", 'white')
         else:
-            self.app.print_colored("\nEdge Node deletion encountered issues. Please check the output above.", 'red')
+            self.app.print_colored(f"\n❌ Deletion failed. Check output above for details.", 'red')
             # Update selected node statuses to error after failed deletion
             for host_name in selected_host_names:
                 self.app._update_node_status(host_name, 'error')
@@ -2871,8 +2871,9 @@ class DeploymentService:
             self.app.print_colored(f"   • Node configuration and credentials remain the same", 'white')
             self.app.print_colored(f"   • Only the blockchain network environment changes", 'white')
 
-            if self.app.get_input(f"\n❓ Are you sure you want to deploy to {env} (different from previous {last_deployed_network})? (y/n)", "n").lower() != 'y':
-                self.app.print_colored("Deployment cancelled due to network change.", 'yellow')
+            self.app.print_colored(f"\n❓ Type 'yes' to confirm deployment to {env} (different from previous {last_deployed_network})", 'yellow')
+            if self.app.get_input("Confirm network change", "").lower() != 'yes':
+                self.app.print_colored("Deployment cancelled.", 'yellow')
                 return
 
         if self.app.get_input(f"\n🚀 Continue with deployment to {len(selected_hosts)} selected node(s) on {env}? (y/n)", "y").lower() != 'y':
@@ -2903,7 +2904,7 @@ class DeploymentService:
         success, _ = self.app.run_command(cmd, show_output=True)
 
         if success:
-            self.app.print_colored(f"\n{title} completed successfully!", 'green')
+            self.app.print_colored(f"\n✅ Deployment succeeded on {len(selected_host_names)} node(s)", 'green')
             # Update deployment metadata after successful deployment
             deployment_type = "full" if "NVIDIA" in description else "docker_only"
             self._update_deployment_metadata(deployment_type)
@@ -2922,7 +2923,7 @@ class DeploymentService:
             # Display copy-friendly node addresses after successful deployment
             self.app._display_copy_friendly_addresses(selected_host_names)
         else:
-            self.app.print_colored(f"\n{title} encountered issues. Please check the output above.", 'red')
+            self.app.print_colored(f"\n❌ Deployment failed. Check output above for details.", 'red')
             # Update selected node statuses to error after failed deployment
             for host_name in selected_host_names:
                 self.app._update_node_status(host_name, 'error')
@@ -3701,7 +3702,7 @@ class R1Setup:
             elif choice == '4':
                 self.switch_environment()
             else:
-                self.print_colored("Invalid option. Please try again.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
                 input("Press Enter to continue...")
 
     def configure_nodes_menu(self) -> None:
@@ -3757,7 +3758,7 @@ class R1Setup:
             elif choice == '4' and hosts:
                 self._create_new_configuration()
             else:
-                self.print_colored("Invalid option. Please try again.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
                 input("Press Enter to continue...")
 
     def deployment_menu(self) -> None:
@@ -3822,7 +3823,7 @@ class R1Setup:
             elif choice == '4':
                 self.deployment_status()
             else:
-                self.print_colored("Invalid option. Please try again.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
                 input("Press Enter to continue...")
 
     def advanced_menu(self) -> None:
@@ -3857,6 +3858,10 @@ class R1Setup:
 
             if choice == '0':
                 break
+            elif choice in ('1', '2', '3', '4') and not has_config:
+                self.print_colored("No nodes configured. Please configure nodes first (Main Menu → 1).", 'red')
+                input("Press Enter to continue...")
+                continue
             elif choice == '1':
                 self.ssh_into_node_machine()
             elif choice == '2':
@@ -3866,7 +3871,7 @@ class R1Setup:
             elif choice == '4':
                 self.import_nodes_private_keys()
             else:
-                self.print_colored("Invalid option. Please try again.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
                 input("Press Enter to continue...")
 
 
@@ -3913,8 +3918,8 @@ class R1Setup:
         print()
         
         # Final confirmation
-        confirm = self.get_input("Are you sure you want to proceed? (yes/no)", "no")
-        if confirm.lower() not in ['yes', 'y']:
+        confirm = self.get_input("Type 'yes' to proceed", "")
+        if confirm.lower() != 'yes':
             self.print_colored("Operation cancelled.", 'yellow')
             input("Press Enter to continue...")
             return
@@ -4032,7 +4037,7 @@ class R1Setup:
         self.print_colored("Examples: 'production-cluster', 'test-env', 'gpu-farm-1'", 'white')
 
         while True:
-            custom_name = self.get_input("Enter configuration name", required=True)
+            custom_name = self.get_input("Enter configuration name (letters, numbers, -, _)", required=True)
             # Validate name (allow letters, numbers, hyphens, underscores)
             if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
                 break
@@ -4104,8 +4109,8 @@ class R1Setup:
             if previous_config and not existing_config:
                 prev_user = previous_config.get('ansible_user', '')
                 prev_auth = 'SSH Key' if 'ansible_ssh_private_key_file' in previous_config else 'Password'
-                self.print_colored(f"\nPrevious node used: {prev_user}, {prev_auth} auth", 'cyan')
-                use_same = self.get_input("Use same credentials as previous node? (y/n)", "y")
+                self.print_colored(f"\nPrevious node: {prev_user}, {prev_auth} auth", 'cyan')
+                use_same = self.get_input("Reuse these credentials for this node? (y/n)", "y")
                 if use_same.lower() == 'y':
                     # Ask for IP and username (with previous as default)
                     host_address = self.get_input("Enter host (IP address or URL)", "", required=True)
@@ -4129,7 +4134,7 @@ class R1Setup:
                     self.print_colored(f"Auth: {auth_type}")
                     if self.get_input("\nConfirm this configuration? (y/n)", "y").lower() == 'y':
                         return host
-                    self.print_colored("Let's configure this node manually...", 'yellow')
+                    self.print_colored("OK, entering full configuration...", 'yellow')
                     previous_config = None  # Don't offer shortcut again
                     continue
                 # If "no", fall through to normal flow with previous values as defaults
@@ -4247,18 +4252,13 @@ class R1Setup:
                             
                             # Prompt for sudo password
                             if existing_config and 'ansible_become_password' in existing_config:
-                                self.print_colored("\nFor sudo password (Press Enter to keep existing):", 'yellow')
-                                self.print_colored("  - Enter a sudo password if required", 'yellow')
+                                self.print_colored("\nFor sudo password:", 'yellow')
+                                self.print_colored("  - Enter a new sudo password to change it", 'yellow')
                                 self.print_colored("  - Press Enter to keep existing password", 'yellow')
-                                self.print_colored("  - Type 'none' if sudo doesn't require a password", 'yellow')
                                 sudo_pass = self.get_secure_input("Enter sudo password")
-                                if sudo_pass.strip().lower() == 'none':
-                                    # User explicitly said no sudo password needed
-                                    pass  # Don't set ansible_become_password
-                                elif sudo_pass.strip():
+                                if sudo_pass.strip():
                                     host['ansible_become_password'] = sudo_pass.strip()
                                 else:
-                                    # Keep existing
                                     host['ansible_become_password'] = existing_config['ansible_become_password']
                             else:
                                 # New configuration
@@ -4277,8 +4277,11 @@ class R1Setup:
                         self.print_colored(f"SSH key validation failed: {validation_result['error']}", 'red')
                         self.print_colored(f"Path checked: {expanded_path}", 'yellow')
                         
-                        retry_choice = self.get_input("Choose an option:\n  1) Try another SSH key path\n  2) Switch to password authentication\n  3) Keep existing (if updating)\nSelect option (1/2/3)", "1")
-                        
+                        if existing_config and 'ansible_ssh_private_key_file' in existing_config:
+                            retry_choice = self.get_input("Choose an option:\n  1) Try another SSH key path\n  2) Switch to password authentication\n  3) Keep existing key\nSelect option (1/2/3)", "1")
+                        else:
+                            retry_choice = self.get_input("Choose an option:\n  1) Try another SSH key path\n  2) Switch to password authentication\nSelect option (1/2)", "1")
+
                         if retry_choice == '1':
                             continue  # Try another path
                         elif retry_choice == '2':
@@ -4295,10 +4298,7 @@ class R1Setup:
                             auth_configured = True
                             break
                         else:
-                            if retry_choice == '3':
-                                self.print_colored("No existing configuration to keep. Please choose option 1 or 2.", 'red')
-                            else:
-                                self.print_colored("Invalid choice. Please select 1, 2, or 3.", 'red')
+                            self.print_colored("Invalid choice.", 'red')
                     
                     # If user chose to switch to password auth, continue the auth loop
                     if not key_auth_success and not auth_configured:
@@ -4349,6 +4349,7 @@ class R1Setup:
         hosts[name] = self._configure_single_node(previous_config=last_node_config)
         self._save_configuration()
         self.print_colored(f"Node '{name}' added successfully!", 'green')
+        self.print_colored("\n💡 Next: Deploy your updated configuration from Main Menu → Deployment Menu", 'cyan')
 
     def _update_node(self) -> None:
         """Update an existing node"""
@@ -4446,7 +4447,9 @@ class R1Setup:
             except ValueError:
                 self.print_colored("Please enter a number", 'red')
 
-        if self.get_input(f"Delete node '{name}'? (y/n)", "n").lower() == 'y':
+        ip = hosts[name].get('ansible_host', 'Unknown')
+        user = hosts[name].get('ansible_user', 'Unknown')
+        if self.get_input(f"Delete node '{name}' ({user}@{ip})? (y/n)", "n").lower() == 'y':
             del hosts[name]
             self._save_configuration()
             self.print_colored(f"Node '{name}' deleted successfully!", 'green')
@@ -5532,7 +5535,7 @@ class R1Setup:
                 elif choice == '10':
                     self.advanced_menu()
                 else:
-                    self.print_colored("Invalid option. Please try again.", 'red')
+                    self.print_colored("Invalid option. Valid choices are 0-10.", 'red')
                     input("Press Enter to continue...")
 
             except KeyboardInterrupt:
