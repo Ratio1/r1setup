@@ -70,6 +70,40 @@ DEBUG = False  # Set to True to enable debug output, or use --debug flag
 UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/ver.py"
 DOWNLOAD_BASE_URL = "https://github.com/Ratio1/multi_node_launcher/releases/download"
 
+# Whitelist of service template variables that can be overridden via Advanced → Customize Service
+CUSTOMIZABLE_VARS = {
+    'mnl_docker_image_url': {
+        'description': 'Docker image URL',
+        'default': '<from group_vars>',
+        'example': 'ratio1/edge_node:devnet',
+    },
+    'mnl_docker_gpus': {
+        'description': 'GPU flags passed to docker run',
+        'default': '--gpus all',
+        'example': '--gpus "device=0"',
+    },
+    'mnl_port_forward': {
+        'description': 'Port forwarding flags',
+        'default': '(empty or -p 1883:1883 in dev mode)',
+        'example': '-p 1883:1883',
+    },
+    'mnl_commented_restart': {
+        'description': 'Auto-reboot toggle (empty = enabled, "#" = disabled)',
+        'default': '(empty — reboot enabled)',
+        'example': '#',
+    },
+    'mnl_docker_container_name': {
+        'description': 'Docker container name',
+        'default': 'edge_node',
+        'example': 'edge_node_canary',
+    },
+    'mnl_docker_volume_path': {
+        'description': 'Host volume path for persistent data',
+        'default': '/var/cache/edge_node/_local_cache',
+        'example': '/data/edge_node/_local_cache',
+    },
+}
+
 
 def _get_gpu_hosts(inventory: dict) -> dict:
     """Extract gpu_nodes hosts from an inventory dict."""
@@ -488,6 +522,9 @@ class VersionManager:
                     except Exception as e:
                         self.app.print_debug(f"Verification command failed: {e}")
 
+                # Clear stale service overrides after template files may have changed
+                self._clear_overrides_on_update()
+
                 return verification_success
             else:
                 # Log the error details
@@ -520,6 +557,27 @@ class VersionManager:
                 import traceback
                 self.app.print_debug(f"Full traceback: {traceback.format_exc()}")
             return False
+
+    def _clear_overrides_on_update(self) -> None:
+        """Remove stale service overrides after an Ansible collection update.
+
+        Templates may have changed, so old overrides could be invalid.
+        """
+        try:
+            overrides = self.app._get_service_overrides()
+            if not overrides:
+                return
+
+            cleared_vars = list(overrides.keys())
+            self.app._save_service_overrides({})
+
+            self.app.print_colored("\n⚠️  Service overrides cleared after collection update:", 'yellow', bold=True)
+            for var in cleared_vars:
+                desc = CUSTOMIZABLE_VARS.get(var, {}).get('description', var)
+                self.app.print_colored(f"   • {desc} ({var}) = {overrides[var]}", 'yellow')
+            self.app.print_colored("  Re-apply via Advanced Menu → Customize Service if needed.", 'yellow')
+        except Exception as e:
+            self.app.print_debug(f"Could not clear overrides on update: {e}")
 
     def _get_current_collection_version(self, force_refresh: bool = False) -> Optional[str]:
         """Get current collection version using multiple smart methods with caching"""
@@ -3696,6 +3754,20 @@ class R1Setup:
     def ssh_connect_timeout(self) -> int:
         return self.settings_manager.ssh_connect_timeout
 
+    # -- Service override helpers --
+
+    def _get_service_overrides(self) -> dict:
+        """Return the current service_overrides dict from active_config (may be empty)."""
+        return dict(self.active_config.get('service_overrides', {}))
+
+    def _save_service_overrides(self, overrides: dict) -> None:
+        """Persist *overrides* into the active config metadata JSON and in-memory dict."""
+        if overrides:
+            self.config_manager.active_config['service_overrides'] = overrides
+        else:
+            self.config_manager.active_config.pop('service_overrides', None)
+        self.config_manager._save_active_config()
+
     def _get_suggested_action(self):
         """Return (default_option, hint_text) based on current state."""
         has_config = self.check_hosts_config()
@@ -4020,6 +4092,250 @@ class R1Setup:
                 self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
                 self.wait_for_enter()
 
+    # -- Customize Service --
+
+    def customize_service(self) -> None:
+        """Entry point: show disclaimer then open sub-menu."""
+        self.print_header("Customize Service")
+        self.print_colored("⚠️  WARNING", 'red', bold=True)
+        self.print_colored("This feature lets you override service template variables", 'yellow')
+        self.print_colored("(e.g. Docker image, GPU flags) and re-deploy the service", 'yellow')
+        self.print_colored("file WITHOUT a full site.yml run.", 'yellow')
+        print()
+        self.print_colored("Overrides take precedence over group_vars defaults.", 'yellow')
+        self.print_colored("A collection update will auto-clear all overrides.", 'yellow')
+        print()
+
+        confirm = self.get_input("Type 'yes' to continue", "")
+        if confirm.lower() != 'yes':
+            self.print_colored("Cancelled.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        self._customize_service_menu()
+
+    def _customize_service_menu(self) -> None:
+        """Sub-menu loop for managing service overrides."""
+        while True:
+            self.print_header("Customize Service")
+
+            overrides = self._get_service_overrides()
+            if overrides:
+                self.print_colored("📋 Active Overrides:", 'cyan', bold=True)
+                for var, val in overrides.items():
+                    desc = CUSTOMIZABLE_VARS.get(var, {}).get('description', var)
+                    self.print_colored(f"   {desc} ({var})", 'white')
+                    self.print_colored(f"     = {val}", 'green')
+            else:
+                self.print_colored("No active overrides — defaults from group_vars are used.", 'white')
+            print()
+
+            self.print_colored("Options:", 'cyan', bold=True)
+            self.print_colored("  1) Set/Edit Override    - Pick a variable and set a new value")
+            self.print_colored("  2) Remove Override      - Remove a single override")
+            self.print_colored("  3) Clear All Overrides  - Reset all to defaults")
+            self.print_colored("  4) Apply Overrides      - Re-template & restart on selected nodes")
+            self.print_colored("  0) Back")
+            print()
+
+            choice = self.get_input("Select option", "0")
+
+            if choice == '0':
+                break
+            elif choice == '1':
+                self._set_service_override()
+            elif choice == '2':
+                self._remove_service_override()
+            elif choice == '3':
+                self._clear_all_overrides()
+            elif choice == '4':
+                self._apply_service_overrides()
+            else:
+                self.print_colored("Invalid option.", 'red')
+                self.wait_for_enter()
+
+    def _set_service_override(self) -> None:
+        """Pick a variable from the whitelist and enter a new value."""
+        self.print_header("Set/Edit Override")
+
+        var_names = list(CUSTOMIZABLE_VARS.keys())
+        overrides = self._get_service_overrides()
+
+        for idx, var in enumerate(var_names, 1):
+            info = CUSTOMIZABLE_VARS[var]
+            current = overrides.get(var)
+            line = f"  {idx}) {info['description']} ({var})"
+            if current is not None:
+                line += f"  [current: {current}]"
+            else:
+                line += f"  [default: {info['default']}]"
+            self.print_colored(line)
+        print()
+
+        pick = self.get_input(f"Select variable (1-{len(var_names)}, 0=cancel)", "0")
+        if pick == '0':
+            return
+        try:
+            idx = int(pick) - 1
+            if idx < 0 or idx >= len(var_names):
+                raise ValueError
+        except ValueError:
+            self.print_colored("Invalid selection.", 'red')
+            self.wait_for_enter()
+            return
+
+        var = var_names[idx]
+        info = CUSTOMIZABLE_VARS[var]
+
+        self.print_colored(f"\nVariable : {var}", 'cyan')
+        self.print_colored(f"Desc     : {info['description']}", 'white')
+        self.print_colored(f"Example  : {info['example']}", 'white')
+        current = overrides.get(var)
+        if current is not None:
+            self.print_colored(f"Current  : {current}", 'green')
+        print()
+
+        value = self.get_input("Enter new value (empty=cancel)")
+        if not value:
+            self.print_colored("Cancelled.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        overrides[var] = value
+        self._save_service_overrides(overrides)
+        self.print_colored(f"✅ Override saved: {var} = {value}", 'green')
+        self.wait_for_enter()
+
+    def _remove_service_override(self) -> None:
+        """Remove a single override."""
+        overrides = self._get_service_overrides()
+        if not overrides:
+            self.print_colored("No overrides to remove.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        self.print_header("Remove Override")
+
+        keys = list(overrides.keys())
+        for idx, var in enumerate(keys, 1):
+            desc = CUSTOMIZABLE_VARS.get(var, {}).get('description', var)
+            self.print_colored(f"  {idx}) {desc} ({var}) = {overrides[var]}")
+        print()
+
+        pick = self.get_input(f"Select override to remove (1-{len(keys)}, 0=cancel)", "0")
+        if pick == '0':
+            return
+        try:
+            idx = int(pick) - 1
+            if idx < 0 or idx >= len(keys):
+                raise ValueError
+        except ValueError:
+            self.print_colored("Invalid selection.", 'red')
+            self.wait_for_enter()
+            return
+
+        var = keys[idx]
+        del overrides[var]
+        self._save_service_overrides(overrides)
+        self.print_colored(f"✅ Override removed: {var}", 'green')
+        self.wait_for_enter()
+
+    def _clear_all_overrides(self) -> None:
+        """Clear all overrides after confirmation."""
+        overrides = self._get_service_overrides()
+        if not overrides:
+            self.print_colored("No overrides to clear.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        self.print_colored(f"This will remove {len(overrides)} override(s):", 'yellow')
+        for var, val in overrides.items():
+            self.print_colored(f"   {var} = {val}", 'white')
+        print()
+
+        confirm = self.get_input("Type 'yes' to confirm", "")
+        if confirm.lower() != 'yes':
+            self.print_colored("Cancelled.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        self._save_service_overrides({})
+        self.print_colored("✅ All overrides cleared.", 'green')
+        self.wait_for_enter()
+
+    def _apply_service_overrides(self) -> None:
+        """Select nodes, build ansible command with --extra-vars, run customize_service.yml."""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured!", 'red')
+            self.wait_for_enter()
+            return
+
+        self.load_configuration()
+        all_hosts = _get_gpu_hosts(self.inventory)
+        if not all_hosts:
+            self.print_colored("No hosts found in inventory.", 'red')
+            self.wait_for_enter()
+            return
+
+        overrides = self._get_service_overrides()
+
+        self.print_header("Apply Service Overrides")
+        if overrides:
+            self.print_colored("📋 Overrides to apply:", 'cyan', bold=True)
+            for var, val in overrides.items():
+                desc = CUSTOMIZABLE_VARS.get(var, {}).get('description', var)
+                self.print_colored(f"   {desc}: {val}", 'green')
+        else:
+            self.print_colored("No overrides set — defaults from group_vars will be applied.", 'white')
+        print()
+
+        selected_host_names = self.select_hosts(all_hosts, "apply service overrides", preselect_mode='all')
+        if not selected_host_names:
+            self.print_colored("Cancelled — no hosts selected.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        self.print_colored(f"\n🖥️  Target nodes ({len(selected_host_names)}):", 'cyan', bold=True)
+        for name in selected_host_names:
+            config = all_hosts[name]
+            ip = config.get('ansible_host', '?')
+            self.print_colored(f"   • {name}: {ip}", 'white')
+
+        if self.get_input("\nProceed? (y/n)", "y").lower() != 'y':
+            self.print_colored("Cancelled.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        playbook_path = self.config_dir / 'playbooks/customize_service.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"Playbook not found: {playbook_path}", 'red')
+            self.wait_for_enter()
+            return
+
+        host_limit = ','.join(selected_host_names)
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} --limit {host_limit} {playbook_path}")
+
+        if overrides:
+            extra = json.dumps(overrides)
+            cmd += f" --extra-vars '{extra}'"
+
+        self.print_colored("\nApplying service customization...", 'cyan')
+        success, _ = self.run_command(cmd, show_output=True)
+
+        if success:
+            self.print_colored(f"\n✅ Service customization applied on {len(selected_host_names)} node(s).", 'green')
+            for host_name in selected_host_names:
+                self._update_node_status(host_name, 'running')
+        else:
+            self.print_colored("\n❌ Customization encountered errors. Check the output above.", 'red')
+            for host_name in selected_host_names:
+                self._update_node_status(host_name, 'error')
+
+        self.wait_for_enter()
+
     def advanced_menu(self) -> None:
         """Show advanced menu with utilities and expert tools"""
         while True:
@@ -4045,6 +4361,9 @@ class R1Setup:
             self.print_colored("\U0001f510 SECURITY TOOLS", 'red', bold=True)
             self.print_colored("  4) Import Private Keys   - Collect private keys from all nodes")
             print()
+            self.print_colored("⚙️  CUSTOMIZATION", 'cyan', bold=True)
+            self.print_colored("  5) Customize Service     - Override service template variables")
+            print()
             self.print_colored("  0) Back to Main Menu")
             print()
 
@@ -4052,7 +4371,7 @@ class R1Setup:
 
             if choice == '0':
                 break
-            elif choice in ('1', '2', '3', '4') and not has_config:
+            elif choice in ('1', '2', '3', '4', '5') and not has_config:
                 self.print_colored("No nodes configured. Please configure nodes first (Main Menu \u2192 1).", 'red')
                 self.wait_for_enter()
                 continue
@@ -4064,8 +4383,10 @@ class R1Setup:
                 self.write_logs_to_file()
             elif choice == '4':
                 self.import_nodes_private_keys()
+            elif choice == '5':
+                self.customize_service()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-5.", 'red')
                 self.wait_for_enter()
 
 

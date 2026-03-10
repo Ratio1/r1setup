@@ -1,0 +1,80 @@
+---
+- name: Customize Edge Node Service
+  hosts: gpu_nodes
+  become: true
+  gather_facts: true
+  vars:
+    ansible_roles_path: "{{ playbook_dir }}/../roles"
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+    - ../group_vars/mnl.yml
+    - ../group_vars/variables.yml
+  tasks:
+    - name: Check if service exists
+      ansible.builtin.systemd:
+        name: "{{ edge_node_service_name }}"
+      register: service_exists
+      ignore_errors: true
+
+    - name: Fail if service doesn't exist
+      fail:
+        msg: |
+          Service {{ edge_node_service_name }} not found on {{ inventory_hostname }}.
+          Please run a full deployment first before customizing the service.
+      when: service_exists is failed
+
+    - name: Check for nvidia-smi (needed by service template GPU conditional)
+      ansible.builtin.command:
+        cmd: nvidia-smi
+      register: nvidia_smi_check1
+      changed_when: false
+      failed_when: false
+      ignore_errors: true
+
+    - name: Re-template edge_node.service
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/setup/templates/edge_node.service.j2"
+        dest: "/etc/systemd/system/{{ edge_node_service_name }}.service"
+        mode: '0644'
+        force: true
+
+    - name: Reload systemd daemon
+      ansible.builtin.command:
+        cmd: systemctl daemon-reload
+      become: true
+
+    - name: Restart the Edge Node service
+      ansible.builtin.systemd:
+        name: "{{ edge_node_service_name }}"
+        state: restarted
+
+    - name: Wait for service to be active
+      ansible.builtin.systemd:
+        name: "{{ edge_node_service_name }}"
+      register: service_status
+      until: service_status.status.ActiveState == "active"
+      retries: 30
+      delay: 2
+
+    - name: Verify Docker container is running
+      ansible.builtin.shell: |
+        docker ps --filter "name={{ mnl_docker_container_name }}" --format "{{ '{{.Names}}' }}\t{{ '{{.Status}}' }}"
+      register: container_check
+      ignore_errors: true
+
+    - name: Display customization result
+      debug:
+        msg: |
+          ✅ Service customized on {{ inventory_hostname }}
+          Service: {{ edge_node_service_name }} — {{ service_status.status.ActiveState | default('unknown') }}
+          Container: {{ 'Running' if (container_check is succeeded and mnl_docker_container_name in container_check.stdout and 'Up' in container_check.stdout) else 'Not running properly' }}
+      when: service_status.status.ActiveState == "active"
+
+    - name: Display customization failure warning
+      debug:
+        msg: |
+          ⚠️  Service may not have restarted properly on {{ inventory_hostname }}
+          Current status: {{ service_status.status.ActiveState | default('unknown') }}
+          Check logs with: journalctl -u {{ edge_node_service_name }} -n 50 --no-pager
+      when: service_status.status.ActiveState != "active"
