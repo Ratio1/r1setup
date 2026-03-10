@@ -15,9 +15,6 @@ ExecStartPre=-/usr/bin/docker rm {{ mnl_docker_container_name }}
 # Pull the latest image
 ExecStartPre=-/usr/bin/docker pull {{ mnl_docker_image_url }}
 
-# Remove old unused images to prevent disk bloat
-ExecStartPre=-/usr/bin/docker image prune -af
-
 # Start the container
 ExecStart=/bin/sh -c '/usr/bin/docker run \
     {% if (skip_gpu is not defined or not skip_gpu) and nvidia_smi_check1 is defined and nvidia_smi_check1.rc is defined and nvidia_smi_check1.rc == 0 %}{{ mnl_docker_gpus }} {% endif %} \
@@ -30,6 +27,8 @@ ExecStart=/bin/sh -c '/usr/bin/docker run \
     -v {{ mnl_docker_volume_path }}:{{ mnl_docker_persistent_folder }} \
     {{ mnl_docker_image_url }}; \
     echo $? > /tmp/ee-node.exit'
+
+ExecStartPost=-/bin/sh -c 'sleep 30; /usr/bin/docker image prune -a -f --filter "until=120h"'
 
 # Stop the container
 ExecStop=/usr/bin/docker stop -t 20 {{ mnl_docker_container_name }}
