@@ -115,6 +115,7 @@ SSH_AUTH_MODE_VERIFICATION_FAILED = 'verification_failed'
 SSH_KEY_MANAGEMENT_REQUIRED_PLAYBOOKS = (
     'playbooks/ssh_install_key.yml',
     'playbooks/ssh_add_extra_keys.yml',
+    'playbooks/ssh_disable_password_auth.yml',
 )
 
 SSH_KEY_MANAGEMENT_REQUIRED_TOOLS = {
@@ -3397,7 +3398,7 @@ class SSHKeyManager:
         return len(missing) == 0, missing
 
     def check_feature_capabilities(self) -> Tuple[bool, List[str]]:
-        """Check local tools and required playbooks for Phase 1 SSH key management."""
+        """Check local tools and required playbooks for SSH key management."""
         ok, missing = self.check_ssh_key_tooling()
         issues = list(missing)
 
@@ -3668,11 +3669,54 @@ class SSHKeyManager:
                 filtered[host_name] = config
         return filtered
 
+    def _get_hosts_ready_for_password_disable(self) -> Dict[str, Dict[str, Any]]:
+        """Return hosts that are safe candidates for disabling password authentication."""
+        candidates = self._get_hosts_by_auth_mode([SSH_AUTH_MODE_KEY_VERIFIED])
+        ready = {}
+        for host_name, config in candidates.items():
+            fingerprint = config.get('r1setup_ssh_primary_key_fingerprint')
+            verified_fingerprint = config.get('r1setup_ssh_last_verified_fingerprint')
+            requires_revalidation = config.get('r1setup_ssh_requires_revalidation', False)
+            if not requires_revalidation and fingerprint and fingerprint == verified_fingerprint:
+                ready[host_name] = config
+        return ready
+
     def _set_host_ssh_metadata(self, host_name: str, updates: Dict[str, Any]) -> None:
         """Update in-memory SSH metadata for a host."""
         hosts = _get_gpu_hosts(self.app.inventory)
         if host_name in hosts:
             hosts[host_name].update(updates)
+
+    def _run_playbook_for_hosts(
+        self,
+        playbook_relative_path: str,
+        selected_hosts: List[str],
+        extra_vars: Optional[Dict[str, Any]] = None,
+        show_output: bool = True,
+    ) -> Tuple[bool, str]:
+        """Run an SSH management playbook for the selected hosts."""
+        playbook_path = self.app.config_dir / playbook_relative_path
+        host_limit = ','.join(selected_hosts)
+        extra_vars_path = None
+        try:
+            cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+                   f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+                   f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+                   f"ansible-playbook -i {self.app.config_file} --limit {host_limit} {playbook_path}")
+
+            if extra_vars:
+                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tmp:
+                    json.dump(extra_vars, tmp)
+                    extra_vars_path = tmp.name
+                cmd = f"{cmd} --extra-vars @{extra_vars_path}"
+
+            return self.app.run_command(cmd, show_output=show_output)
+        finally:
+            if extra_vars_path:
+                try:
+                    os.unlink(extra_vars_path)
+                except OSError:
+                    pass
 
     def _apply_successful_key_migration(self, host_name: str, private_key_path: str, fingerprint: str) -> None:
         """Apply in-memory inventory changes after successful SSH verification."""
@@ -3703,6 +3747,25 @@ class SSHKeyManager:
             updates['r1setup_ssh_primary_key_fingerprint'] = fingerprint
         self._set_host_ssh_metadata(host_name, updates)
 
+    def _apply_successful_password_hardening(self, host_name: str) -> None:
+        """Record that password authentication was disabled successfully."""
+        self._set_host_ssh_metadata(host_name, {
+            'r1setup_ssh_auth_mode': SSH_AUTH_MODE_PASSWORD_DISABLED,
+            'r1setup_password_auth_disabled': True,
+            'r1setup_ssh_hardening_applied_at': datetime.now().isoformat(),
+            'r1setup_ssh_last_verification_status': 'success',
+            'r1setup_ssh_requires_revalidation': False,
+        })
+
+    def _apply_failed_password_hardening(self, host_name: str) -> None:
+        """Record that SSH hardening failed and the host needs revalidation."""
+        self._set_host_ssh_metadata(host_name, {
+            'r1setup_ssh_auth_mode': SSH_AUTH_MODE_VERIFICATION_FAILED,
+            'r1setup_password_auth_disabled': False,
+            'r1setup_ssh_last_verification_status': 'failed',
+            'r1setup_ssh_requires_revalidation': True,
+        })
+
     def ssh_key_management_menu(self) -> None:
         """Show Phase 1 SSH key management menu."""
         while True:
@@ -3724,7 +3787,8 @@ class SSHKeyManager:
             self.app.print_colored("  1) Install Key / Migrate Password Hosts", 'white')
             self.app.print_colored("  2) Add Extra Public Key", 'white')
             self.app.print_colored("  3) Validate Key Authentication", 'white')
-            self.app.print_colored("  4) Show SSH Auth Status", 'white')
+            self.app.print_colored("  4) Disable Password Authentication", 'white')
+            self.app.print_colored("  5) Show SSH Auth Status", 'white')
             self.app.print_colored("  0) Back", 'white')
             print()
 
@@ -3738,6 +3802,8 @@ class SSHKeyManager:
             elif choice == '3':
                 self.validate_key_authentication()
             elif choice == '4':
+                self.disable_password_authentication()
+            elif choice == '5':
                 self.show_ssh_auth_status()
             else:
                 self.app.print_colored("Invalid option.", 'red')
@@ -3769,29 +3835,13 @@ class SSHKeyManager:
         if not keypair:
             return
 
-        playbook_path = self.app.config_dir / 'playbooks/ssh_install_key.yml'
-        host_limit = ','.join(selected_hosts)
-        extra_vars_path = None
-        success = False
-        try:
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tmp:
-                json.dump({'ssh_target_public_key': keypair['public_key']}, tmp)
-                extra_vars_path = tmp.name
-
-            cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-                   f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-                   f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-                   f"ansible-playbook -i {self.app.config_file} --limit {host_limit} {playbook_path} "
-                   f"--extra-vars @{extra_vars_path}")
-
-            self.app.print_colored("\nInstalling public key on selected hosts...", 'cyan')
-            success, _ = self.app.run_command(cmd, show_output=True)
-        finally:
-            if extra_vars_path:
-                try:
-                    os.unlink(extra_vars_path)
-                except OSError:
-                    pass
+        self.app.print_colored("\nInstalling public key on selected hosts...", 'cyan')
+        success, _ = self._run_playbook_for_hosts(
+            'playbooks/ssh_install_key.yml',
+            selected_hosts,
+            {'ssh_target_public_key': keypair['public_key']},
+            show_output=True,
+        )
         if not success:
             self.app.print_colored("Public key installation failed. Inventory was not changed.", 'red')
             self.app.wait_for_enter()
@@ -3856,29 +3906,13 @@ class SSHKeyManager:
             return
 
         label = self.app.get_input("Label for this key", Path(validation['path']).name)
-        playbook_path = self.app.config_dir / 'playbooks/ssh_add_extra_keys.yml'
-        host_limit = ','.join(selected_hosts)
-        extra_vars_path = None
-        success = False
-        try:
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tmp:
-                json.dump({'ssh_extra_public_keys': [validation['content']]}, tmp)
-                extra_vars_path = tmp.name
-
-            cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-                   f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-                   f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-                   f"ansible-playbook -i {self.app.config_file} --limit {host_limit} {playbook_path} "
-                   f"--extra-vars @{extra_vars_path}")
-
-            self.app.print_colored("Installing extra public key on selected hosts...", 'cyan')
-            success, _ = self.app.run_command(cmd, show_output=True)
-        finally:
-            if extra_vars_path:
-                try:
-                    os.unlink(extra_vars_path)
-                except OSError:
-                    pass
+        self.app.print_colored("Installing extra public key on selected hosts...", 'cyan')
+        success, _ = self._run_playbook_for_hosts(
+            'playbooks/ssh_add_extra_keys.yml',
+            selected_hosts,
+            {'ssh_extra_public_keys': [validation['content']]},
+            show_output=True,
+        )
         if not success:
             self.app.print_colored("Extra public key installation failed.", 'red')
             self.app.wait_for_enter()
@@ -3965,6 +3999,100 @@ class SSHKeyManager:
                 self.app.print_colored(f"   • {host_name}: {message}", 'yellow')
         self.app.wait_for_enter()
 
+    def disable_password_authentication(self) -> None:
+        """Disable SSH password authentication on hosts with verified key-based access."""
+        self.app.load_configuration()
+        candidate_hosts = self._get_hosts_ready_for_password_disable()
+        if not candidate_hosts:
+            self.app.print_colored("No hosts are ready for password-auth disable. Validate key authentication first.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_header("Disable Password Authentication")
+        self.app.print_colored("⚠️  WARNING", 'red', bold=True)
+        self.app.print_colored("This changes the remote SSH daemon policy for the selected machine(s), not just r1setup.", 'yellow')
+        self.app.print_colored("Only proceed if key-based SSH login is already verified and you understand the lockout risk.", 'yellow')
+        self.app.print_colored("A timed remote rollback will be scheduled automatically in case controller-side verification fails.", 'yellow')
+        print()
+
+        selected_hosts = self.app.select_hosts(candidate_hosts, "disable password authentication", preselect_mode='none')
+        if not selected_hosts:
+            self.app.print_colored("No hosts selected.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        confirm = self.app.get_input("Type 'disable' to continue", "")
+        if confirm.strip().lower() != 'disable':
+            self.app.print_colored("SSH hardening cancelled.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_colored("Applying SSH hardening on selected hosts...", 'cyan')
+        success, _ = self._run_playbook_for_hosts(
+            'playbooks/ssh_disable_password_auth.yml',
+            selected_hosts,
+            {
+                'ssh_password_auth_action': 'apply',
+                'ssh_hardening_rollback_delay': max(self.app.connection_timeout, 90),
+            },
+            show_output=True,
+        )
+        if not success:
+            self.app.print_colored("SSH hardening playbook failed. Existing host metadata was not promoted.", 'red')
+            self.app.wait_for_enter()
+            return
+
+        confirmed_hosts = []
+        rollback_pending = []
+        confirm_failures = []
+
+        for host_name in selected_hosts:
+            host_config = candidate_hosts[host_name]
+            key_path = host_config.get('ansible_ssh_private_key_file') or host_config.get('r1setup_ssh_primary_key_path')
+            ok, message = self._verify_ssh_login(host_config, key_path) if key_path else (False, "No SSH private key path configured")
+            if ok:
+                confirm_ok, confirm_output = self._run_playbook_for_hosts(
+                    'playbooks/ssh_disable_password_auth.yml',
+                    [host_name],
+                    {'ssh_password_auth_action': 'confirm'},
+                    show_output=True,
+                )
+                if confirm_ok:
+                    self._apply_successful_password_hardening(host_name)
+                    confirmed_hosts.append(host_name)
+                else:
+                    self._apply_failed_password_hardening(host_name)
+                    confirm_failures.append((host_name, confirm_output or "Unable to confirm SSH hardening"))
+            else:
+                self._apply_failed_password_hardening(host_name)
+                rollback_ok, rollback_output = self._run_playbook_for_hosts(
+                    'playbooks/ssh_disable_password_auth.yml',
+                    [host_name],
+                    {'ssh_password_auth_action': 'rollback'},
+                    show_output=True,
+                )
+                rollback_message = message
+                if not rollback_ok:
+                    rollback_message = f"{message} | rollback attempt failed: {rollback_output or 'host unreachable'}"
+                rollback_pending.append((host_name, rollback_message))
+
+        self.app._save_configuration()
+
+        self.app.print_section("Hardening Summary")
+        if confirmed_hosts:
+            self.app.print_colored(f"✅ Password authentication disabled: {', '.join(confirmed_hosts)}", 'green')
+        if confirm_failures:
+            self.app.print_colored("⚠️  Hardening applied, but confirmation failed for:", 'yellow')
+            for host_name, message in confirm_failures:
+                self.app.print_colored(f"   • {host_name}: {message}", 'yellow')
+        if rollback_pending:
+            self.app.print_colored("❌ Verification failed; rollback was attempted or left scheduled for:", 'red')
+            for host_name, message in rollback_pending:
+                self.app.print_colored(f"   • {host_name}: {message}", 'yellow')
+            self.app.print_colored("If a host is temporarily unreachable, the remote rollback timer should restore SSH access automatically.", 'yellow')
+
+        self.app.wait_for_enter()
+
     def show_ssh_auth_status(self) -> None:
         """Display SSH auth metadata for configured hosts."""
         self.app.load_configuration()
@@ -3981,6 +4109,8 @@ class SSHKeyManager:
             verified_at = host_config.get('r1setup_ssh_key_auth_verified_at') or 'never'
             requires_revalidation = host_config.get('r1setup_ssh_requires_revalidation', False)
             fingerprint = host_config.get('r1setup_ssh_primary_key_fingerprint') or 'unknown'
+            password_auth_disabled = host_config.get('r1setup_password_auth_disabled', False)
+            hardening_applied_at = host_config.get('r1setup_ssh_hardening_applied_at') or 'never'
             auth_type = "Password" if 'ansible_ssh_pass' in host_config else "SSH Key"
             self.app.print_colored(f"  • {host_name}", 'cyan', bold=True)
             self.app.print_colored(f"     Current inventory auth: {auth_type}", 'white')
@@ -3989,6 +4119,8 @@ class SSHKeyManager:
             self.app.print_colored(f"     Key fingerprint: {fingerprint}", 'white')
             self.app.print_colored(f"     Last verified: {verified_at}", 'white')
             self.app.print_colored(f"     Requires revalidation: {'yes' if requires_revalidation else 'no'}", 'white')
+            self.app.print_colored(f"     Password auth disabled: {'yes' if password_auth_disabled else 'no'}", 'white')
+            self.app.print_colored(f"     Hardening applied at: {hardening_applied_at}", 'white')
             managed_keys = host_config.get('r1setup_managed_public_keys', [])
             if managed_keys:
                 self.app.print_colored(f"     Extra managed keys: {len(managed_keys)}", 'white')
@@ -4444,6 +4576,9 @@ class R1Setup:
 
     def validate_key_authentication(self):
         return self.ssh_key_manager.validate_key_authentication()
+
+    def disable_password_authentication(self):
+        return self.ssh_key_manager.disable_password_authentication()
 
     def show_ssh_auth_status(self):
         return self.ssh_key_manager.show_ssh_auth_status()

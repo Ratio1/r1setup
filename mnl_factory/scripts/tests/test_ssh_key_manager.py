@@ -221,6 +221,62 @@ class TestSSHKeyManagerInventoryUpdates(unittest.TestCase):
         self.assertEqual(host["r1setup_ssh_last_verification_status"], "failed")
         self.assertTrue(host["r1setup_ssh_requires_revalidation"])
 
+    def test_get_hosts_ready_for_password_disable_filters_on_verified_fingerprint(self):
+        self.app.inventory = make_inventory(
+            {
+                "ready-node": {
+                    "ansible_host": "10.0.0.21",
+                    "ansible_user": "root",
+                    "ansible_ssh_private_key_file": "/tmp/key1",
+                    "r1setup_ssh_auth_mode": r1setup.SSH_AUTH_MODE_KEY_VERIFIED,
+                    "r1setup_ssh_primary_key_fingerprint": "SHA256:ready",
+                    "r1setup_ssh_last_verified_fingerprint": "SHA256:ready",
+                    "r1setup_ssh_requires_revalidation": False,
+                },
+                "stale-node": {
+                    "ansible_host": "10.0.0.22",
+                    "ansible_user": "root",
+                    "ansible_ssh_private_key_file": "/tmp/key2",
+                    "r1setup_ssh_auth_mode": r1setup.SSH_AUTH_MODE_KEY_VERIFIED,
+                    "r1setup_ssh_primary_key_fingerprint": "SHA256:new",
+                    "r1setup_ssh_last_verified_fingerprint": "SHA256:old",
+                    "r1setup_ssh_requires_revalidation": False,
+                },
+                "needs-revalidation": {
+                    "ansible_host": "10.0.0.23",
+                    "ansible_user": "root",
+                    "ansible_ssh_private_key_file": "/tmp/key3",
+                    "r1setup_ssh_auth_mode": r1setup.SSH_AUTH_MODE_KEY_VERIFIED,
+                    "r1setup_ssh_primary_key_fingerprint": "SHA256:same",
+                    "r1setup_ssh_last_verified_fingerprint": "SHA256:same",
+                    "r1setup_ssh_requires_revalidation": True,
+                },
+            }
+        )
+
+        ready = self.manager._get_hosts_ready_for_password_disable()
+
+        self.assertEqual(list(ready.keys()), ["ready-node"])
+
+    def test_apply_successful_password_hardening_sets_password_disabled_state(self):
+        self.manager._apply_successful_password_hardening("node-1")
+
+        host = self.app.inventory["all"]["children"]["gpu_nodes"]["hosts"]["node-1"]
+        self.assertEqual(host["r1setup_ssh_auth_mode"], r1setup.SSH_AUTH_MODE_PASSWORD_DISABLED)
+        self.assertTrue(host["r1setup_password_auth_disabled"])
+        self.assertEqual(host["r1setup_ssh_last_verification_status"], "success")
+        self.assertFalse(host["r1setup_ssh_requires_revalidation"])
+        self.assertIn("r1setup_ssh_hardening_applied_at", host)
+
+    def test_apply_failed_password_hardening_marks_host_for_revalidation(self):
+        self.manager._apply_failed_password_hardening("node-1")
+
+        host = self.app.inventory["all"]["children"]["gpu_nodes"]["hosts"]["node-1"]
+        self.assertEqual(host["r1setup_ssh_auth_mode"], r1setup.SSH_AUTH_MODE_VERIFICATION_FAILED)
+        self.assertFalse(host["r1setup_password_auth_disabled"])
+        self.assertEqual(host["r1setup_ssh_last_verification_status"], "failed")
+        self.assertTrue(host["r1setup_ssh_requires_revalidation"])
+
 
 if __name__ == "__main__":
     unittest.main()
