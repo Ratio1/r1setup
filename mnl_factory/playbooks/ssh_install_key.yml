@@ -1,0 +1,19 @@
+---
+- name: Install SSH public key on selected nodes
+  hosts: gpu_nodes
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Ensure SSH public key is provided
+      ansible.builtin.assert:
+        that:
+          - ssh_target_public_key is defined
+          - ssh_target_public_key | trim | length > 0
+        fail_msg: "ssh_target_public_key must be provided"
+
+    - name: Install SSH public key for the remote user
+      ansible.posix.authorized_key:
+        user: "{{ ansible_user }}"
+        key: "{{ ssh_target_public_key }}"
+        state: present
+        manage_dir: true

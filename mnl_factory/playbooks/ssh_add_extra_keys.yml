@@ -1,0 +1,20 @@
+---
+- name: Install extra SSH public keys on selected nodes
+  hosts: gpu_nodes
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Ensure extra public keys are provided
+      ansible.builtin.assert:
+        that:
+          - ssh_extra_public_keys is defined
+          - ssh_extra_public_keys | length > 0
+        fail_msg: "ssh_extra_public_keys must be provided"
+
+    - name: Install extra SSH public keys for the remote user
+      ansible.posix.authorized_key:
+        user: "{{ ansible_user }}"
+        key: "{{ item }}"
+        state: present
+        manage_dir: true
+      loop: "{{ ssh_extra_public_keys }}"

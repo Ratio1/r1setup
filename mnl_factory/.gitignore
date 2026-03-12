@@ -40,4 +40,6 @@ vault.yml
 # Local configuration
 inventory/local.yml
 group_vars/local.yml
-host_vars/local.yml 
+host_vars/local.yml
+
+.old

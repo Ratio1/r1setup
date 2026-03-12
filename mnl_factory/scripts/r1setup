@@ -104,6 +104,25 @@ CUSTOMIZABLE_VARS = {
     },
 }
 
+SSH_SCHEMA_VERSION = 2
+SSH_AUTH_MODE_PASSWORD_ONLY = 'password_only'
+SSH_AUTH_MODE_KEY_CONFIGURED_LEGACY = 'key_configured_legacy'
+SSH_AUTH_MODE_KEY_INSTALLED_UNVERIFIED = 'key_installed_unverified'
+SSH_AUTH_MODE_KEY_VERIFIED = 'key_verified'
+SSH_AUTH_MODE_PASSWORD_DISABLED = 'password_disabled'
+SSH_AUTH_MODE_VERIFICATION_FAILED = 'verification_failed'
+
+SSH_KEY_MANAGEMENT_REQUIRED_PLAYBOOKS = (
+    'playbooks/ssh_install_key.yml',
+    'playbooks/ssh_add_extra_keys.yml',
+)
+
+SSH_KEY_MANAGEMENT_REQUIRED_TOOLS = {
+    'ssh': 'OpenSSH client',
+    'ssh-keygen': 'OpenSSH key management',
+    'openssl': 'OpenSSL',
+}
+
 
 def _get_gpu_hosts(inventory: dict) -> dict:
     """Extract gpu_nodes hosts from an inventory dict."""
@@ -3286,6 +3305,698 @@ class DeploymentService:
 
 
 
+class SSHKeyManager:
+    """Handles SSH key management workflows and metadata migration."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def _get_default_host_metadata(self, host_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Return default SSH metadata for a host based on current auth fields."""
+        if 'ansible_ssh_pass' in host_config:
+            mode = SSH_AUTH_MODE_PASSWORD_ONLY
+            requires_revalidation = False
+        elif 'ansible_ssh_private_key_file' in host_config:
+            mode = SSH_AUTH_MODE_KEY_CONFIGURED_LEGACY
+            requires_revalidation = True
+        else:
+            mode = SSH_AUTH_MODE_VERIFICATION_FAILED
+            requires_revalidation = True
+
+        return {
+            'r1setup_ssh_auth_mode': mode,
+            'r1setup_ssh_primary_key_fingerprint': host_config.get('r1setup_ssh_primary_key_fingerprint'),
+            'r1setup_ssh_primary_key_path': host_config.get('ansible_ssh_private_key_file'),
+            'r1setup_ssh_key_auth_verified_at': host_config.get('r1setup_ssh_key_auth_verified_at'),
+            'r1setup_ssh_last_verified_fingerprint': host_config.get('r1setup_ssh_last_verified_fingerprint'),
+            'r1setup_ssh_last_verification_status': host_config.get('r1setup_ssh_last_verification_status', 'not_checked'),
+            'r1setup_password_auth_disabled': host_config.get('r1setup_password_auth_disabled', False),
+            'r1setup_ssh_hardening_applied_at': host_config.get('r1setup_ssh_hardening_applied_at'),
+            'r1setup_ssh_requires_revalidation': host_config.get('r1setup_ssh_requires_revalidation', requires_revalidation),
+            'r1setup_managed_public_keys': host_config.get('r1setup_managed_public_keys', []),
+        }
+
+    def _migrate_host_metadata(self, host_config: Dict[str, Any]) -> bool:
+        """Populate missing SSH metadata for a host."""
+        defaults = self._get_default_host_metadata(host_config)
+        changed = False
+        for key, value in defaults.items():
+            if key not in host_config:
+                host_config[key] = value
+                changed = True
+        return changed
+
+    def migrate_legacy_ssh_metadata(self) -> None:
+        """Add SSH metadata to saved configurations without changing active auth."""
+        migrated_configs = 0
+        migrated_hosts = 0
+
+        for config_path in self.app.configs_dir.glob("*.yml"):
+            try:
+                with open(config_path) as f:
+                    config_data = yaml.safe_load(f) or {}
+            except Exception as e:
+                self.app.print_debug(f"Skipping SSH metadata migration for {config_path}: {e}")
+                continue
+
+            if not config_data or 'all' not in config_data:
+                continue
+
+            all_section = config_data.setdefault('all', {})
+            all_vars = all_section.setdefault('vars', {})
+            children = all_section.setdefault('children', {})
+            gpu_nodes = children.setdefault('gpu_nodes', {})
+            hosts = gpu_nodes.setdefault('hosts', {})
+
+            changed = False
+            if all_vars.get('r1setup_schema_version') != SSH_SCHEMA_VERSION:
+                all_vars['r1setup_schema_version'] = SSH_SCHEMA_VERSION
+                changed = True
+
+            for host_config in hosts.values():
+                if self._migrate_host_metadata(host_config):
+                    migrated_hosts += 1
+                    changed = True
+
+            if changed:
+                with open(config_path, 'w') as f:
+                    yaml.safe_dump(config_data, f, default_flow_style=False)
+                os.chmod(config_path, 0o600)
+                migrated_configs += 1
+
+        if migrated_configs:
+            self.app.print_colored("SSH key management metadata initialized for existing configurations.", 'cyan')
+            self.app.print_colored(f"Updated {migrated_hosts} host definition(s) across {migrated_configs} configuration(s).", 'cyan')
+
+    def check_ssh_key_tooling(self) -> Tuple[bool, List[str]]:
+        """Check whether required local SSH tooling is available."""
+        missing = []
+        for cmd, description in SSH_KEY_MANAGEMENT_REQUIRED_TOOLS.items():
+            if shutil.which(cmd) is None:
+                missing.append(f"{cmd} ({description})")
+        return len(missing) == 0, missing
+
+    def check_feature_capabilities(self) -> Tuple[bool, List[str]]:
+        """Check local tools and required playbooks for Phase 1 SSH key management."""
+        ok, missing = self.check_ssh_key_tooling()
+        issues = list(missing)
+
+        for rel_path in SSH_KEY_MANAGEMENT_REQUIRED_PLAYBOOKS:
+            playbook_path = self.app.config_dir / rel_path
+            if not playbook_path.exists():
+                issues.append(f"missing playbook: {playbook_path}")
+
+        return ok and not any(item.startswith('missing playbook:') for item in issues), issues
+
+    def _show_feature_unavailable(self, issues: List[str]) -> None:
+        self.app.print_colored("SSH Key Management is unavailable.", 'red')
+        for issue in issues:
+            self.app.print_colored(f"  • {issue}", 'yellow')
+        self.app.print_colored("Ensure the latest collection is installed and required local tools are available.", 'yellow')
+        self.app.wait_for_enter()
+
+    @staticmethod
+    def _resolve_abs_path(path_value: str) -> Path:
+        """Resolve a local path to an absolute path."""
+        return Path(os.path.expanduser(path_value)).resolve()
+
+    def _validate_public_key_content(self, public_key: str) -> Dict[str, Any]:
+        """Validate public key material and extract a fingerprint."""
+        tmp_path = None
+        if not public_key or not public_key.strip():
+            return {'valid': False, 'error': 'Public key is empty'}
+
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp:
+                tmp.write(public_key.strip() + '\n')
+                tmp_path = tmp.name
+
+            result = subprocess.run(
+                ['ssh-keygen', '-l', '-f', tmp_path],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode != 0:
+                return {'valid': False, 'error': result.stderr.strip() or 'Invalid public key'}
+
+            fingerprint = result.stdout.strip().split()[1] if result.stdout.strip() else None
+            return {'valid': True, 'fingerprint': fingerprint}
+        except Exception as e:
+            return {'valid': False, 'error': str(e)}
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+    def _validate_public_key_file(self, public_key_path: str) -> Dict[str, Any]:
+        """Validate a public key file on disk."""
+        resolved = self._resolve_abs_path(public_key_path)
+        if not resolved.exists():
+            return {'valid': False, 'error': f"Public key file does not exist: {resolved}"}
+        if not resolved.is_file():
+            return {'valid': False, 'error': f"Public key path is not a file: {resolved}"}
+
+        try:
+            with open(resolved) as f:
+                content = f.read().strip()
+        except Exception as e:
+            return {'valid': False, 'error': str(e)}
+
+        result = self._validate_public_key_content(content)
+        result.update({'path': str(resolved), 'content': content})
+        return result
+
+    def _derive_public_key(self, private_key_path: str) -> Dict[str, Any]:
+        """Derive public key material from a private key using ssh-keygen."""
+        resolved = self._resolve_abs_path(private_key_path)
+        if not resolved.exists():
+            return {'valid': False, 'error': f"Private key file does not exist: {resolved}"}
+        if not resolved.is_file():
+            return {'valid': False, 'error': f"Private key path is not a file: {resolved}"}
+
+        try:
+            result = subprocess.run(
+                ['ssh-keygen', '-y', '-f', str(resolved)],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+        except Exception as e:
+            return {'valid': False, 'error': str(e)}
+
+        if result.returncode != 0:
+            return {'valid': False, 'error': result.stderr.strip() or 'Unable to derive public key from private key'}
+
+        public_key = result.stdout.strip()
+        validation = self._validate_public_key_content(public_key)
+        if not validation['valid']:
+            return validation
+
+        validation.update({'content': public_key, 'path': str(resolved)})
+        return validation
+
+    def _validate_keypair(self, private_key_path: str, public_key_path: str = '') -> Dict[str, Any]:
+        """Validate a migration keypair and ensure the public key matches when provided."""
+        private_path = self._resolve_abs_path(private_key_path)
+        if not private_path.exists():
+            return {'valid': False, 'error': f"Private key file does not exist: {private_path}"}
+        if not private_path.is_file():
+            return {'valid': False, 'error': f"Private key path is not a file: {private_path}"}
+        if not os.access(private_path, os.R_OK):
+            return {'valid': False, 'error': f"Private key file is not readable: {private_path}"}
+
+        derived = self._derive_public_key(str(private_path))
+        if not derived['valid']:
+            return {'valid': False, 'error': derived['error']}
+
+        resolved_public_path = ''
+        chosen_public = public_key_path.strip()
+        if chosen_public:
+            public_result = self._validate_public_key_file(chosen_public)
+            if not public_result['valid']:
+                return {'valid': False, 'error': public_result['error']}
+            resolved_public_path = public_result['path']
+            public_content = public_result['content']
+            fingerprint = public_result['fingerprint']
+        else:
+            sibling_public = Path(f"{private_path}.pub")
+            if sibling_public.exists():
+                public_result = self._validate_public_key_file(str(sibling_public))
+                if not public_result['valid']:
+                    return {'valid': False, 'error': public_result['error']}
+                resolved_public_path = public_result['path']
+                public_content = public_result['content']
+                fingerprint = public_result['fingerprint']
+            else:
+                public_content = derived['content']
+                fingerprint = derived['fingerprint']
+
+        if derived['content'].strip() != public_content.strip():
+            return {'valid': False, 'error': "Public key does not match the selected private key"}
+
+        return {
+            'valid': True,
+            'private_key_path': str(private_path),
+            'public_key_path': resolved_public_path,
+            'public_key': public_content,
+            'fingerprint': fingerprint,
+        }
+
+    def _generate_keypair(self) -> Optional[Dict[str, Any]]:
+        """Generate a new local ed25519 keypair."""
+        self.app.print_header("Generate SSH Keypair")
+        default_path = self._resolve_abs_path("~/.ssh/r1setup_ed25519")
+        path_value = self.app.get_input("Private key path", str(default_path))
+        private_key_path = self._resolve_abs_path(path_value)
+        public_key_path = Path(f"{private_key_path}.pub")
+
+        if private_key_path.exists() or public_key_path.exists():
+            if self.app.get_input("Key files already exist. Overwrite? (y/n)", "n").lower() != 'y':
+                self.app.print_colored("Key generation cancelled.", 'yellow')
+                return None
+
+        private_key_path.parent.mkdir(parents=True, exist_ok=True)
+        comment = self.app.get_input("Key comment", f"r1setup@{os.uname().nodename}")
+
+        try:
+            result = subprocess.run(
+                ['ssh-keygen', '-t', 'ed25519', '-f', str(private_key_path), '-N', '', '-C', comment],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+        except Exception as e:
+            self.app.print_colored(f"Key generation failed: {e}", 'red')
+            return None
+
+        if result.returncode != 0:
+            self.app.print_colored(result.stderr.strip() or "Key generation failed.", 'red')
+            return None
+
+        validation = self._validate_keypair(str(private_key_path), str(public_key_path))
+        if not validation['valid']:
+            self.app.print_colored(f"Generated key validation failed: {validation['error']}", 'red')
+            return None
+
+        self.app.print_colored("New SSH keypair generated.", 'green')
+        self.app.print_colored(f"  • Private key: {validation['private_key_path']}", 'cyan')
+        self.app.print_colored(f"  • Public key:  {validation['public_key_path']}", 'cyan')
+        self.app.print_colored("Keep the private key secure. r1setup will use this exact file for future authentication.", 'yellow')
+        return validation
+
+    def _select_migration_keypair(self) -> Optional[Dict[str, Any]]:
+        """Select or generate the keypair used for SSH migration."""
+        self.app.print_header("SSH Key Source")
+        self.app.print_colored("  1) Use existing SSH keypair", 'white')
+        self.app.print_colored("  2) Generate new SSH keypair", 'white')
+        self.app.print_colored("  0) Cancel", 'white')
+        print()
+
+        choice = self.app.get_input("Select option", "1")
+        if choice == '0':
+            return None
+        if choice == '2':
+            return self._generate_keypair()
+        if choice != '1':
+            self.app.print_colored("Invalid option.", 'red')
+            self.app.wait_for_enter()
+            return None
+
+        private_key_path = self.app.get_input("Private key path", "~/.ssh/id_ed25519")
+        public_key_path = self.app.get_input("Public key path (Enter for matching .pub)", "")
+        validation = self._validate_keypair(private_key_path, public_key_path)
+        if not validation['valid']:
+            self.app.print_colored(f"Key validation failed: {validation['error']}", 'red')
+            self.app.wait_for_enter()
+            return None
+
+        self.app.print_colored("SSH keypair validated.", 'green')
+        self.app.print_colored(f"  • Private key: {validation['private_key_path']}", 'cyan')
+        if validation['public_key_path']:
+            self.app.print_colored(f"  • Public key:  {validation['public_key_path']}", 'cyan')
+        else:
+            self.app.print_colored("  • Public key:  derived from selected private key", 'cyan')
+        self.app.print_colored(f"  • Fingerprint: {validation['fingerprint']}", 'cyan')
+        return validation
+
+    def _verify_ssh_login(self, host_config: Dict[str, Any], private_key_path: str) -> Tuple[bool, str]:
+        """Verify controller-side SSH access using a selected private key."""
+        host = host_config.get('ansible_host')
+        user = host_config.get('ansible_user')
+        port = host_config.get('ansible_port', 22)
+
+        if not host or not user:
+            return False, "Missing ansible_host or ansible_user"
+
+        cmd = [
+            'ssh',
+            '-i', private_key_path,
+            '-o', 'BatchMode=yes',
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=/dev/null',
+            '-o', f'ConnectTimeout={self.app.ssh_connect_timeout}',
+        ]
+        if port != 22:
+            cmd.extend(['-p', str(port)])
+        cmd.extend([f"{user}@{host}", 'true'])
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.app.connection_timeout)
+        except subprocess.TimeoutExpired:
+            return False, f"SSH verification timed out after {self.app.connection_timeout}s"
+        except Exception as e:
+            return False, str(e)
+
+        if result.returncode == 0:
+            return True, "SSH verification succeeded"
+
+        stderr = result.stderr.strip() or result.stdout.strip() or "SSH verification failed"
+        return False, stderr
+
+    def _get_hosts_by_auth_mode(self, modes: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Return hosts whose SSH auth mode matches one of the supplied modes."""
+        hosts = _get_gpu_hosts(self.app.inventory)
+        filtered = {}
+        for host_name, config in hosts.items():
+            mode = config.get('r1setup_ssh_auth_mode')
+            if not mode:
+                mode = self._get_default_host_metadata(config)['r1setup_ssh_auth_mode']
+            if mode in modes:
+                filtered[host_name] = config
+        return filtered
+
+    def _set_host_ssh_metadata(self, host_name: str, updates: Dict[str, Any]) -> None:
+        """Update in-memory SSH metadata for a host."""
+        hosts = _get_gpu_hosts(self.app.inventory)
+        if host_name in hosts:
+            hosts[host_name].update(updates)
+
+    def _apply_successful_key_migration(self, host_name: str, private_key_path: str, fingerprint: str) -> None:
+        """Apply in-memory inventory changes after successful SSH verification."""
+        hosts = _get_gpu_hosts(self.app.inventory)
+        if host_name not in hosts:
+            return
+
+        host = hosts[host_name]
+        host['ansible_ssh_private_key_file'] = private_key_path
+        host.pop('ansible_ssh_pass', None)
+        host['r1setup_ssh_auth_mode'] = SSH_AUTH_MODE_KEY_VERIFIED
+        host['r1setup_ssh_primary_key_path'] = private_key_path
+        host['r1setup_ssh_primary_key_fingerprint'] = fingerprint
+        host['r1setup_ssh_last_verified_fingerprint'] = fingerprint
+        host['r1setup_ssh_key_auth_verified_at'] = datetime.now().isoformat()
+        host['r1setup_ssh_last_verification_status'] = 'success'
+        host['r1setup_ssh_requires_revalidation'] = False
+
+    def _apply_failed_key_verification(self, host_name: str, private_key_path: str, fingerprint: str = None) -> None:
+        """Record a failed SSH key verification without switching active auth."""
+        updates = {
+            'r1setup_ssh_auth_mode': SSH_AUTH_MODE_VERIFICATION_FAILED,
+            'r1setup_ssh_primary_key_path': private_key_path,
+            'r1setup_ssh_last_verification_status': 'failed',
+            'r1setup_ssh_requires_revalidation': True,
+        }
+        if fingerprint:
+            updates['r1setup_ssh_primary_key_fingerprint'] = fingerprint
+        self._set_host_ssh_metadata(host_name, updates)
+
+    def ssh_key_management_menu(self) -> None:
+        """Show Phase 1 SSH key management menu."""
+        while True:
+            self.app.print_header("SSH Key Management")
+
+            if not self.app.check_hosts_config():
+                self.app.print_colored("No nodes configured. Configure nodes first.", 'red')
+                self.app.wait_for_enter()
+                return
+
+            ok, issues = self.check_feature_capabilities()
+            if not ok:
+                self._show_feature_unavailable(issues)
+                return
+
+            self.app.load_configuration()
+            hosts = _get_gpu_hosts(self.app.inventory)
+            self.app.print_section(f"Available for {len(hosts)} configured node(s)")
+            self.app.print_colored("  1) Install Key / Migrate Password Hosts", 'white')
+            self.app.print_colored("  2) Add Extra Public Key", 'white')
+            self.app.print_colored("  3) Validate Key Authentication", 'white')
+            self.app.print_colored("  4) Show SSH Auth Status", 'white')
+            self.app.print_colored("  0) Back", 'white')
+            print()
+
+            choice = self.app.get_input("Select option", "0")
+            if choice == '0':
+                return
+            if choice == '1':
+                self.install_key_and_migrate_hosts()
+            elif choice == '2':
+                self.add_extra_public_keys()
+            elif choice == '3':
+                self.validate_key_authentication()
+            elif choice == '4':
+                self.show_ssh_auth_status()
+            else:
+                self.app.print_colored("Invalid option.", 'red')
+                self.app.wait_for_enter()
+
+    def install_key_and_migrate_hosts(self) -> None:
+        """Install a public key on password-auth hosts and migrate inventory after verification."""
+        self.app.load_configuration()
+        password_hosts = self._get_hosts_by_auth_mode([SSH_AUTH_MODE_PASSWORD_ONLY])
+        if not password_hosts:
+            self.app.print_colored("No password-auth hosts available for SSH key migration.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_header("Install Key / Migrate Password Hosts")
+        self.app.print_colored("⚠️  WARNING", 'red', bold=True)
+        self.app.print_colored("This installs a public key on selected hosts and then tests key-based login.", 'yellow')
+        self.app.print_colored("Inventory will switch to SSH key auth only after verification succeeds.", 'yellow')
+        self.app.print_colored("Some cloud providers also require the public key in the provider dashboard or instance metadata.", 'yellow')
+        print()
+
+        selected_hosts = self.app.select_hosts(password_hosts, "ssh key migration", preselect_mode='all')
+        if not selected_hosts:
+            self.app.print_colored("No hosts selected. Migration cancelled.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        keypair = self._select_migration_keypair()
+        if not keypair:
+            return
+
+        playbook_path = self.app.config_dir / 'playbooks/ssh_install_key.yml'
+        host_limit = ','.join(selected_hosts)
+        extra_vars_path = None
+        success = False
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tmp:
+                json.dump({'ssh_target_public_key': keypair['public_key']}, tmp)
+                extra_vars_path = tmp.name
+
+            cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+                   f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+                   f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+                   f"ansible-playbook -i {self.app.config_file} --limit {host_limit} {playbook_path} "
+                   f"--extra-vars @{extra_vars_path}")
+
+            self.app.print_colored("\nInstalling public key on selected hosts...", 'cyan')
+            success, _ = self.app.run_command(cmd, show_output=True)
+        finally:
+            if extra_vars_path:
+                try:
+                    os.unlink(extra_vars_path)
+                except OSError:
+                    pass
+        if not success:
+            self.app.print_colored("Public key installation failed. Inventory was not changed.", 'red')
+            self.app.wait_for_enter()
+            return
+
+        verified_hosts = []
+        failed_hosts = []
+        for host_name in selected_hosts:
+            host_config = password_hosts[host_name]
+            self._set_host_ssh_metadata(host_name, {
+                'r1setup_ssh_auth_mode': SSH_AUTH_MODE_KEY_INSTALLED_UNVERIFIED,
+                'r1setup_ssh_primary_key_path': keypair['private_key_path'],
+                'r1setup_ssh_primary_key_fingerprint': keypair['fingerprint'],
+                'r1setup_ssh_requires_revalidation': True,
+            })
+            ok, message = self._verify_ssh_login(host_config, keypair['private_key_path'])
+            if ok:
+                verified_hosts.append(host_name)
+                self._apply_successful_key_migration(host_name, keypair['private_key_path'], keypair['fingerprint'])
+            else:
+                failed_hosts.append((host_name, message))
+                self._apply_failed_key_verification(host_name, keypair['private_key_path'], keypair['fingerprint'])
+
+        self.app._save_configuration()
+
+        self.app.print_section("Migration Summary")
+        if verified_hosts:
+            self.app.print_colored(f"✅ Verified and migrated: {', '.join(verified_hosts)}", 'green')
+        if failed_hosts:
+            self.app.print_colored("❌ Verification failed for:", 'red')
+            for host_name, message in failed_hosts:
+                self.app.print_colored(f"   • {host_name}: {message}", 'yellow')
+
+        if verified_hosts:
+            self.app.print_colored("Successful hosts now use SSH key authentication in r1setup.", 'cyan')
+        if failed_hosts:
+            self.app.print_colored("Failed hosts kept their previous inventory auth and were marked for revalidation.", 'yellow')
+
+        self.app.wait_for_enter()
+
+    def add_extra_public_keys(self) -> None:
+        """Install an extra public key on selected hosts without switching primary auth."""
+        self.app.load_configuration()
+        hosts = _get_gpu_hosts(self.app.inventory)
+        if not hosts:
+            self.app.print_colored("No hosts configured.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_header("Add Extra Public Key")
+        selected_hosts = self.app.select_hosts(hosts, "add extra public key", preselect_mode='all')
+        if not selected_hosts:
+            self.app.print_colored("No hosts selected.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        public_key_path = self.app.get_input("Public key path", "~/.ssh/id_ed25519.pub")
+        validation = self._validate_public_key_file(public_key_path)
+        if not validation['valid']:
+            self.app.print_colored(f"Public key validation failed: {validation['error']}", 'red')
+            self.app.wait_for_enter()
+            return
+
+        label = self.app.get_input("Label for this key", Path(validation['path']).name)
+        playbook_path = self.app.config_dir / 'playbooks/ssh_add_extra_keys.yml'
+        host_limit = ','.join(selected_hosts)
+        extra_vars_path = None
+        success = False
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tmp:
+                json.dump({'ssh_extra_public_keys': [validation['content']]}, tmp)
+                extra_vars_path = tmp.name
+
+            cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+                   f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+                   f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+                   f"ansible-playbook -i {self.app.config_file} --limit {host_limit} {playbook_path} "
+                   f"--extra-vars @{extra_vars_path}")
+
+            self.app.print_colored("Installing extra public key on selected hosts...", 'cyan')
+            success, _ = self.app.run_command(cmd, show_output=True)
+        finally:
+            if extra_vars_path:
+                try:
+                    os.unlink(extra_vars_path)
+                except OSError:
+                    pass
+        if not success:
+            self.app.print_colored("Extra public key installation failed.", 'red')
+            self.app.wait_for_enter()
+            return
+
+        for host_name in selected_hosts:
+            host = hosts[host_name]
+            managed_keys = host.get('r1setup_managed_public_keys', [])
+            entry = {
+                'fingerprint': validation['fingerprint'],
+                'label': label,
+                'added_at': datetime.now().isoformat(),
+                'source': validation['path'],
+            }
+            if not any(k.get('fingerprint') == validation['fingerprint'] for k in managed_keys):
+                managed_keys.append(entry)
+            host['r1setup_managed_public_keys'] = managed_keys
+
+        self.app._save_configuration()
+        self.app.print_colored("Extra public key installed successfully.", 'green')
+        self.app.wait_for_enter()
+
+    def validate_key_authentication(self) -> None:
+        """Re-validate SSH key authentication for configured key-auth hosts."""
+        self.app.load_configuration()
+        candidate_hosts = self._get_hosts_by_auth_mode([
+            SSH_AUTH_MODE_KEY_CONFIGURED_LEGACY,
+            SSH_AUTH_MODE_KEY_INSTALLED_UNVERIFIED,
+            SSH_AUTH_MODE_KEY_VERIFIED,
+            SSH_AUTH_MODE_VERIFICATION_FAILED,
+        ])
+
+        if not candidate_hosts:
+            self.app.print_colored("No key-auth hosts available for validation.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_header("Validate Key Authentication")
+        selected_hosts = self.app.select_hosts(candidate_hosts, "validate key auth", preselect_mode='all')
+        if not selected_hosts:
+            self.app.print_colored("No hosts selected.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        successes = []
+        failures = []
+        for host_name in selected_hosts:
+            host_config = candidate_hosts[host_name]
+            key_path = host_config.get('ansible_ssh_private_key_file') or host_config.get('r1setup_ssh_primary_key_path')
+            if not key_path:
+                failures.append((host_name, "No SSH private key path configured"))
+                self._apply_failed_key_verification(host_name, '')
+                continue
+
+            fingerprint = host_config.get('r1setup_ssh_primary_key_fingerprint')
+            derived = self._derive_public_key(key_path)
+            if derived['valid']:
+                fingerprint = derived['fingerprint']
+
+            ok, message = self._verify_ssh_login(host_config, key_path)
+            if ok:
+                self._set_host_ssh_metadata(host_name, {
+                    'r1setup_ssh_auth_mode': SSH_AUTH_MODE_KEY_VERIFIED,
+                    'r1setup_ssh_key_auth_verified_at': datetime.now().isoformat(),
+                    'r1setup_ssh_primary_key_fingerprint': fingerprint,
+                    'r1setup_ssh_last_verified_fingerprint': fingerprint,
+                    'r1setup_ssh_last_verification_status': 'success',
+                    'r1setup_ssh_requires_revalidation': False,
+                    'r1setup_ssh_primary_key_path': key_path,
+                })
+                successes.append(host_name)
+            else:
+                self._apply_failed_key_verification(host_name, key_path, fingerprint)
+                failures.append((host_name, message))
+
+        self.app._save_configuration()
+
+        self.app.print_section("Validation Summary")
+        if successes:
+            self.app.print_colored(f"✅ Verified: {', '.join(successes)}", 'green')
+        if failures:
+            self.app.print_colored("❌ Verification failed for:", 'red')
+            for host_name, message in failures:
+                self.app.print_colored(f"   • {host_name}: {message}", 'yellow')
+        self.app.wait_for_enter()
+
+    def show_ssh_auth_status(self) -> None:
+        """Display SSH auth metadata for configured hosts."""
+        self.app.load_configuration()
+        hosts = _get_gpu_hosts(self.app.inventory)
+        if not hosts:
+            self.app.print_colored("No hosts configured.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_header("SSH Auth Status")
+        for host_name, host_config in hosts.items():
+            mode = host_config.get('r1setup_ssh_auth_mode', self._get_default_host_metadata(host_config)['r1setup_ssh_auth_mode'])
+            key_path = host_config.get('r1setup_ssh_primary_key_path') or host_config.get('ansible_ssh_private_key_file') or 'N/A'
+            verified_at = host_config.get('r1setup_ssh_key_auth_verified_at') or 'never'
+            requires_revalidation = host_config.get('r1setup_ssh_requires_revalidation', False)
+            fingerprint = host_config.get('r1setup_ssh_primary_key_fingerprint') or 'unknown'
+            auth_type = "Password" if 'ansible_ssh_pass' in host_config else "SSH Key"
+            self.app.print_colored(f"  • {host_name}", 'cyan', bold=True)
+            self.app.print_colored(f"     Current inventory auth: {auth_type}", 'white')
+            self.app.print_colored(f"     SSH state: {mode}", 'white')
+            self.app.print_colored(f"     Key path: {key_path}", 'white')
+            self.app.print_colored(f"     Key fingerprint: {fingerprint}", 'white')
+            self.app.print_colored(f"     Last verified: {verified_at}", 'white')
+            self.app.print_colored(f"     Requires revalidation: {'yes' if requires_revalidation else 'no'}", 'white')
+            managed_keys = host_config.get('r1setup_managed_public_keys', [])
+            if managed_keys:
+                self.app.print_colored(f"     Extra managed keys: {len(managed_keys)}", 'white')
+            print()
+
+        self.app.wait_for_enter()
+
+
 class R1Setup:
     def __init__(self):
         self.colors = {
@@ -3354,6 +4065,7 @@ class R1Setup:
         self.status_tracker = NodeStatusTracker(self)
         self.deployment_service = DeploymentService(self)
         self.settings_manager = SettingsManager(self)
+        self.ssh_key_manager = SSHKeyManager(self)
         self.settings_manager.load_settings()
 
         # Load or initialize active configuration
@@ -3713,6 +4425,28 @@ class R1Setup:
 
     def _get_real_time_node_status(self):
         return self.status_tracker._get_real_time_node_status()
+
+    # -- SSHKeyManager delegation stubs --
+    def migrate_legacy_ssh_metadata(self):
+        return self.ssh_key_manager.migrate_legacy_ssh_metadata()
+
+    def check_ssh_key_tooling(self):
+        return self.ssh_key_manager.check_ssh_key_tooling()
+
+    def ssh_key_management_menu(self):
+        return self.ssh_key_manager.ssh_key_management_menu()
+
+    def install_key_and_migrate_hosts(self):
+        return self.ssh_key_manager.install_key_and_migrate_hosts()
+
+    def add_extra_public_keys(self):
+        return self.ssh_key_manager.add_extra_public_keys()
+
+    def validate_key_authentication(self):
+        return self.ssh_key_manager.validate_key_authentication()
+
+    def show_ssh_auth_status(self):
+        return self.ssh_key_manager.show_ssh_auth_status()
 
     def _get_status_display_info(self, status):
         return self.status_tracker._get_status_display_info(status)
@@ -4360,9 +5094,10 @@ class R1Setup:
             print()
             self.print_colored("\U0001f510 SECURITY TOOLS", 'red', bold=True)
             self.print_colored("  4) Import Private Keys   - Collect private keys from all nodes")
+            self.print_colored("  5) SSH Key Management    - Install, validate, and track SSH keys")
             print()
             self.print_colored("⚙️  CUSTOMIZATION", 'cyan', bold=True)
-            self.print_colored("  5) Customize Service     - Override service template variables")
+            self.print_colored("  6) Customize Service     - Override service template variables")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -4371,7 +5106,7 @@ class R1Setup:
 
             if choice == '0':
                 break
-            elif choice in ('1', '2', '3', '4', '5') and not has_config:
+            elif choice in ('1', '2', '3', '4', '5', '6') and not has_config:
                 self.print_colored("No nodes configured. Please configure nodes first (Main Menu \u2192 1).", 'red')
                 self.wait_for_enter()
                 continue
@@ -4384,9 +5119,11 @@ class R1Setup:
             elif choice == '4':
                 self.import_nodes_private_keys()
             elif choice == '5':
+                self.ssh_key_management_menu()
+            elif choice == '6':
                 self.customize_service()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-5.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-6.", 'red')
                 self.wait_for_enter()
 
 
@@ -4641,6 +5378,16 @@ class R1Setup:
                     timestamp = datetime.now().isoformat()
                     host['node_status'] = 'never_deployed'
                     host['last_status_update'] = timestamp
+                    if 'ansible_ssh_private_key_file' in host:
+                        host['r1setup_ssh_auth_mode'] = SSH_AUTH_MODE_KEY_INSTALLED_UNVERIFIED
+                        host['r1setup_ssh_primary_key_path'] = host['ansible_ssh_private_key_file']
+                        host['r1setup_ssh_requires_revalidation'] = True
+                    else:
+                        host['r1setup_ssh_auth_mode'] = SSH_AUTH_MODE_PASSWORD_ONLY
+                        host['r1setup_ssh_primary_key_path'] = None
+                        host['r1setup_ssh_requires_revalidation'] = False
+                    host['r1setup_ssh_last_verification_status'] = 'not_checked'
+                    host['r1setup_managed_public_keys'] = previous_config.get('r1setup_managed_public_keys', [])
                     # Show summary and confirm
                     auth_type = 'SSH Key' if 'ansible_ssh_private_key_file' in host else 'Password'
                     self.print_colored("\nConfiguration Summary:", 'yellow')
@@ -4712,6 +5459,7 @@ class R1Setup:
 
                 if auth_choice == '1':
                     # Password authentication
+                    host.pop('ansible_ssh_private_key_file', None)
                     if existing_config and 'ansible_ssh_pass' in existing_config:
                         self.print_colored("\nPassword authentication - Press Enter to keep existing passwords", 'cyan')
                         ssh_pass = self.get_secure_input("Enter SSH password (Enter to keep current)")
@@ -4764,6 +5512,7 @@ class R1Setup:
                         validation_result = self._validate_ssh_key_file(expanded_path)
                         if validation_result['valid']:
                             host['ansible_ssh_private_key_file'] = key_path
+                            host.pop('ansible_ssh_pass', None)
                             
                             # Prompt for sudo password
                             if existing_config and 'ansible_become_password' in existing_config:
@@ -4832,6 +5581,42 @@ class R1Setup:
                 timestamp = datetime.now().isoformat()
                 host['node_status'] = 'never_deployed'
                 host['last_status_update'] = timestamp
+
+            existing_managed_keys = existing_config.get('r1setup_managed_public_keys', []) if existing_config else previous_config.get('r1setup_managed_public_keys', []) if previous_config else []
+            existing_key_path = existing_config.get('ansible_ssh_private_key_file') if existing_config else None
+            existing_verified_fingerprint = existing_config.get('r1setup_ssh_last_verified_fingerprint') if existing_config else None
+            if 'ansible_ssh_private_key_file' in host:
+                same_verified_key = (
+                    existing_config
+                    and existing_key_path == host['ansible_ssh_private_key_file']
+                    and existing_config.get('r1setup_ssh_auth_mode') == SSH_AUTH_MODE_KEY_VERIFIED
+                )
+                host['r1setup_ssh_auth_mode'] = (
+                    SSH_AUTH_MODE_KEY_VERIFIED if same_verified_key else SSH_AUTH_MODE_KEY_INSTALLED_UNVERIFIED
+                )
+                host['r1setup_ssh_primary_key_path'] = host['ansible_ssh_private_key_file']
+                host['r1setup_ssh_requires_revalidation'] = not same_verified_key
+            else:
+                host['r1setup_ssh_auth_mode'] = SSH_AUTH_MODE_PASSWORD_ONLY
+                host['r1setup_ssh_primary_key_path'] = None
+                host['r1setup_ssh_requires_revalidation'] = False
+            host['r1setup_ssh_last_verification_status'] = (
+                existing_config.get('r1setup_ssh_last_verification_status', 'not_checked')
+                if existing_config else 'not_checked'
+            )
+            host['r1setup_ssh_key_auth_verified_at'] = (
+                existing_config.get('r1setup_ssh_key_auth_verified_at')
+                if existing_config and host['r1setup_ssh_auth_mode'] == SSH_AUTH_MODE_KEY_VERIFIED else None
+            )
+            host['r1setup_ssh_primary_key_fingerprint'] = (
+                existing_config.get('r1setup_ssh_primary_key_fingerprint')
+                if existing_config and 'ansible_ssh_private_key_file' in host else None
+            )
+            host['r1setup_ssh_last_verified_fingerprint'] = (
+                existing_verified_fingerprint
+                if existing_config and host['r1setup_ssh_auth_mode'] == SSH_AUTH_MODE_KEY_VERIFIED else None
+            )
+            host['r1setup_managed_public_keys'] = existing_managed_keys
 
             # Show summary and confirm
             self.print_colored("\nConfiguration Summary:", 'yellow')
@@ -5975,6 +6760,9 @@ class R1Setup:
 
         # Auto-update check - this runs first before everything else
         self._auto_update_check()
+
+        # Add SSH metadata for legacy configurations without changing active auth.
+        self.migrate_legacy_ssh_metadata()
 
         # Ensure we have an active configuration before proceeding
         if not self.ensure_active_configuration():

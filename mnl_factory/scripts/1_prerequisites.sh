@@ -115,6 +115,36 @@ if ! verify_command python3; then
     exit 1
 fi
 
+# Install SSH client tooling needed by SSH key management
+if ! command -v ssh &> /dev/null || ! command -v ssh-keygen &> /dev/null; then
+    print_message "Installing OpenSSH client tooling..." "$YELLOW"
+    if [[ "$OS_TYPE" == "linux" ]]; then
+        if [[ "$OS_NAME" =~ "Ubuntu"|"Debian" ]]; then
+            $INSTALL_CMD openssh-client
+        elif [[ "$OS_NAME" =~ "CentOS"|"Red Hat"|"Fedora" ]]; then
+            $INSTALL_CMD openssh-clients
+        fi
+    else
+        sudo -u "$REAL_USER" $INSTALL_CMD openssh
+    fi
+fi
+
+# Install OpenSSL for SSH key workflow validation
+if ! command -v openssl &> /dev/null; then
+    print_message "Installing OpenSSL..." "$YELLOW"
+    if [[ "$OS_TYPE" == "linux" ]]; then
+        $INSTALL_CMD openssl
+    else
+        sudo -u "$REAL_USER" $INSTALL_CMD openssl
+    fi
+fi
+
+# Verify SSH tooling
+if ! verify_command ssh || ! verify_command ssh-keygen || ! verify_command openssl; then
+    print_message "SSH tooling installation failed" "$RED"
+    exit 1
+fi
+
 # Ensure python3-venv is installed (especially for Debian/Ubuntu)
 if [[ "$OS_TYPE" == "linux" ]]; then
     if [[ "$OS_NAME" =~ "Ubuntu"|"Debian" ]]; then
