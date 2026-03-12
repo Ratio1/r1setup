@@ -205,8 +205,8 @@ parse_node_info() {
     local output_file="/tmp/node_info_output.txt"
     local show_only=${1:-"true"}
 
-    # Run the playbook and capture output
-    ANSIBLE_STDOUT_CALLBACK=yaml ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml" > "$output_file" 2>&1
+    # Run the playbook and capture output (with 60 second timeout)
+    timeout 60 ANSIBLE_STDOUT_CALLBACK=yaml ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml" > "$output_file" 2>&1
 
     debug "Parsing node info from: $output_file"
 
@@ -449,10 +449,11 @@ main() {
                 ;;
             4)
                 print_status "Getting nodes information..."
-                if ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml"; then
+                if timeout 60 ANSIBLE_CONFIG=$ANSIBLE_CONFIG ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH ANSIBLE_HOME=$ANSIBLE_HOME ansible-playbook -i "$COLLECTION_PATH/hosts.yml" "$COLLECTION_PATH/playbooks/get_node_info.yml"; then
                     print_success "Node information retrieved successfully."
                 else
-                    print_error "Failed to retrieve node information."
+                    print_error "Failed to retrieve node information (may have timed out after 60 seconds)."
+                    print_error "This could be due to offline nodes or network issues."
                     exit 1
                 fi
                 ;;

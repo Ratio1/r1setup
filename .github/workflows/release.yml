@@ -2,82 +2,125 @@ name: Release CLI Files
 
 on:
   push:
-    tags:
-      - 'v*.*.*'  # Trigger on version tags like v1.1.14
+    branches:
+      - main
+    paths:
+      - "mnl_factory/scripts/ver.py"
+
+permissions:
+  contents: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      BEFORE_SHA: ${{ github.event.before }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Get version from tag
-        id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ steps.get_version.outputs.VERSION }}
-          release_name: Release ${{ steps.get_version.outputs.VERSION }}
-          draft: false
-          prerelease: false
+          fetch-depth: 2
 
-      - name: Create complete repository archive
+      - name: Detect CLI version change
+        id: version_check
         run: |
+          GITHUB_OUTPUT_PATH="${GITHUB_OUTPUT}" python - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          def extract_version(text: str) -> str:
+              match = re.search(r"__VER__\s*=\s*['\"]([^'\"]+)['\"]", text)
+              if not match:
+                  raise SystemExit("Unable to find __VER__ in mnl_factory/scripts/ver.py")
+              return match.group(1)
+
+          current_path = Path("mnl_factory/scripts/ver.py")
+          current_version = extract_version(current_path.read_text())
+
+          before_sha = os.environ.get("BEFORE_SHA", "")
+          previous_version = ""
+          changed = True
+
+          if before_sha and before_sha != "0000000000000000000000000000000000000000":
+              result = subprocess.run(
+                  ["git", "show", f"{before_sha}:mnl_factory/scripts/ver.py"],
+                  capture_output=True,
+                  text=True,
+              )
+              if result.returncode == 0 and result.stdout.strip():
+                  previous_version = extract_version(result.stdout)
+                  changed = previous_version != current_version
+
+          with open(os.environ["GITHUB_OUTPUT_PATH"], "a", encoding="utf-8") as f:
+              f.write(f"version={current_version}\n")
+              f.write(f"previous_version={previous_version}\n")
+              f.write(f"changed={'true' if changed else 'false'}\n")
+          PY
+
+      - name: Stop when ver.py changed without version bump
+        if: steps.version_check.outputs.changed != 'true'
+        run: |
+          echo "ver.py changed, but __VER__ stayed at ${{ steps.version_check.outputs.version }}."
+          echo "Skipping CLI release."
+
+      - name: Validate r1setup fallback version
+        if: steps.version_check.outputs.changed == 'true'
+        run: |
+          EXPECTED_VERSION="${{ steps.version_check.outputs.version }}"
+          FALLBACK_VERSION="$(python - <<'PY'
+          import re
+          from pathlib import Path
+
+          content = Path("mnl_factory/scripts/r1setup").read_text()
+          match = re.search(r'CLI_VERSION = "([^"]+)"', content)
+          if not match:
+              raise SystemExit("Unable to find fallback CLI_VERSION in r1setup")
+          print(match.group(1))
+          PY
+          )"
+
+          if [[ "${FALLBACK_VERSION}" != "${EXPECTED_VERSION}" ]]; then
+            echo "r1setup fallback version (${FALLBACK_VERSION}) does not match ver.py (${EXPECTED_VERSION})."
+            exit 1
+          fi
+
+      - name: Create release assets
+        if: steps.version_check.outputs.changed == 'true'
+        run: |
+          VERSION="${{ steps.version_check.outputs.version }}"
+          TAG_NAME="v${VERSION}"
+
           echo "📦 Creating complete repository archive..."
-          # Create a clean archive of the entire repository
-          git archive --format=tar.gz --prefix=r1setup-${{ steps.get_version.outputs.VERSION }}/ HEAD > r1setup-${{ steps.get_version.outputs.VERSION }}.tar.gz
-          echo "✅ Created repository archive: r1setup-${{ steps.get_version.outputs.VERSION }}.tar.gz"
-          
-          # Also create individual CLI files for direct download
+          git archive --format=tar.gz --prefix="r1setup-${TAG_NAME}/" HEAD > "r1setup-${TAG_NAME}.tar.gz"
+
           mkdir -p cli-files
           cp mnl_factory/scripts/r1setup cli-files/
           cp mnl_factory/scripts/ver.py cli-files/
           cp mnl_factory/scripts/update.py cli-files/
 
-      - name: Upload Complete Repository Archive
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./r1setup-${{ steps.get_version.outputs.VERSION }}.tar.gz
-          asset_name: r1setup-${{ steps.get_version.outputs.VERSION }}.tar.gz
-          asset_content_type: application/gzip
+      - name: Create or update GitHub release
+        if: steps.version_check.outputs.changed == 'true'
+        run: |
+          VERSION="${{ steps.version_check.outputs.version }}"
+          TAG_NAME="v${VERSION}"
+          ASSETS=(
+            "r1setup-${TAG_NAME}.tar.gz"
+            "cli-files/r1setup"
+            "cli-files/ver.py"
+            "cli-files/update.py"
+          )
 
-      - name: Upload CLI Scripts (for direct update)
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./cli-files/r1setup
-          asset_name: r1setup
-          asset_content_type: application/octet-stream
-
-      - name: Upload Version Script (for direct update)
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./cli-files/ver.py
-          asset_name: ver.py
-          asset_content_type: text/x-python
-
-      - name: Upload Update Script (for direct update)
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./cli-files/update.py
-          asset_name: update.py
-          asset_content_type: text/x-python
-
- 
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            echo "Release ${TAG_NAME} already exists. Uploading refreshed assets."
+            gh release upload "${TAG_NAME}" "${ASSETS[@]}" --clobber
+          else
+            gh release create "${TAG_NAME}" \
+              "${ASSETS[@]}" \
+              --target "${GITHUB_SHA}" \
+              --title "Release ${TAG_NAME}" \
+              --notes "Automated CLI release for ${TAG_NAME}"
+          fi

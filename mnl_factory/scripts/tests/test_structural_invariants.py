@@ -3,6 +3,7 @@
 
 import re
 import unittest
+from pathlib import Path
 
 from tests.support import R1SETUP_PATH
 
@@ -89,3 +90,17 @@ class TestStructuralInvariants(unittest.TestCase):
         for i, line in enumerate(self.lines, 1):
             if pattern.search(line):
                 self.fail(f"Hardcoded timeout=30 in run_command at line {i}: {line.strip()}")
+
+    def test_fallback_version_matches_ver_py(self):
+        ver_source = Path(R1SETUP_PATH.parent / "ver.py").read_text()
+        ver_match = re.search(r"__VER__\s*=\s*['\"]([^'\"]+)['\"]", ver_source)
+        self.assertIsNotNone(ver_match, "Unable to find __VER__ in ver.py")
+
+        fallback_match = re.search(r'CLI_VERSION = "([^"]+)"', self.source)
+        self.assertIsNotNone(fallback_match, "Unable to find fallback CLI_VERSION in r1setup")
+
+        self.assertEqual(
+            fallback_match.group(1),
+            ver_match.group(1),
+            "r1setup fallback CLI_VERSION must match ver.py __VER__",
+        )
