@@ -61,7 +61,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.4.7"
+    CLI_VERSION = "1.4.8"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -3766,6 +3766,27 @@ class SSHKeyManager:
             'r1setup_ssh_requires_revalidation': True,
         })
 
+    def _get_ssh_state_guidance(self, host_config: Dict[str, Any]) -> str:
+        """Return the recommended next action for a host's SSH state."""
+        mode = host_config.get('r1setup_ssh_auth_mode', self._get_default_host_metadata(host_config)['r1setup_ssh_auth_mode'])
+        requires_revalidation = host_config.get('r1setup_ssh_requires_revalidation', False)
+
+        if mode == SSH_AUTH_MODE_PASSWORD_ONLY:
+            return "Next: Install Key / Migrate Password Hosts."
+        if mode == SSH_AUTH_MODE_KEY_CONFIGURED_LEGACY:
+            return "Next: Validate Key Authentication before hardening."
+        if mode == SSH_AUTH_MODE_KEY_INSTALLED_UNVERIFIED:
+            return "Next: Validate Key Authentication to confirm the installed key."
+        if mode == SSH_AUTH_MODE_VERIFICATION_FAILED:
+            return "Next: Fix key access, then rerun Validate Key Authentication."
+        if mode == SSH_AUTH_MODE_PASSWORD_DISABLED:
+            return "State is hardened. Keep at least one recovery key secured outside this host."
+        if mode == SSH_AUTH_MODE_KEY_VERIFIED and not requires_revalidation:
+            return "Ready: Disable Password Authentication is allowed."
+        if mode == SSH_AUTH_MODE_KEY_VERIFIED and requires_revalidation:
+            return "Next: Revalidate key authentication before hardening."
+        return "Next: Review host SSH settings before changing authentication."
+
     def ssh_key_management_menu(self) -> None:
         """Show Phase 1 SSH key management menu."""
         while True:
@@ -4121,6 +4142,7 @@ class SSHKeyManager:
             self.app.print_colored(f"     Requires revalidation: {'yes' if requires_revalidation else 'no'}", 'white')
             self.app.print_colored(f"     Password auth disabled: {'yes' if password_auth_disabled else 'no'}", 'white')
             self.app.print_colored(f"     Hardening applied at: {hardening_applied_at}", 'white')
+            self.app.print_colored(f"     Guidance: {self._get_ssh_state_guidance(host_config)}", 'yellow')
             managed_keys = host_config.get('r1setup_managed_public_keys', [])
             if managed_keys:
                 self.app.print_colored(f"     Extra managed keys: {len(managed_keys)}", 'white')

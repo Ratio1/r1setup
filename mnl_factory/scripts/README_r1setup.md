@@ -31,6 +31,43 @@ r1setup
 ### Settings
 - Change network environment (mainnet/testnet/devnet)
 
+### SSH Key Management
+- Install an SSH public key on selected password-auth hosts
+- Verify controller-side SSH key login before switching inventory auth
+- Add extra public keys without changing the primary host auth
+- Validate legacy or migrated key-auth hosts before hardening
+- Disable SSH password authentication only after successful key verification
+
+## SSH Key Management
+Open `Advanced Menu -> SSH Key Management`.
+
+Available actions:
+- `Install Key / Migrate Password Hosts`
+- `Add Extra Public Key`
+- `Validate Key Authentication`
+- `Disable Password Authentication`
+- `Show SSH Auth Status`
+
+### Recommended Order
+1. Install a key on password-auth hosts.
+2. Verify key-based login succeeds.
+3. Check `Show SSH Auth Status` and confirm the host is `key_verified`.
+4. Disable password authentication only after validation succeeds.
+
+### Important Warnings
+- Disabling password authentication changes the machine's SSH daemon policy, not only `r1setup`.
+- Some cloud providers also require the public key in the provider dashboard or instance metadata.
+- Always keep the private key secure and store at least one recovery key outside the target machine.
+- A failed hardening verification triggers rollback logic, but you should still test this on disposable hosts first.
+
+### SSH States
+- `password_only`: Host still uses password authentication in inventory.
+- `key_configured_legacy`: Host already had key auth before SSH metadata existed; validate it before hardening.
+- `key_installed_unverified`: Key was installed, but login has not been confirmed yet.
+- `key_verified`: Key login succeeded and the host is eligible for hardening.
+- `verification_failed`: Key login failed; fix access and revalidate.
+- `password_disabled`: Password authentication was disabled successfully.
+
 ## File Structure
 ```
 ~/.ratio1/r1_setup/r1setup    # Main script

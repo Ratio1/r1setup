@@ -1,263 +1,240 @@
 # Multi Node Launcher
 
-**Quick Setup**: For an easy setup script and quick start instructions, please refer to the [README in mnl_factory](mnl_factory/README.md).
+Multi Node Launcher is the deployment and operations repository for `r1setup` and the `ratio1.multi_node_launcher` Ansible collection. Its purpose is to let an operator configure remote nodes, deploy the Ratio1 edge-node stack with Ansible, Docker, and systemd, and then operate those nodes through a single CLI instead of a collection of one-off scripts.
 
-A comprehensive solution for setting up and managing GPU nodes with automated deployment using Ansible.
+## Need, Objective, Purpose
 
-## Table of Contents
+This repository exists to solve three related problems:
+- bootstrap a local control machine with a usable `r1setup` command
+- manage one or more remote Linux nodes through a consistent inventory-driven workflow
+- package the underlying deployment logic as an Ansible collection that can be built and published independently
 
-- [Prerequisites](#prerequisites)
-- [Initial Setup](#initial-setup)
-- [Directory Structure](#directory-structure)
-- [Configuration](#configuration)
-- [GPU Setup Process](#gpu-setup-process)
-- [Usage](#usage)
-- [Troubleshooting](#troubleshooting)
-- [Post-Installation](#post-installation)
-- [Notes](#notes)
-- [Deployment Instructions](#deployment-instructions)
+In practice, the repo contains:
+- a root installer, [install.sh](install.sh), that installs the CLI entrypoint
+- the Ansible collection under [mnl_factory](mnl_factory)
+- the main operator CLI in [mnl_factory/scripts/r1setup](mnl_factory/scripts/r1setup)
 
-## Prerequisites
+## Usability & Features
 
-1. Ansible installed on your control node
-2. SSH access to target nodes
-3. Sudo privileges on target nodes
-4. NVIDIA GPU(s) on target nodes (the playbook will automatically skip GPU setup if no GPU is detected)
-5. Internet access for package downloads
-6. Secure Boot disabled in BIOS (required for NVIDIA driver installation)
+### Quickstart
 
-## Initial Setup
-
-1. Install required Ansible collections:
+Network install:
 ```bash
+curl -sSL https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/install.sh | bash
+```
+
+Local install from a checked-out repo:
+```bash
+bash install.sh
+```
+
+Start the CLI:
+```bash
+r1setup
+```
+
+### Typical Workflows
+
+Configure and deploy via the CLI:
+```bash
+r1setup
+```
+
+Manual Ansible workflow:
+```bash
+cd mnl_factory
 ansible-galaxy collection install -r requirements.yml
+ansible-playbook -i inventory/hosts.yml playbooks/site.yml
 ```
 
-2. Set up secrets:
-   - Copy `group_vars/vault.yml.example` to `group_vars/vault.yml`
-   - Edit `vault.yml` with your actual credentials
-   - (Optional) Encrypt the vault file:
-     ```bash
-     ansible-vault encrypt group_vars/vault.yml
-     ```
-
-## Directory Structure
-
-```
-mnl_factory/
-├── group_vars/
-│   ├── all.yml         # Common variables
-│   ├── vault.yml       # Encrypted secrets
-│   └── vault.yml.example # Example secrets template
-├── inventory/
-│   └── hosts.yml       # Inventory file
-├── playbooks/
-│   └── site.yml        # Main playbook
-├── roles/
-│   ├── prerequisites/  # System prerequisites
-│   ├── nvidia_gpu/    # NVIDIA GPU setup and driver installation
-│   ├── docker/        # Docker installation
-│   └── setup/         # Final configuration
-├── requirements.yml    # Ansible Galaxy requirements
-└── .gitignore         # Git ignore patterns
+Build the collection locally:
+```bash
+cd mnl_factory
+ansible-galaxy collection build --force
 ```
 
-## Configuration
+Run the CLI test suite:
+```bash
+cd mnl_factory/scripts
+python3 test_r1setup.py
+```
 
-1. Edit `inventory/hosts.yml` to add your target nodes:
+### What The CLI Provides
+
+- node configuration and inventory management
+- deployment flows for Docker, NVIDIA GPU support, and final service setup
+- node status and information commands
+- service customization
+- SSH key management:
+  - key installation and migration from password auth
+  - extra public key installation
+  - key-auth validation
+  - optional SSH password-auth disable after successful verification
+
+See [mnl_factory/scripts/README_r1setup.md](mnl_factory/scripts/README_r1setup.md) for CLI-specific operator guidance.
+
+### Configuration
+
+CLI-managed configuration lives under the current user’s home:
+- `~/.ratio1/r1_setup/`: CLI state, local configs, active config metadata, local virtualenv
+- `~/.ratio1/ansible_config/`: installed Ansible collection, `ansible.cfg`, collection path
+
+Manual inventory example:
 ```yaml
 all:
   children:
     gpu_nodes:
       hosts:
-        your-gpu-node:
+        node-a:
           ansible_host: 192.168.1.100
-          ansible_user: your-user
-          ansible_ssh_private_key_file: ~/.ssh/id_rsa
+          ansible_user: root
+          ansible_ssh_private_key_file: ~/.ssh/id_ed25519
 ```
 
-2. Adjust variables in `group_vars/all.yml`:
-   - `docker_compose_version`: Docker Compose version
-   - `nvidia_driver_version`: NVIDIA driver version (default: "535")
-   - `cuda_version`: CUDA version (default: "12.2")
-   - `docker_image_name`: Docker image name
-   - `docker_registry`: Docker registry URL (if needed)
+Collection configuration surfaces:
+- [mnl_factory/inventory/hosts.yml](mnl_factory/inventory/hosts.yml)
+- [mnl_factory/group_vars](mnl_factory/group_vars)
+- [mnl_factory/requirements.yml](mnl_factory/requirements.yml)
 
-3. Configure secrets in `group_vars/vault.yml`
+### Outputs And Artifacts
 
-## GPU Setup Process
+After installation:
+- `r1setup` is symlinked to `/usr/local/bin/r1setup`
+- scripts are stored under `~/.ratio1/r1_setup`
+- the Ansible collection is installed under `~/.ratio1/ansible_config/collections`
 
-The playbook performs the following steps for GPU setup:
+After building the collection:
+- `ansible-galaxy collection build --force` produces a `*.tar.gz` artifact in `mnl_factory/`
 
-1. **GPU Detection**:
-   - Checks for NVIDIA GPU presence using `lspci`
-   - Skips all GPU-related tasks if no GPU is found
+After a CLI release:
+- GitHub release assets include the repository archive plus `r1setup`, `ver.py`, and `update.py`
 
-2. **Driver Status Check**:
-   - Verifies if NVIDIA drivers are already installed via `nvidia-smi`
-   - Proceeds with installation only if drivers are missing or need update
+### Examples
 
-3. **Secure Boot Check**:
-   - Verifies Secure Boot status using `mokutil`
-   - Fails with clear message if Secure Boot is enabled
-
-4. **Driver Installation**:
-   - Removes any existing NVIDIA drivers
-   - Updates package lists
-   - Installs specified NVIDIA driver version
-   - Holds the driver package to prevent automatic updates
-   - Installs nvtop for GPU monitoring
-
-5. **Verification**:
-   - Verifies driver installation with `nvidia-smi`
-   - Checks driver version and GPU information
-   - Confirms package hold status
-
-## Usage
-
-1. Test connection to your nodes:
+Test connectivity manually:
 ```bash
+cd mnl_factory
 ansible all -i inventory/hosts.yml -m ping
 ```
 
-2. Run the playbook:
+Run the deploy playbook manually:
 ```bash
+cd mnl_factory
 ansible-playbook -i inventory/hosts.yml playbooks/site.yml
 ```
 
-If you encrypted the vault file:
+Run targeted SSH tests:
 ```bash
-ansible-playbook -i inventory/hosts.yml playbooks/site.yml --ask-vault-pass
+cd mnl_factory/scripts
+python3 -m unittest tests.test_ssh_key_manager
 ```
 
-## Troubleshooting
+### Troubleshooting
 
-1. **Secure Boot Error**:
-   - Message: "Secure Boot is enabled"
-   - Solution: Disable Secure Boot in BIOS settings
+- `r1setup` command missing after install:
+  - rerun [install.sh](install.sh); on Linux the symlink step needs `sudo` for `/usr/local/bin`
 
-2. **Driver Installation Fails**:
-   - Check `/var/log/dpkg.log` for package installation errors
-   - Verify internet connectivity
-   - Ensure compatible driver version is specified
+- CLI release workflow did not trigger:
+  - the automatic release workflow watches `mnl_factory/scripts/ver.py`
+  - it only proceeds when `__VER__` changes
+  - it also requires the fallback `CLI_VERSION` inside `mnl_factory/scripts/r1setup` to match
 
-3. **No GPU Detected**:
-   - Verify GPU is properly seated
-   - Check `lspci | grep -i nvidia` output
-   - Ensure GPU is supported and powered correctly
+- Ansible Galaxy publish workflow did not trigger:
+  - the publish workflow watches `mnl_factory/galaxy.yml`
+  - it only proceeds when the `version` field changes
 
-4. **Package Lock Issues**:
-   - The playbook automatically handles apt/dpkg locks
-   - Retries operations up to 5 times with delays
-   - Manual fix: Remove lock files if needed (not recommended)
+- SSH hardening concern:
+  - disabling password authentication changes the remote machine’s sshd policy
+  - test this on disposable hosts first and keep recovery keys outside the target machine
 
-## Post-Installation
+- GPU driver install issues:
+  - verify Secure Boot is disabled
+  - verify the host actually exposes NVIDIA hardware to the OS
+  - inspect the Ansible output from the `nvidia_gpu` role for package/install failures
 
-After successful installation:
+## Technical Details
 
-1. Verify GPU status:
+### Architecture
+
+The repository is split between an end-user bootstrap layer and an Ansible collection:
+
+- root bootstrap:
+  - [install.sh](install.sh) downloads CLI scripts and installs the `r1setup` command
+
+- CLI layer:
+  - [mnl_factory/scripts/r1setup](mnl_factory/scripts/r1setup) is the main interactive application
+  - [mnl_factory/scripts/ver.py](mnl_factory/scripts/ver.py) is the CLI version source of truth
+  - [mnl_factory/scripts/update.py](mnl_factory/scripts/update.py) supports CLI update behavior
+
+- collection layer:
+  - [mnl_factory/playbooks](mnl_factory/playbooks) contains operational playbooks
+  - [mnl_factory/roles](mnl_factory/roles) contains Docker, GPU, prerequisites, and setup roles
+  - [mnl_factory/galaxy.yml](mnl_factory/galaxy.yml) defines collection metadata
+
+### Modules And Repo Map
+
+- [mnl_factory/scripts](mnl_factory/scripts): CLI logic, prerequisite/bootstrap scripts, tests
+- [mnl_factory/playbooks](mnl_factory/playbooks): deploy, service, node-info, SSH-key-management, and SSH hardening actions
+- [mnl_factory/roles](mnl_factory/roles): reusable Ansible roles
+- [docs](docs): dated design and operational notes
+- [.github/workflows](.github/workflows): CLI release and collection publish automation
+
+### Dependencies
+
+Local machine prerequisites installed by [mnl_factory/scripts/1_prerequisites.sh](mnl_factory/scripts/1_prerequisites.sh):
+- Python 3 and a local virtualenv
+- Ansible
+- `ssh`, `ssh-keygen`, `openssl`, `sshpass`
+- Python packages: `pyyaml`, `typing_extensions`, `certifi`
+
+Collection dependencies from [mnl_factory/requirements.yml](mnl_factory/requirements.yml):
+- `community.docker`
+- `community.general`
+- `ansible.posix`
+
+### Testing
+
+Primary test commands:
 ```bash
-nvidia-smi
+cd mnl_factory/scripts
+python3 test_r1setup.py
+python3 -m unittest discover tests
+python3 -m py_compile r1setup
 ```
 
-2. Monitor GPU usage:
-```bash
-nvtop
-```
+The modular test package lives in [mnl_factory/scripts/tests](mnl_factory/scripts/tests). The compatibility runner in [mnl_factory/scripts/test_r1setup.py](mnl_factory/scripts/test_r1setup.py) simply discovers and runs that suite.
 
-3. Check driver version:
-```bash
-nvidia-smi --query-gpu=driver_version --format=csv,noheader
-```
+### Security And Operational Notes
 
-## Notes
+- Password-based node configs may temporarily store SSH credentials in the managed inventory until migrated to SSH keys.
+- SSH hardening is intentionally separated from SSH key migration so inventory auth changes and remote sshd policy changes are not conflated.
+- The repository currently has strong unit and CLI regression coverage, but not a built-in disposable-host integration harness for end-to-end SSH daemon testing.
+- `mnl_factory/build.sh` is a local helper and is not the CI-safe publishing path; GitHub Actions uses dedicated workflows instead.
 
-- The playbook is idempotent and can be run multiple times safely
-- GPU setup is skipped automatically on non-GPU nodes
-- Driver installation requires a system reboot
-- The playbook includes automatic retry mechanisms for package operations
-- Keep your vault.yml file secure and never commit it to version control
-- Ensure adequate cooling and power for GPU operations
-- Consider using NVIDIA container toolkit for Docker GPU support
+### Release And Publish Automation
 
-## Deployment Instructions
+- CLI release workflow: [.github/workflows/release.yml](.github/workflows/release.yml)
+  - triggered by `mnl_factory/scripts/ver.py`
+- Ansible Galaxy publish workflow: [.github/workflows/publish-ansible-galaxy.yml](.github/workflows/publish-ansible-galaxy.yml)
+  - triggered by `mnl_factory/galaxy.yml`
 
-### Building the Collection
+### Citations
 
-1. **Prepare the Collection**
-   Ensure you have the correct directory structure and all required files:
-   ```
-   mnl_factory/
-   ├── galaxy.yml          # Collection metadata
-   ├── README.md
-   ├── plugins/
-   ├── playbooks/
-   └── roles/
-   ```
-
-2. **Build the Collection**
-   From the root directory of the collection, run:
-   ```bash
-   ansible-galaxy collection build
-   ```
-   This will create a tarball like `ratio1-multi_node_launcher-1.0.0.tar.gz`
-
-3. **Install the Collection**
-   You can install the collection locally using:
-   ```bash
-   ansible-galaxy collection install ratio1-multi_node_launcher-1.0.0.tar.gz -p ./collections
-   ```
-
-### Using the Collection
-
-1. **Install Dependencies**
-   ```bash
-   ansible-galaxy collection install -r requirements.yml
-   ```
-
-2. **Configure Your Environment**
-   - Copy and edit the inventory file:
-     ```bash
-     cp inventory/hosts.yml.example inventory/hosts.yml
-     ```
-   - Update the hosts file with your target nodes
-   - Copy and edit the vault file:
-     ```bash
-     cp group_vars/vault.yml.example group_vars/vault.yml
-     ```
-
-3. **Run the Deployment**
-   ```bash
-   ansible-playbook -i inventory/hosts.yml playbooks/site.yml
-   ```
-
-   If using vault encryption:
-   ```bash
-   ansible-playbook -i inventory/hosts.yml playbooks/site.yml --ask-vault-pass
-   ```
-
-### Publishing the Collection (Optional)
-
-To publish the collection to Ansible Galaxy:
-
-1. **Create an Account**
-   Sign up at [galaxy.ansible.com](https://galaxy.ansible.com)
-
-2. **Get API Token**
-   Generate an API token from your Galaxy profile
-
-3. **Publish**
-   ```bash
-   ansible-galaxy collection publish ./ratio1-multi_node_launcher-1.0.0.tar.gz --api-key=your_api_token
-   ```
-
-## License
-
-MIT
+- Ansible documentation, “Installing collections”: https://docs.ansible.com/ansible/latest/collections_guide/collections_installing.html
+- Ansible documentation, “Developing collections / distributing collections”: https://docs.ansible.com/ansible/latest/dev_guide/developing_collections_distributing.html
+- Ansible documentation, `ansible.posix.authorized_key`: https://docs.ansible.com/ansible/latest/collections/ansible/posix/authorized_key_module.html
+- GitHub documentation, “Workflow syntax for GitHub Actions”: https://docs.github.com/actions/using-workflows/workflow-syntax-for-github-actions
+- OpenBSD manual page, `ssh-keygen(1)`: https://man.openbsd.org/ssh-keygen
 
 ## Authors
 
 - Andrei Damian
 - Vitalii Toderian
 
-curl -sSL https://raw.githubusercontent.com/YourUsername/r1setup/main/install.sh | sudo bash
+## License
+
+MIT
+
+## Disclaimer
+
+This repository can modify remote SSH configuration, install Docker and NVIDIA-related packages, and deploy a long-running systemd-managed container workload. Validate changes on disposable infrastructure before rolling them into production.
