@@ -27,6 +27,7 @@ r1setup
 ### Operations
 - Start, stop, and restart deployed services
 - Re-apply the current versioned service file from `Operations -> Update Service File`
+- On startup, `r1setup` may offer a direct service-file update prompt when deployed nodes are behind the current target version
 
 ### Information
 - Get node information

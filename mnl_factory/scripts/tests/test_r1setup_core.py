@@ -413,6 +413,8 @@ class TestServiceFileUpdateFlow(unittest.TestCase):
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)
         app.check_hosts_config = MagicMock(return_value=True)
         app.load_configuration = MagicMock()
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "deployed"}
         app.inventory = {
             "all": {
                 "children": {
@@ -437,6 +439,7 @@ class TestServiceFileUpdateFlow(unittest.TestCase):
         app.get_host_service_file_version = MagicMock(
             side_effect=lambda config: config.get(r1setup.SERVICE_FILE_VERSION_FIELD, "v0")
         )
+        app._get_node_status_info = MagicMock(return_value={"status": "running"})
         app._get_service_overrides = MagicMock(return_value={})
         app.print_header = MagicMock()
         app.print_colored = MagicMock()
@@ -465,6 +468,8 @@ class TestServiceFileUpdateFlow(unittest.TestCase):
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)
         app.check_hosts_config = MagicMock(return_value=True)
         app.load_configuration = MagicMock()
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "deployed"}
         app.inventory = {
             "all": {
                 "children": {
@@ -484,6 +489,7 @@ class TestServiceFileUpdateFlow(unittest.TestCase):
         app.get_host_service_file_version = MagicMock(
             side_effect=lambda config: config.get(r1setup.SERVICE_FILE_VERSION_FIELD, "v0")
         )
+        app._get_node_status_info = MagicMock(return_value={"status": "running"})
         app._get_service_overrides = MagicMock(return_value={})
         app.print_header = MagicMock()
         app.print_colored = MagicMock()
@@ -498,3 +504,248 @@ class TestServiceFileUpdateFlow(unittest.TestCase):
         app._apply_service_template_to_hosts.assert_not_called()
         rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
         self.assertIn("All nodes already have the current service file version.", rendered_text)
+
+    def test_update_service_file_skips_undeployed_nodes(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=True)
+        app.load_configuration = MagicMock()
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "deployed"}
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                                r1setup.SERVICE_FILE_VERSION_FIELD: "v1",
+                            },
+                            "node-2": {
+                                "ansible_host": "10.0.0.2",
+                                "ansible_user": "root",
+                                r1setup.SERVICE_FILE_VERSION_FIELD: "v0",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+        app.get_mnl_service_version = MagicMock(return_value="v2")
+        app.get_host_service_file_version = MagicMock(
+            side_effect=lambda config: config.get(r1setup.SERVICE_FILE_VERSION_FIELD, "v0")
+        )
+        app._get_node_status_info = MagicMock(side_effect=[
+            {"status": "running"},
+            {"status": "never_deployed"},
+        ])
+        app._get_service_overrides = MagicMock(return_value={})
+        app.print_header = MagicMock()
+        app.print_colored = MagicMock()
+        app.select_hosts = MagicMock(return_value=["node-1"])
+        app.get_input = MagicMock(return_value="y")
+        app._apply_service_template_to_hosts = MagicMock(return_value=True)
+        app.wait_for_enter = MagicMock()
+
+        app.update_service_file()
+
+        eligible_hosts = app.select_hosts.call_args.args[0]
+        self.assertEqual(set(eligible_hosts.keys()), {"node-1"})
+        rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
+        self.assertIn("Skipping nodes without a deployed service: node-2", rendered_text)
+
+
+class TestStartupServiceUpdatePrompt(unittest.TestCase):
+    """Tests startup guidance for outdated service files."""
+
+    def test_offer_startup_service_update_applies_outdated_nodes_when_confirmed(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=True)
+        app.load_configuration = MagicMock()
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "deployed"}
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                                r1setup.SERVICE_FILE_VERSION_FIELD: "v1",
+                            },
+                            "node-2": {
+                                "ansible_host": "10.0.0.2",
+                                "ansible_user": "root",
+                                r1setup.SERVICE_FILE_VERSION_FIELD: "v2",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+        app.get_mnl_service_version = MagicMock(return_value="v2")
+        app.get_host_service_file_version = MagicMock(
+            side_effect=lambda config: config.get(r1setup.SERVICE_FILE_VERSION_FIELD, "v0")
+        )
+        app._get_node_status_info = MagicMock(side_effect=[
+            {"status": "running"},
+            {"status": "running"},
+        ])
+        app._get_service_overrides = MagicMock(return_value={})
+        app.print_colored = MagicMock()
+        app.get_input = MagicMock(return_value="y")
+        app._apply_service_template_to_hosts = MagicMock(return_value=True)
+
+        app._offer_startup_service_update()
+
+        app._apply_service_template_to_hosts.assert_called_once_with(
+            ["node-1"],
+            overrides=None,
+            progress_message="Applying service file update...",
+            success_message="Service file update applied on 1 node(s).",
+            failure_message="Service file update encountered errors. Check the output above.",
+        )
+        first_prompt = app.get_input.call_args_list[0]
+        self.assertEqual(first_prompt.args[0], "Update outdated service files now? (Y/n)")
+        self.assertEqual(first_prompt.args[1], "Y")
+
+    def test_offer_startup_service_update_can_skip_after_second_confirmation(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=True)
+        app.load_configuration = MagicMock()
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "deployed"}
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                                r1setup.SERVICE_FILE_VERSION_FIELD: "v1",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        app.get_mnl_service_version = MagicMock(return_value="v2")
+        app.get_host_service_file_version = MagicMock(
+            side_effect=lambda config: config.get(r1setup.SERVICE_FILE_VERSION_FIELD, "v0")
+        )
+        app._get_node_status_info = MagicMock(return_value={"status": "running"})
+        app._get_service_overrides = MagicMock(return_value={})
+        app.print_colored = MagicMock()
+        app.get_input = MagicMock(side_effect=["n", "y"])
+        app._apply_service_template_to_hosts = MagicMock()
+
+        app._offer_startup_service_update()
+
+        self.assertEqual(app.get_input.call_count, 2)
+        self.assertEqual(
+            app.get_input.call_args_list[1].args[0],
+            "Service updates are recommended to keep nodes aligned. Skip for now anyway? (y/N)",
+        )
+        app._apply_service_template_to_hosts.assert_not_called()
+
+    def test_offer_startup_service_update_proceeds_when_skip_not_confirmed(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=True)
+        app.load_configuration = MagicMock()
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "deployed"}
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                                r1setup.SERVICE_FILE_VERSION_FIELD: "v1",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        app.get_mnl_service_version = MagicMock(return_value="v2")
+        app.get_host_service_file_version = MagicMock(
+            side_effect=lambda config: config.get(r1setup.SERVICE_FILE_VERSION_FIELD, "v0")
+        )
+        app._get_node_status_info = MagicMock(return_value={"status": "running"})
+        app._get_service_overrides = MagicMock(return_value={})
+        app.print_colored = MagicMock()
+        app.get_input = MagicMock(side_effect=["n", "n"])
+        app._apply_service_template_to_hosts = MagicMock(return_value=True)
+
+        app._offer_startup_service_update()
+
+        app._apply_service_template_to_hosts.assert_called_once()
+
+    def test_offer_startup_service_update_skips_when_no_eligible_drift(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=True)
+        app.load_configuration = MagicMock()
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "deployed"}
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                                r1setup.SERVICE_FILE_VERSION_FIELD: "v0",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        app.get_mnl_service_version = MagicMock(return_value="v2")
+        app.get_host_service_file_version = MagicMock(
+            side_effect=lambda config: config.get(r1setup.SERVICE_FILE_VERSION_FIELD, "v0")
+        )
+        app._get_node_status_info = MagicMock(return_value={"status": "never_deployed"})
+        app._get_service_overrides = MagicMock(return_value={})
+        app.print_colored = MagicMock()
+        app.get_input = MagicMock()
+        app._apply_service_template_to_hosts = MagicMock()
+
+        app._offer_startup_service_update()
+
+        app.get_input.assert_not_called()
+        app._apply_service_template_to_hosts.assert_not_called()
+
+
+class TestSuggestedActions(unittest.TestCase):
+    """Tests main-menu suggested actions."""
+
+    def test_suggested_action_prefers_service_update_when_versions_drift(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=True)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "deployed"}
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {r1setup.SERVICE_FILE_VERSION_FIELD: "v1"},
+                        }
+                    }
+                }
+            }
+        }
+        app.get_mnl_service_version = MagicMock(return_value="v2")
+        app.get_host_service_file_version = MagicMock(return_value="v1")
+        app._get_node_status_info = MagicMock(return_value={"status": "running"})
+
+        default_option, hint = app._get_suggested_action()
+
+        self.assertEqual(default_option, "3")
+        self.assertIn("Update service file on 1 node(s)", hint)

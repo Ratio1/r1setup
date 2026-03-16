@@ -61,7 +61,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.4.11"
+    CLI_VERSION = "1.4.12"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -4790,6 +4790,9 @@ class R1Setup:
         if deployment_status in ('never_deployed', 'deleted'):
             return '2', '\U0001f4a1 Suggested: Deploy your configured nodes'
         hosts = _get_gpu_hosts(self.inventory)
+        _, eligible_hosts, outdated_hosts, _, _ = self._get_service_update_inventory(hosts)
+        if eligible_hosts and outdated_hosts:
+            return '3', f'\U0001f4a1 Suggested: Update service file on {len(outdated_hosts)} node(s)'
         error_count = sum(1 for h in hosts.values() if h.get('node_status') == 'error')
         if error_count > 0:
             return '4', f'\U0001f4a1 Suggested: Check {error_count} node(s) with errors'
@@ -5125,6 +5128,85 @@ class R1Setup:
 
         return target_service_version, outdated_hosts, current_hosts
 
+    @staticmethod
+    def _is_service_update_candidate(node_status: str) -> bool:
+        """Return whether a node should participate in service-file update checks."""
+        return node_status not in {'never_deployed', 'deleted', 'not_deployed'}
+
+    def _get_service_update_inventory(
+        self,
+        hosts: Dict[str, Dict[str, Any]],
+    ) -> Tuple[str, Dict[str, Dict[str, Any]], List[str], List[str], List[str]]:
+        """Return eligible hosts plus service-version drift information."""
+        eligible_hosts = {}
+        skipped_hosts = []
+
+        for host_name, host_config in hosts.items():
+            node_status = self._get_node_status_info(host_name).get('status', 'unknown')
+            if self._is_service_update_candidate(node_status):
+                eligible_hosts[host_name] = host_config
+            else:
+                skipped_hosts.append(host_name)
+
+        target_service_version, outdated_hosts, current_hosts = self._get_service_version_drift(eligible_hosts)
+        return target_service_version, eligible_hosts, outdated_hosts, current_hosts, skipped_hosts
+
+    def _offer_startup_service_update(self) -> None:
+        """Offer a direct service-file update when startup drift is detected."""
+        if not self.check_hosts_config():
+            return
+
+        deployment_status = self.active_config.get('deployment_status', 'never_deployed')
+        if deployment_status in ('never_deployed', 'deleted'):
+            return
+
+        self.load_configuration()
+        hosts = _get_gpu_hosts(self.inventory)
+        if not hosts:
+            return
+
+        target_service_version, eligible_hosts, outdated_hosts, _, _ = self._get_service_update_inventory(hosts)
+        if not eligible_hosts or not outdated_hosts:
+            return
+
+        overrides = self._get_service_overrides()
+        print()
+        self.print_colored("⚠️  Service file update available", 'yellow', bold=True)
+        self.print_colored(f"  • Target version: {target_service_version}", 'yellow')
+        self.print_colored(f"  • Needs update: {', '.join(outdated_hosts)}", 'red')
+        self.print_colored(
+            "  • Apply now to re-template and restart the service on those nodes.",
+            'white'
+        )
+        if overrides:
+            self.print_colored(
+                f"  • Active service overrides: {len(overrides)}. They will be re-applied too.",
+                'yellow'
+            )
+
+        if self.get_input("Update outdated service files now? (Y/n)", "Y").lower() != 'y':
+            if self.get_input(
+                "Service updates are recommended to keep nodes aligned. Skip for now anyway? (y/N)",
+                "N",
+            ).lower() != 'y':
+                self.print_colored("Proceeding with the recommended service update.", 'yellow')
+            else:
+                self.print_colored(
+                    "You can update later via Main Menu -> 3 -> Update Service File.",
+                    'yellow'
+                )
+                print()
+                return
+
+        self._apply_service_template_to_hosts(
+            outdated_hosts,
+            overrides=overrides or None,
+            progress_message="Applying service file update...",
+            success_message=f"Service file update applied on {len(outdated_hosts)} node(s).",
+            failure_message="Service file update encountered errors. Check the output above.",
+        )
+        print()
+
     def _refresh_service_update_status(self, selected_host_names: List[str]) -> None:
         """Best-effort verification after a service template update."""
         self.print_colored("\nVerifying service update status...", 'cyan')
@@ -5214,6 +5296,12 @@ class R1Setup:
             return
 
         self.load_configuration()
+        deployment_status = self.active_config.get('deployment_status', 'never_deployed')
+        if deployment_status in ('never_deployed', 'deleted'):
+            self.print_colored("No active deployment found. Deploy nodes before updating the service file.", 'yellow')
+            self.wait_for_enter()
+            return
+
         hosts = _get_gpu_hosts(self.inventory)
         if not hosts:
             self.print_colored("No hosts found in inventory.", 'red')
@@ -5221,10 +5309,16 @@ class R1Setup:
             return
 
         overrides = self._get_service_overrides()
-        target_service_version, outdated_hosts, current_hosts = self._get_service_version_drift(hosts)
+        target_service_version, eligible_hosts, outdated_hosts, current_hosts, skipped_hosts = self._get_service_update_inventory(hosts)
 
         self.print_header("Update Service File")
         self.print_colored(f"Target service template version: {target_service_version}", 'cyan', bold=True)
+
+        if skipped_hosts:
+            self.print_colored(
+                f"Skipping nodes without a deployed service: {', '.join(skipped_hosts)}",
+                'yellow'
+            )
 
         if outdated_hosts:
             self.print_colored(f"Needs update ({len(outdated_hosts)}): {', '.join(outdated_hosts)}", 'red')
@@ -5253,7 +5347,7 @@ class R1Setup:
             preselection_label = "nodes that need a service update"
 
         selected_host_names = self.select_hosts(
-            hosts,
+            eligible_hosts,
             "update service file",
             preselect_mode='none',
             initial_selection=initial_selection,
@@ -7292,6 +7386,8 @@ class R1Setup:
                 self._update_node_status(node_name, status_data['status'])
             self.settings_manager.mark_status_refreshed()
             print("                              ", end='\r')
+
+        self._offer_startup_service_update()
 
         while True:
             try:
