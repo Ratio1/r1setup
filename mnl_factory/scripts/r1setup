@@ -61,7 +61,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.4.9"
+    CLI_VERSION = "1.4.10"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -6209,6 +6209,34 @@ class R1Setup:
         else:
             self.print_colored(f"\n\u26a0\ufe0f  Could not retrieve node addresses at this time. Use menu option 5 to check later.", 'yellow')
 
+    def _fetch_node_info_results(self, progress_message: str = "Retrieving node info...") -> Optional[Dict[str, Dict[str, Any]]]:
+        """Fetch parsed node info results without forcing callers to duplicate playbook logic."""
+        playbook_path = self.config_dir / 'playbooks/get_node_info.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"Node info playbook not found: {playbook_path}", 'red')
+            return None
+
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} {playbook_path}")
+
+        self.print_colored(progress_message, 'yellow')
+        success, output = self.run_command(cmd, show_output=False, timeout=self.connection_timeout * 2)
+
+        if not success and "timed out" in output.lower():
+            self.print_colored(f"Node info retrieval timed out after {self.connection_timeout * 2} seconds", 'red')
+            self.print_colored("Some nodes may be offline or not responding", 'yellow')
+            return None
+
+        node_results = self._parse_node_info_output(output)
+        if not node_results:
+            self.print_colored("No node information could be parsed from the playbook output.", 'yellow')
+            self.print_colored("This might be because the nodes are not running or not accessible.", 'yellow')
+            return None
+
+        return node_results
+
     def _parse_node_info_output(self, output: str) -> Dict[str, Dict[str, Any]]:
         """Parse node info output to extract both successful and failed nodes"""
         node_results = {}
@@ -6406,35 +6434,8 @@ class R1Setup:
 
         self.print_header("Node Addresses & Export")
 
-        playbook_path = self.config_dir / 'playbooks/get_node_info.yml'
-        if not playbook_path.exists():
-            self.print_colored(f"Node info playbook not found: {playbook_path}", 'red')
-            self.wait_for_enter()
-            return
-
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} {playbook_path}")
-
-        self.print_colored("Retrieving node addresses...", 'yellow')
-
-        success, output = self.run_command(cmd, show_output=False, timeout=self.connection_timeout * 2)
-
-        # Check for timeout specifically
-        if not success and "timed out" in output.lower():
-            self.print_colored(f"Node address retrieval timed out after {self.connection_timeout * 2} seconds", 'red')
-            self.print_colored("Some nodes may be offline or not responding", 'yellow')
-            self.wait_for_enter()
-            return
-
-        # Parse the output to extract both successful and failed nodes
-        # Note: We parse even if success=False because some nodes might have succeeded
-        node_results = self._parse_node_info_output(output)
-
+        node_results = self._fetch_node_info_results("Retrieving node addresses...")
         if not node_results:
-            self.print_colored("No node information could be parsed from the playbook output.", 'yellow')
-            self.print_colored("This might be because the nodes are not running or not accessible.", 'yellow')
             self.wait_for_enter()
             return
 
@@ -6471,6 +6472,67 @@ class R1Setup:
             self._write_addresses_csv(node_results)
 
         self.wait_for_enter()
+
+    def _display_node_info_details(self, node_results: Dict[str, Dict[str, Any]]) -> None:
+        """Display expanded node information using fetched node data plus local metadata."""
+        self.load_configuration()
+        hosts = _get_gpu_hosts(self.inventory)
+        target_service_version = self.get_mnl_service_version()
+        outdated_service_nodes = []
+
+        self.print_header("Node Details")
+        self.print_colored(f"Target Service Template Version: {target_service_version}", 'cyan')
+
+        for node_name in sorted(node_results.keys()):
+            result = node_results[node_name]
+            host_config = hosts.get(node_name, {})
+            status_info = self._get_node_status_info(node_name)
+            node_status = status_info.get('status', 'unknown')
+            status_emoji, status_color, status_desc = self._get_status_display_info(node_status)
+            applied_service_version = self.get_host_service_file_version(host_config)
+            service_version_state = "current" if applied_service_version == target_service_version else "update recommended"
+            if applied_service_version != target_service_version:
+                outdated_service_nodes.append(node_name)
+
+            self.print_section(node_name)
+            self.print_colored(f"Node Status: {status_emoji} {status_desc}", status_color)
+            self.print_colored(f"Lookup Result: {result.get('status', 'unknown')}", 'white')
+            self.print_colored(f"SSH Host: {host_config.get('ansible_host', 'N/A')}", 'white')
+            self.print_colored(f"SSH User: {host_config.get('ansible_user', 'N/A')}", 'white')
+            self.print_colored(
+                f"Service File Version: {applied_service_version} ({service_version_state})",
+                'green' if applied_service_version == target_service_version else 'red'
+            )
+
+            data = result.get('data') or {}
+            if result.get('status') == 'success' and data:
+                preferred_keys = ['alias', 'eth_address', 'address']
+                shown_keys = set()
+                for key in preferred_keys:
+                    if key in data:
+                        self.print_colored(f"{key}: {data[key]}", 'white')
+                        shown_keys.add(key)
+
+                for key in sorted(data.keys()):
+                    if key in shown_keys:
+                        continue
+                    self.print_colored(f"{key}: {data[key]}", 'white')
+            else:
+                self.print_colored("No live node info returned for this node.", 'yellow')
+
+            print()
+
+        if outdated_service_nodes:
+            self.print_colored("Recommended Actions:", 'red', bold=True)
+            self.print_colored(
+                f"  • Update service for: {', '.join(sorted(outdated_service_nodes))}",
+                'red'
+            )
+            self.print_colored(
+                "  • Apply the updated service template, then run Node Status & Info again to verify.",
+                'yellow'
+            )
+            print()
 
     def _write_addresses_csv(self, node_results: dict) -> None:
         """Write pre-fetched node results to a CSV file"""
@@ -7681,6 +7743,8 @@ class R1Setup:
         env_text = env if env else 'Not Set'
         self.print_colored(f"🌐 {env_text} │ 🐳 {len(hosts)} containers", env_color, bold=True)
         print()
+        target_service_version = self.get_mnl_service_version()
+        outdated_service_nodes = []
 
         # Count status
         running = sum(1 for data in node_status_data.values() if data['status'] == 'running')
@@ -7725,6 +7789,9 @@ class R1Setup:
             user = config.get('ansible_user', 'Unknown')
             status_data = node_status_data[name]
             status = status_data['status']
+            last_update = self._get_node_status_info(name).get('last_update', '')
+            last_update_text = self._format_timestamp_ago(last_update)
+            auth_mode = config.get('r1setup_ssh_auth_mode', 'unknown')
             
             # Status display
             if status == 'running':
@@ -7765,6 +7832,35 @@ class R1Setup:
             display_text = f"   📡 {user}@{ip}"
             padding = 67 - len(display_text)
             self.print_colored(" " * padding + "│", 'cyan')
+
+            applied_service_version = self.get_host_service_file_version(config)
+            if applied_service_version != target_service_version:
+                outdated_service_nodes.append(name)
+                version_color = 'red'
+                version_state = 'UPDATE'
+            else:
+                version_color = 'green'
+                version_state = 'OK'
+
+            self.print_colored("│", 'cyan', end='')
+            self.print_colored(
+                f"   🧩 service {applied_service_version} / target {target_service_version} [{version_state}]",
+                version_color,
+                end=''
+            )
+            version_text = f"   🧩 service {applied_service_version} / target {target_service_version} [{version_state}]"
+            padding = 67 - len(version_text)
+            self.print_colored(" " * max(padding, 0) + "│", 'cyan')
+
+            self.print_colored("│", 'cyan', end='')
+            self.print_colored(
+                f"   🕒 last update {last_update_text} | ssh auth {auth_mode}",
+                'white',
+                end=''
+            )
+            detail_text = f"   🕒 last update {last_update_text} | ssh auth {auth_mode}"
+            padding = 67 - len(detail_text)
+            self.print_colored(" " * max(padding, 0) + "│", 'cyan')
             
             # Add separator between nodes (except last)
             if i < len(hosts) - 1:
@@ -7772,6 +7868,24 @@ class R1Setup:
         
         self.print_colored("└" + "─" * 68 + "┘", 'cyan')
         print()
+
+        if outdated_service_nodes:
+            self.print_colored("Recommended Actions:", 'red', bold=True)
+            self.print_colored(
+                f"  • Update service for: {', '.join(sorted(outdated_service_nodes))}",
+                'red'
+            )
+            self.print_colored(
+                "  • Apply the updated service template, then run Node Status & Info again to verify.",
+                'yellow'
+            )
+            print()
+
+        detail_choice = self.get_input("Show detailed per-node info? (y/N)", "N")
+        if detail_choice.lower() == 'y':
+            node_results = self._fetch_node_info_results("Retrieving detailed per-node info...")
+            if node_results:
+                self._display_node_info_details(node_results)
 
         # Quick actions
         self.print_colored("\U0001f4a1 Quick Actions: Main Menu \u2192 3 (Operations Menu)", 'white')
