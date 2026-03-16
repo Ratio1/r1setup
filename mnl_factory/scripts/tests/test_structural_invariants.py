@@ -104,3 +104,41 @@ class TestStructuralInvariants(unittest.TestCase):
             ver_match.group(1),
             "r1setup fallback CLI_VERSION must match ver.py __VER__",
         )
+
+    def test_service_version_tracks_service_template(self):
+        group_vars_path = R1SETUP_PATH.parent.parent / "group_vars" / "mnl.yml"
+        template_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "templates" / "edge_node.service.j2"
+        group_vars_source = group_vars_path.read_text()
+        template_source = template_path.read_text()
+
+        service_version_match = re.search(r'^mnl_service_version:\s*"([^"]+)"', group_vars_source, re.MULTILINE)
+        self.assertIsNotNone(service_version_match, "mnl_service_version must be defined in group_vars/mnl.yml")
+        self.assertEqual(
+            service_version_match.group(1),
+            "v1",
+            "mnl_service_version should default to a visible service-template revision",
+        )
+
+        self.assertIn(
+            "{{ mnl_service_version }}",
+            template_source,
+            "edge_node.service.j2 must embed mnl_service_version for deployed service tracking",
+        )
+        self.assertIn(
+            "R1SETUP_SERVICE_FILE_VERSION",
+            template_source,
+            "edge_node.service.j2 must expose a machine-readable service version marker",
+        )
+
+        image_url_match = re.search(r'^mnl_docker_image_url:\s*"([^"]+)"', group_vars_source, re.MULTILINE)
+        self.assertIsNotNone(image_url_match, "mnl_docker_image_url must be defined in group_vars/mnl.yml")
+        self.assertIn(
+            "{{ mnl_app_env }}",
+            image_url_match.group(1),
+            "mnl_docker_image_url must continue to use mnl_app_env as the image tag source",
+        )
+        self.assertNotIn(
+            "{{ mnl_service_version }}",
+            image_url_match.group(1),
+            "mnl_service_version must not change Docker image selection semantics",
+        )

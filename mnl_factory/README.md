@@ -49,6 +49,8 @@ Before running the playbook, follow these steps:
    ansible-galaxy collection install -r requirements.yml
    ```
 2. Configure your hosts by editing the `inventory/hosts.yml` file.
+3. If you need to track or bump the deployed `edge_node.service` template revision, edit `group_vars/mnl.yml` and set `mnl_service_version`.
+4. `r1setup` stores the last applied service file version per node in its saved config; missing values are treated as `v0`.
 
 ## Usage
 

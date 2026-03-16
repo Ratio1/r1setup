@@ -96,6 +96,21 @@ class TestParseStatusFields(unittest.TestCase):
         svc, _ = self.tracker._parse_status_fields(text)
         self.assertEqual(svc, "INACTIVE")
 
+    def test_parse_service_file_version_from_summary(self):
+        text = "Service File Version: v12"
+        version = self.tracker._parse_service_file_version(text)
+        self.assertEqual(version, "v12")
+
+    def test_parse_service_file_version_from_env_fallback(self):
+        text = 'Environment="R1SETUP_SERVICE_FILE_VERSION=v4"'
+        version = self.tracker._parse_service_file_version(text)
+        self.assertEqual(version, "v4")
+
+    def test_parse_service_file_version_ignores_unknown(self):
+        text = "Service File Version: unknown"
+        version = self.tracker._parse_service_file_version(text)
+        self.assertIsNone(version)
+
 
 class TestDetermineUpdatedStatus(unittest.TestCase):
     """Tests for NodeStatusTracker._determine_updated_status()."""
@@ -130,3 +145,49 @@ class TestDetermineUpdatedStatus(unittest.TestCase):
 
     def test_unexpected_actual(self):
         self.assertEqual(self.tracker._determine_updated_status("running", "some_garbage"), "unknown")
+
+
+class TestStatusVersionRefresh(unittest.TestCase):
+    """Tests version refresh behavior during status parsing."""
+
+    def setUp(self):
+        self.tracker = r1setup.NodeStatusTracker.__new__(r1setup.NodeStatusTracker)
+        self.tracker.app = MagicMock()
+        self.tracker.app.print_debug = MagicMock()
+        self.tracker.app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {},
+                        }
+                    }
+                }
+            }
+        }
+
+    def test_parse_ansible_status_lines_captures_service_version(self):
+        lines = [
+            'ok: [node-1] => {',
+            '    "msg": "Service Status: ACTIVE\\nService File Version: v5\\nContainer Status: RUNNING"',
+            '}',
+        ]
+
+        data = self.tracker._parse_ansible_status_lines(lines)
+
+        self.assertEqual(data["node-1"]["status"], "running")
+        self.assertEqual(data["node-1"]["service_file_version"], "v5")
+
+    def test_get_real_time_node_status_persists_discovered_versions(self):
+        self.tracker._run_status_playbook = MagicMock(return_value=(True, '\n'.join([
+            'ok: [node-1] => {',
+            '    "msg": "Service Status: ACTIVE\\nService File Version: v9\\nContainer Status: RUNNING"',
+            '}',
+        ])))
+        self.tracker.app.connection_timeout = 30
+        self.tracker.app.record_service_file_versions = MagicMock()
+
+        data = self.tracker._get_real_time_node_status()
+
+        self.assertEqual(data["node-1"]["service_file_version"], "v9")
+        self.tracker.app.record_service_file_versions.assert_called_once_with({"node-1": "v9"})

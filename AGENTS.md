@@ -80,7 +80,7 @@ Ansible collection:
 - `mnl_factory/requirements.yml`: external Ansible collection dependencies
 - `mnl_factory/playbooks/`: operational playbooks including deploy, status, SSH key management, and SSH hardening
 - `mnl_factory/roles/`: Ansible roles for prerequisites, Docker, NVIDIA GPU setup, and final setup
-- `mnl_factory/group_vars/`: collection variables
+- `mnl_factory/group_vars/`: collection variables; `mnl.yml` contains the service-unit version marker `mnl_service_version`
 - `mnl_factory/inventory/`: manual inventory examples
 
 CLI:
@@ -112,6 +112,9 @@ Release workflows:
 Code and repo conventions:
 - Treat `mnl_factory/scripts/r1setup` as the primary operational surface for end-user behavior changes.
 - Keep inventory mutation in the CLI layer and remote-state mutation in Ansible playbooks.
+- Keep `mnl_service_version` in `mnl_factory/group_vars/mnl.yml` as the version marker for `edge_node.service.j2`; it must not replace `mnl_app_env` as the Docker image tag source.
+- Keep per-node applied service-unit state in inventory host metadata under `r1setup_service_file_version`; missing values must be normalized to `v0`.
+- When refreshing node status, prefer updating `r1setup_service_file_version` from live remote data using non-fatal fallbacks instead of trusting local state alone.
 - For SSH key management, use the state model already present in `r1setup` instead of inventing parallel metadata.
 - Update docs when user-visible menus, workflows, triggers, or safety guarantees change.
 - Prefer adding focused unit tests in `mnl_factory/scripts/tests/` for new logic.
@@ -176,3 +179,11 @@ Minimum required critic topics when relevant:
   - Collection publish: `.github/workflows/publish-ansible-galaxy.yml`, triggered by `mnl_factory/galaxy.yml` version changes
 
 - 2026-03-12T12:09:21+02:00 | Critical horizontal pitfall discovered twice during workflow work: `ver.py` and the fallback `CLI_VERSION` in `r1setup` drift easily. Structural test coverage now exists to catch this mismatch early. Any CLI version bump must keep both values aligned.
+
+- 2026-03-16T23:43:36+02:00 | Service image selection now has an explicit top-level override in `mnl_factory/group_vars/mnl.yml`: `mnl_service_version`. It defaults to `{{ mnl_app_env }}` so the existing mainnet/testnet/devnet workflow still works, and `mnl_docker_image_url` must continue to derive its tag from `mnl_service_version`.
+
+- 2026-03-16T23:43:36+02:00 | Correction to the previous 2026-03-16 entry: `mnl_service_version` is for tracking the generated `edge_node.service` template revision, not for selecting the Docker image tag. `mnl_docker_image_url` must continue to derive its tag from `mnl_app_env`, and `edge_node.service.j2` should embed `mnl_service_version` as a header comment.
+
+- 2026-03-16T23:43:36+02:00 | `r1setup` now persists per-node applied service-unit state in inventory as `r1setup_service_file_version`. Missing values are treated as `v0`, the collection default `mnl_service_version` starts at `v1`, and successful deploy/customize-service operations should stamp selected hosts with the current service version.
+
+- 2026-03-16T23:43:36+02:00 | Service status refresh should also reconcile `r1setup_service_file_version` from the remote host when possible. The preferred marker is `R1SETUP_SERVICE_FILE_VERSION` in `edge_node.service`, with fallbacks through `systemctl show`, `systemctl cat`, and direct file reads. Retrieval must be best-effort and must not break status checks.

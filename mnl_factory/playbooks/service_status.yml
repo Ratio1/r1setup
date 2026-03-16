@@ -38,6 +38,33 @@
       register: container_status
       ignore_errors: true
 
+    - name: Detect deployed service file version
+      ansible.builtin.shell: |
+        SERVICE_PATH="/etc/systemd/system/{{ edge_node_service_name }}.service"
+        VERSION=""
+
+        ENV_LINE="$(systemctl show {{ edge_node_service_name }} --property=Environment --value 2>/dev/null || true)"
+        if [ -n "$ENV_LINE" ]; then
+          VERSION="$(printf '%s\n' "$ENV_LINE" | tr ' ' '\n' | sed -n 's/^R1SETUP_SERVICE_FILE_VERSION=//p' | head -n 1)"
+        fi
+
+        if [ -z "$VERSION" ]; then
+          VERSION="$(systemctl cat {{ edge_node_service_name }} 2>/dev/null | sed -n 's/^# R1SETUP_SERVICE_FILE_VERSION=//p' | head -n 1)"
+        fi
+
+        if [ -z "$VERSION" ] && [ -f "$SERVICE_PATH" ]; then
+          VERSION="$(sed -n 's/^# R1SETUP_SERVICE_FILE_VERSION=//p' "$SERVICE_PATH" | head -n 1)"
+        fi
+
+        if [ -z "$VERSION" ] && [ -f "$SERVICE_PATH" ]; then
+          VERSION="$(sed -n 's/^Environment=\"\\{0,1\\}R1SETUP_SERVICE_FILE_VERSION=\\([^\" ]*\\).*$/\\1/p' "$SERVICE_PATH" | head -n 1)"
+        fi
+
+        printf '%s\n' "${VERSION:-unknown}"
+      register: service_file_version
+      ignore_errors: true
+      when: service_exists is not failed
+
     - name: Display service status summary
       debug:
         msg: |
@@ -47,6 +74,7 @@
           Service Name: {{ edge_node_service_name }}
           Service Status: {{ 'ACTIVE' if (service_status.status.ActiveState | default('')) == 'active' else 'INACTIVE/FAILED' if service_exists is not failed else 'NOT FOUND' }}
           Service Enabled: {{ 'YES' if (service_status.status.UnitFileState | default('')) == 'enabled' else 'NO' if service_exists is not failed else 'N/A' }}
+          Service File Version: {{ service_file_version.stdout | default('unknown') | trim if service_exists is not failed else 'NOT FOUND' }}
           Container Status: {{ 'RUNNING' if (container_status is succeeded and mnl_docker_container_name in container_status.stdout and 'Up' in container_status.stdout) else 'NOT RUNNING' }}
 
     - name: Display detailed service information

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Tests for core R1Setup instance methods."""
 
+import os
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from tests.support import r1setup
@@ -103,3 +106,128 @@ class TestWaitForEnter(unittest.TestCase):
         self.app.wait_for_enter("whatever")
         arg = mock_input.call_args[0][0]
         self.assertTrue(arg.startswith("\n"))
+
+
+class TestServiceVersionTracking(unittest.TestCase):
+    """Tests for service-template version persistence helpers."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.base_path = Path(self.temp_dir.name)
+
+        self.app = MagicMock()
+        self.app.config_dir = self.base_path
+        self.app.config_file = self.base_path / "hosts.yml"
+        self.app.vars_file = self.base_path / "group_vars" / "variables.yml"
+        self.app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {}
+                    }
+                }
+            }
+        }
+        self.app.print_debug = MagicMock()
+        self.app.print_colored = MagicMock()
+
+        self.cm = r1setup.ConfigurationManager(self.app)
+
+    def test_get_host_service_file_version_defaults_to_v0(self):
+        self.assertEqual(
+            self.cm.get_host_service_file_version({}),
+            r1setup.DEFAULT_SERVICE_FILE_VERSION,
+        )
+
+    def test_load_configuration_backfills_missing_service_version(self):
+        self.base_path.mkdir(parents=True, exist_ok=True)
+        self.app.config_file.write_text(
+            "all:\n"
+            "  children:\n"
+            "    gpu_nodes:\n"
+            "      hosts:\n"
+            "        node-1:\n"
+            "          ansible_host: 10.0.0.1\n"
+            "          ansible_user: root\n"
+        )
+        self.cm._save_configuration = MagicMock()
+
+        loaded = self.cm.load_configuration()
+
+        self.assertTrue(loaded)
+        host = self.app.inventory["all"]["children"]["gpu_nodes"]["hosts"]["node-1"]
+        self.assertEqual(host[r1setup.SERVICE_FILE_VERSION_FIELD], "v0")
+        self.cm._save_configuration.assert_called_once()
+
+    def test_record_service_file_version_updates_selected_hosts(self):
+        group_vars_dir = self.base_path / "group_vars"
+        group_vars_dir.mkdir(parents=True, exist_ok=True)
+        (group_vars_dir / "mnl.yml").write_text('mnl_service_version: "v7"\n')
+        self.app.inventory["all"]["children"]["gpu_nodes"]["hosts"] = {
+            "node-1": {},
+            "node-2": {r1setup.SERVICE_FILE_VERSION_FIELD: "v3"},
+        }
+        self.cm._save_configuration = MagicMock()
+
+        self.cm.record_service_file_version(["node-1"])
+
+        hosts = self.app.inventory["all"]["children"]["gpu_nodes"]["hosts"]
+        self.assertEqual(hosts["node-1"][r1setup.SERVICE_FILE_VERSION_FIELD], "v7")
+        self.assertEqual(hosts["node-2"][r1setup.SERVICE_FILE_VERSION_FIELD], "v3")
+        self.cm._save_configuration.assert_called_once()
+
+
+class TestDeploymentServiceVersionStamping(unittest.TestCase):
+    """Tests deployment success stamps selected hosts with the current service version."""
+
+    def test_successful_deploy_records_service_version(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_path = Path(temp_dir)
+            playbooks_dir = base_path / "playbooks"
+            playbooks_dir.mkdir(parents=True, exist_ok=True)
+            (playbooks_dir / "site.yml").write_text("---\n")
+
+            app = MagicMock()
+            app.check_hosts_config.return_value = True
+            app.load_configuration.return_value = True
+            app.inventory = {
+                "all": {
+                    "children": {
+                        "gpu_nodes": {
+                            "hosts": {
+                                "node-1": {"ansible_host": "10.0.0.1", "ansible_user": "root"}
+                            }
+                        }
+                    }
+                }
+            }
+            app.get_mnl_app_env.return_value = "mainnet"
+            app.select_hosts.return_value = ["node-1"]
+            app._get_node_status_info.return_value = {"status": "never_deployed"}
+            app._get_status_display_info.return_value = ("?", "yellow", "Never deployed")
+            app.get_input.return_value = "y"
+            app.config_dir = base_path
+            app.config_file = base_path / "hosts.yml"
+            app.active_config = {"deployment_status": "never_deployed"}
+            app.run_command.return_value = (True, "")
+            app.print_colored = MagicMock()
+            app.print_header = MagicMock()
+            app.wait_for_enter = MagicMock()
+            app._update_node_status = MagicMock()
+            app._display_node_status = MagicMock()
+            app._display_copy_friendly_addresses = MagicMock()
+            app.record_service_file_version = MagicMock()
+
+            service = r1setup.DeploymentService(app)
+
+            with patch.dict(os.environ, {
+                "ANSIBLE_CONFIG": "ansible.cfg",
+                "ANSIBLE_COLLECTIONS_PATH": "collections",
+                "ANSIBLE_HOME": "ansible-home",
+            }, clear=False):
+                with patch.object(service, "_update_deployment_metadata") as update_metadata:
+                    service._deploy_setup("site.yml", "Full Deployment", "Docker + NVIDIA drivers + GPU setup")
+
+            update_metadata.assert_called_once_with("full")
+            app.record_service_file_version.assert_called_once_with(["node-1"])

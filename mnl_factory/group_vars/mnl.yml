@@ -2,6 +2,9 @@
 # Basic application configuration
 mnl_app_name: "edge_node"
 mnl_app_version: "1.0.0"
+# Version marker embedded in edge_node.service for tracking service-unit changes.
+# Bump this when the systemd template/behavior changes and redeploy the service.
+mnl_service_version: "v1"
 mnl_dev_mode: false
 
 # Service configuration

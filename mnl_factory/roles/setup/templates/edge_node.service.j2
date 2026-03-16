@@ -1,3 +1,5 @@
+# Managed by ratio1.multi_node_launcher
+# R1SETUP_SERVICE_FILE_VERSION={{ mnl_service_version }}
 [Unit]
 Description=MultiNodeLauncher Execution Engine
 After=docker.service
@@ -7,6 +9,7 @@ Requires=docker.service
 StartLimitBurst=0
 TimeoutStartSec=0
 Restart=always
+Environment="R1SETUP_SERVICE_FILE_VERSION={{ mnl_service_version }}"
 
 # Stop the container if it exists
 ExecStartPre=-/usr/bin/docker stop -t 20 {{ mnl_docker_container_name }}
