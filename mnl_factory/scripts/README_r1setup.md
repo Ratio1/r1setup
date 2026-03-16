@@ -28,6 +28,7 @@ r1setup
 - Start, stop, and restart deployed services
 - Re-apply the current versioned service file from `Operations -> Update Service File`
 - On startup, `r1setup` may offer a direct service-file update prompt when deployed nodes are behind the current target version
+- Applied service definitions also render launcher metadata at `/var/lib/ratio1/r1setup/edge_node/metadata.json` and mount it read-only into the container at `/run/r1setup/metadata.json`
 
 ### Information
 - Get node information

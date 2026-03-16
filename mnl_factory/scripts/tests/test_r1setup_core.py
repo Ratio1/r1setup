@@ -218,6 +218,12 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
             app._display_node_status = MagicMock()
             app._display_copy_friendly_addresses = MagicMock()
             app.record_service_file_version = MagicMock()
+            app._build_runtime_metadata_extra_vars = MagicMock(return_value={
+                "r1setup_cli_version": "1.4.12",
+                "r1setup_collection_version": "1.3.30",
+                "r1setup_last_applied_action": "deploy_full",
+            })
+            app._append_ansible_extra_vars = MagicMock(side_effect=lambda cmd, extra_vars: f"{cmd} --extra-vars '{extra_vars}'")
 
             service = r1setup.DeploymentService(app)
 
@@ -231,6 +237,7 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
 
             update_metadata.assert_called_once_with("full")
             app.record_service_file_version.assert_called_once_with(["node-1"])
+            self.assertIn("r1setup_last_applied_action", app.run_command.call_args[0][0])
 
 
 class TestNodeInfoDetails(unittest.TestCase):
@@ -459,6 +466,7 @@ class TestServiceFileUpdateFlow(unittest.TestCase):
         app._apply_service_template_to_hosts.assert_called_once_with(
             ["node-1"],
             overrides=None,
+            last_applied_action="update_service_file",
             progress_message="Applying service file update...",
             success_message="Service file update applied on 1 node(s).",
             failure_message="Service file update encountered errors. Check the output above.",
@@ -602,6 +610,7 @@ class TestStartupServiceUpdatePrompt(unittest.TestCase):
         app._apply_service_template_to_hosts.assert_called_once_with(
             ["node-1"],
             overrides=None,
+            last_applied_action="update_service_file",
             progress_message="Applying service file update...",
             success_message="Service file update applied on 1 node(s).",
             failure_message="Service file update encountered errors. Check the output above.",
@@ -749,3 +758,29 @@ class TestSuggestedActions(unittest.TestCase):
 
         self.assertEqual(default_option, "3")
         self.assertIn("Update service file on 1 node(s)", hint)
+
+
+class TestRuntimeMetadataHelpers(unittest.TestCase):
+    """Tests CLI helpers that attach runtime metadata to ansible commands."""
+
+    def test_get_collection_version_reads_galaxy_yml(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = MagicMock()
+            app.config_dir = Path(temp_dir)
+            app.print_debug = MagicMock()
+            (Path(temp_dir) / "galaxy.yml").write_text('version: "1.3.30"\n')
+
+            cm = r1setup.ConfigurationManager(app)
+
+            self.assertEqual(cm.get_collection_version(), "1.3.30")
+
+    def test_build_runtime_metadata_extra_vars_merges_existing_payload(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.get_collection_version = MagicMock(return_value="1.3.30")
+
+        payload = app._build_runtime_metadata_extra_vars("customize_service", {"skip_gpu": True})
+
+        self.assertEqual(payload["skip_gpu"], True)
+        self.assertEqual(payload["r1setup_collection_version"], "1.3.30")
+        self.assertEqual(payload["r1setup_last_applied_action"], "customize_service")
+        self.assertEqual(payload["r1setup_cli_version"], r1setup.CLI_VERSION)

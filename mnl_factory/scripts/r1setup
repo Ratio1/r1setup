@@ -61,7 +61,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.4.12"
+    CLI_VERSION = "1.4.13"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -1461,6 +1461,20 @@ class ConfigurationManager:
             except Exception as e:
                 self.app.print_debug(f"Unable to read service version from {service_vars_file}: {e}")
         return DEFAULT_SERVICE_FILE_VERSION
+
+    def get_collection_version(self) -> str:
+        """Get the current Ansible collection version from galaxy.yml."""
+        galaxy_file = self.app.config_dir / 'galaxy.yml'
+        if galaxy_file.exists():
+            try:
+                with open(galaxy_file) as f:
+                    data = yaml.safe_load(f) or {}
+                version = str(data.get('version') or '').strip()
+                if version:
+                    return version
+            except Exception as e:
+                self.app.print_debug(f"Unable to read collection version from {galaxy_file}: {e}")
+        return 'unknown'
 
     @staticmethod
     def get_host_service_file_version(host_config: Dict[str, Any]) -> str:
@@ -3013,11 +3027,22 @@ class DeploymentService:
 
     def deploy_full(self) -> None:
         """Deploy full setup (Docker + NVIDIA + GPU)"""
-        self._deploy_setup("site.yml", "Full Deployment", "Docker + NVIDIA drivers + GPU setup")
+        self._deploy_setup(
+            "site.yml",
+            "Full Deployment",
+            "Docker + NVIDIA drivers + GPU setup",
+            last_applied_action="deploy_full",
+        )
 
     def deploy_docker_only(self) -> None:
         """Deploy Docker only"""
-        self._deploy_setup("site.yml", "Docker-Only Deployment", "Docker without GPU setup", extra_vars="skip_gpu=true")
+        self._deploy_setup(
+            "site.yml",
+            "Docker-Only Deployment",
+            "Docker without GPU setup",
+            extra_vars={"skip_gpu": True},
+            last_applied_action="deploy_docker_only",
+        )
 
     def delete_edge_node(self) -> None:
         """Delete deployed Edge Node with host selection"""
@@ -3121,7 +3146,14 @@ class DeploymentService:
 
         self.app.wait_for_enter()
 
-    def _deploy_setup(self, playbook: str, title: str, description: str, extra_vars: str = "") -> None:
+    def _deploy_setup(
+        self,
+        playbook: str,
+        title: str,
+        description: str,
+        extra_vars: Optional[Dict[str, Any]] = None,
+        last_applied_action: str = "deploy",
+    ) -> None:
         """Common deployment logic with host selection"""
         if not self.app.check_hosts_config():
             self.app.print_colored("No nodes configured! Please configure nodes first.", 'red')
@@ -3220,8 +3252,10 @@ class DeploymentService:
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
                f"ansible-playbook -i {self.app.config_file} --limit {host_limit} {playbook_path}")
 
-        if extra_vars:
-            cmd += f' --extra-vars "{extra_vars}"'
+        cmd = self.app._append_ansible_extra_vars(
+            cmd,
+            self.app._build_runtime_metadata_extra_vars(last_applied_action, extra_vars),
+        )
 
         # Update selected node statuses to deploying
         for host_name in selected_host_names:
@@ -4772,6 +4806,9 @@ class R1Setup:
     def get_mnl_service_version(self) -> str:
         return self.config_manager.get_mnl_service_version()
 
+    def get_collection_version(self) -> str:
+        return self.config_manager.get_collection_version()
+
     def get_host_service_file_version(self, host_config: Dict[str, Any]) -> str:
         return self.config_manager.get_host_service_file_version(host_config)
 
@@ -4780,6 +4817,27 @@ class R1Setup:
 
     def record_service_file_versions(self, host_versions: Dict[str, str]) -> None:
         return self.config_manager.record_service_file_versions(host_versions)
+
+    def _build_runtime_metadata_extra_vars(
+        self,
+        last_applied_action: str,
+        extra_vars: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Attach runtime metadata fields to an Ansible extra-vars payload."""
+        payload = dict(extra_vars or {})
+        payload.update({
+            'r1setup_cli_version': CLI_VERSION,
+            'r1setup_collection_version': self.get_collection_version(),
+            'r1setup_last_applied_action': last_applied_action,
+        })
+        return payload
+
+    @staticmethod
+    def _append_ansible_extra_vars(cmd: str, extra_vars: Optional[Dict[str, Any]] = None) -> str:
+        """Append JSON-encoded extra-vars to an ansible-playbook command."""
+        if not extra_vars:
+            return cmd
+        return f"{cmd} --extra-vars '{json.dumps(extra_vars)}'"
 
     def _get_suggested_action(self):
         """Return (default_option, hint_text) based on current state."""
@@ -5201,6 +5259,7 @@ class R1Setup:
         self._apply_service_template_to_hosts(
             outdated_hosts,
             overrides=overrides or None,
+            last_applied_action="update_service_file",
             progress_message="Applying service file update...",
             success_message=f"Service file update applied on {len(outdated_hosts)} node(s).",
             failure_message="Service file update encountered errors. Check the output above.",
@@ -5250,6 +5309,7 @@ class R1Setup:
         selected_host_names: List[str],
         *,
         overrides: Optional[Dict[str, Any]] = None,
+        last_applied_action: str,
         progress_message: str,
         success_message: str,
         failure_message: str,
@@ -5267,9 +5327,10 @@ class R1Setup:
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
                f"ansible-playbook -i {self.config_file} --limit {host_limit} {playbook_path}")
 
-        if overrides:
-            extra = json.dumps(overrides)
-            cmd += f" --extra-vars '{extra}'"
+        cmd = self._append_ansible_extra_vars(
+            cmd,
+            self._build_runtime_metadata_extra_vars(last_applied_action, overrides),
+        )
 
         for host_name in selected_host_names:
             self._update_node_status(host_name, 'deploying')
@@ -5380,6 +5441,7 @@ class R1Setup:
         self._apply_service_template_to_hosts(
             selected_host_names,
             overrides=overrides or None,
+            last_applied_action="update_service_file",
             progress_message="Applying service file update...",
             success_message=f"Service file update applied on {len(selected_host_names)} node(s).",
             failure_message="Service file update encountered errors. Check the output above.",
@@ -5604,6 +5666,7 @@ class R1Setup:
         self._apply_service_template_to_hosts(
             selected_host_names,
             overrides=overrides or None,
+            last_applied_action="customize_service",
             progress_message="Applying service customization...",
             success_message=f"Service customization applied on {len(selected_host_names)} node(s).",
             failure_message="Customization encountered errors. Check the output above.",

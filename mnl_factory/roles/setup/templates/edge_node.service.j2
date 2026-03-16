@@ -27,6 +27,8 @@ ExecStart=/bin/sh -c '/usr/bin/docker run \
     --cgroupns=host \
     --name {{ mnl_docker_container_name }} \
     -e EE_ID={{ inventory_hostname }} \
+    -e R1SETUP_METADATA_PATH={{ mnl_r1setup_metadata_container_path }} \
+    -v {{ mnl_r1setup_metadata_host_path }}:{{ mnl_r1setup_metadata_container_path }}:ro \
     -v {{ mnl_docker_volume_path }}:{{ mnl_docker_persistent_folder }} \
     {{ mnl_docker_image_url }}; \
     echo $? > /tmp/ee-node.exit'

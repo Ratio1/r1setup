@@ -108,8 +108,10 @@ class TestStructuralInvariants(unittest.TestCase):
     def test_service_version_tracks_service_template(self):
         group_vars_path = R1SETUP_PATH.parent.parent / "group_vars" / "mnl.yml"
         template_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "templates" / "edge_node.service.j2"
+        metadata_template_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "templates" / "r1setup-metadata.json.j2"
         group_vars_source = group_vars_path.read_text()
         template_source = template_path.read_text()
+        metadata_template_source = metadata_template_path.read_text()
 
         service_version_match = re.search(r'^mnl_service_version:\s*"([^"]+)"', group_vars_source, re.MULTILINE)
         self.assertIsNotNone(service_version_match, "mnl_service_version must be defined in group_vars/mnl.yml")
@@ -128,6 +130,47 @@ class TestStructuralInvariants(unittest.TestCase):
             "R1SETUP_SERVICE_FILE_VERSION",
             template_source,
             "edge_node.service.j2 must expose a machine-readable service version marker",
+        )
+        self.assertIn(
+            "R1SETUP_METADATA_PATH",
+            template_source,
+            "edge_node.service.j2 must expose the metadata file path to the container",
+        )
+        self.assertIn(
+            "{{ mnl_r1setup_metadata_host_path }}:{{ mnl_r1setup_metadata_container_path }}:ro",
+            template_source,
+            "edge_node.service.j2 must mount the r1setup metadata file read-only",
+        )
+
+        self.assertIn(
+            'mnl_r1setup_metadata_host_path: "{{ mnl_r1setup_metadata_host_dir }}/metadata.json"',
+            group_vars_source,
+            "mnl.yml must define the canonical host metadata path",
+        )
+        self.assertIn(
+            'mnl_r1setup_metadata_container_path: "{{ mnl_r1setup_metadata_container_dir }}/metadata.json"',
+            group_vars_source,
+            "mnl.yml must define the canonical container metadata path",
+        )
+        self.assertIn(
+            '"managed_by": "r1setup"',
+            metadata_template_source,
+            "r1setup metadata template must identify its manager",
+        )
+        self.assertIn(
+            '"service_file_version": {{ mnl_service_version | to_json }}',
+            metadata_template_source,
+            "metadata template must expose the service file version",
+        )
+        self.assertIn(
+            '"collection_version": {{ r1setup_collection_version_effective',
+            metadata_template_source,
+            "metadata template must expose the collection version",
+        )
+        self.assertIn(
+            '"last_applied_action": {{ r1setup_last_applied_action_effective',
+            metadata_template_source,
+            "metadata template must expose the last applied action",
         )
 
         image_url_match = re.search(r'^mnl_docker_image_url:\s*"([^"]+)"', group_vars_source, re.MULTILINE)

@@ -1,0 +1,45 @@
+---
+- name: Resolve runtime metadata values
+  ansible.builtin.set_fact:
+    r1setup_cli_version_effective: "{{ r1setup_cli_version | default('unknown', true) }}"
+    r1setup_collection_version_effective: >-
+      {{
+        r1setup_collection_version
+        | default(
+            (
+              (
+                lookup('ansible.builtin.file', playbook_dir ~ '/../galaxy.yml', errors='ignore')
+                | default('{}', true)
+              )
+              | from_yaml
+            ).version,
+            true
+          )
+        | default('unknown', true)
+      }}
+    r1setup_last_applied_action_effective: "{{ r1setup_last_applied_action | default('deploy', true) }}"
+
+- name: Create r1setup metadata directory
+  ansible.builtin.file:
+    path: "{{ mnl_r1setup_metadata_host_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Render r1setup metadata file
+  ansible.builtin.template:
+    src: r1setup-metadata.json.j2
+    dest: "{{ mnl_r1setup_metadata_host_path }}"
+    owner: root
+    group: root
+    mode: '0644'
+    force: true
+
+- name: Create service for {{ mnl_app_name }}
+  ansible.builtin.template:
+    src: edge_node.service.j2
+    dest: /etc/systemd/system/{{ edge_node_service_name }}.service
+    mode: '0644'
+    force: true
+  notify: reload systemd

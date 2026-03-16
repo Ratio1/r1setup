@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "managed_by": "r1setup",
+  "service_file_version": {{ mnl_service_version | to_json }},
+  "cli_version": {{ r1setup_cli_version_effective | default('unknown', true) | to_json }},
+  "collection_version": {{ r1setup_collection_version_effective | default('unknown', true) | to_json }},
+  "app_env": {{ mnl_app_env | default('unknown', true) | to_json }},
+  "node_name": {{ inventory_hostname | to_json }},
+  "last_applied_action": {{ r1setup_last_applied_action_effective | default('unknown', true) | to_json }},
+  "last_applied_at": {{ ansible_date_time.iso8601 | default('unknown', true) | to_json }}
+}

@@ -15,6 +15,7 @@
         msg: |
           WARNING: This will completely remove the Edge Node deployment including:
           - Systemd service ({{ edge_node_service_name }})
+          - r1setup metadata file ({{ mnl_r1setup_metadata_host_path }})
           - Docker container ({{ mnl_docker_container_name }})
           - Docker images ({{ mnl_docker_image_url }})
           - Application data directory ({{ mnl_base_folder }})
@@ -37,6 +38,12 @@
       ansible.builtin.file:
         path: "/etc/systemd/system/{{ edge_node_service_name }}.service"
         state: absent
+
+    - name: Remove r1setup metadata directory
+      ansible.builtin.file:
+        path: "{{ mnl_r1setup_metadata_host_dir }}"
+        state: absent
+      ignore_errors: true
 
     - name: Reload systemd daemon
       ansible.builtin.systemd:

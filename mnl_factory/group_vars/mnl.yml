@@ -38,5 +38,9 @@ mnl_commented_restart: ''  # Empty -> restart enabled, '#' -> restart disabled
 
 # Service files paths
 mnl_config_startup_path: "{{ mnl_docker_volume_path }}/config_startup.json"
+mnl_r1setup_metadata_host_dir: "/var/lib/ratio1/r1setup/edge_node"
+mnl_r1setup_metadata_host_path: "{{ mnl_r1setup_metadata_host_dir }}/metadata.json"
+mnl_r1setup_metadata_container_dir: "/run/r1setup"
+mnl_r1setup_metadata_container_path: "{{ mnl_r1setup_metadata_container_dir }}/metadata.json"
 
 # Optional settings (commented out)
