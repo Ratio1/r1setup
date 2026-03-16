@@ -24,6 +24,10 @@ r1setup
 - Full deployment (Docker + NVIDIA + GPU)
 - Docker-only deployment
 
+### Operations
+- Start, stop, and restart deployed services
+- Re-apply the current versioned service file from `Operations -> Update Service File`
+
 ### Information
 - Get node information
 - Display/export node addresses

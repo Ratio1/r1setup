@@ -61,7 +61,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.4.10"
+    CLI_VERSION = "1.4.11"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -5082,6 +5082,9 @@ class R1Setup:
             self.print_colored("\U0001f4e1 CONNECTIVITY", 'cyan', bold=True)
             self.print_colored("  4) Test Connectivity      - Verify connection to configured nodes")
             print()
+            self.print_colored("\U0001f9e9 SERVICE UPDATES", 'cyan', bold=True)
+            self.print_colored("  5) Update Service File    - Re-apply the versioned service template")
+            print()
             self.print_colored("  0) Back to Main Menu")
             print()
 
@@ -5089,7 +5092,7 @@ class R1Setup:
 
             if choice == '0':
                 break
-            elif choice in ('1', '2', '3', '4') and not has_config:
+            elif choice in ('1', '2', '3', '4', '5') and not has_config:
                 self.print_colored("No nodes configured. Please configure nodes first (Main Menu \u2192 1).", 'red')
                 self.wait_for_enter()
                 continue
@@ -5101,9 +5104,194 @@ class R1Setup:
                 self.restart_edge_node_service()
             elif choice == '4':
                 self.test_connectivity()
+            elif choice == '5':
+                self.update_service_file()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-5.", 'red')
                 self.wait_for_enter()
+
+    def _get_service_version_drift(self, hosts: Dict[str, Dict[str, Any]]) -> Tuple[str, List[str], List[str]]:
+        """Return target version plus outdated and current host lists in inventory order."""
+        target_service_version = self.get_mnl_service_version()
+        outdated_hosts = []
+        current_hosts = []
+
+        for host_name, host_config in hosts.items():
+            applied_service_version = self.get_host_service_file_version(host_config)
+            if applied_service_version == target_service_version:
+                current_hosts.append(host_name)
+            else:
+                outdated_hosts.append(host_name)
+
+        return target_service_version, outdated_hosts, current_hosts
+
+    def _refresh_service_update_status(self, selected_host_names: List[str]) -> None:
+        """Best-effort verification after a service template update."""
+        self.print_colored("\nVerifying service update status...", 'cyan')
+
+        try:
+            node_status_data = self._get_real_time_node_status()
+        except Exception as e:
+            self.print_debug(f"Unable to refresh status after service update: {e}")
+            node_status_data = {}
+
+        if not node_status_data:
+            self.print_colored(
+                "⚠️  Service update completed, but live verification was unavailable. Stored version was updated locally.",
+                'yellow'
+            )
+            for host_name in selected_host_names:
+                self._update_node_status(host_name, 'running')
+            return
+
+        refreshed_hosts = set()
+        for host_name in selected_host_names:
+            status_data = node_status_data.get(host_name)
+            if not status_data:
+                continue
+
+            resolved_status = status_data.get('status', 'running')
+            self._update_node_status(host_name, resolved_status)
+            refreshed_hosts.add(host_name)
+
+        missing_hosts = [host_name for host_name in selected_host_names if host_name not in refreshed_hosts]
+        if missing_hosts:
+            self.print_colored(
+                f"⚠️  No live verification returned for: {', '.join(sorted(missing_hosts))}. Keeping them marked as running.",
+                'yellow'
+            )
+            for host_name in missing_hosts:
+                self._update_node_status(host_name, 'running')
+
+    def _apply_service_template_to_hosts(
+        self,
+        selected_host_names: List[str],
+        *,
+        overrides: Optional[Dict[str, Any]] = None,
+        progress_message: str,
+        success_message: str,
+        failure_message: str,
+    ) -> bool:
+        """Apply the service template playbook to selected nodes."""
+        playbook_path = self.config_dir / 'playbooks/customize_service.yml'
+        if not playbook_path.exists():
+            self.print_colored(f"Playbook not found: {playbook_path}", 'red')
+            self.wait_for_enter()
+            return False
+
+        host_limit = ','.join(selected_host_names)
+        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+               f"ansible-playbook -i {self.config_file} --limit {host_limit} {playbook_path}")
+
+        if overrides:
+            extra = json.dumps(overrides)
+            cmd += f" --extra-vars '{extra}'"
+
+        for host_name in selected_host_names:
+            self._update_node_status(host_name, 'deploying')
+
+        self.print_colored(f"\n{progress_message}", 'cyan')
+        success, _ = self.run_command(cmd, show_output=True)
+
+        if success:
+            self.print_colored(f"\n✅ {success_message}", 'green')
+            self.record_service_file_version(selected_host_names)
+            self._refresh_service_update_status(selected_host_names)
+            return True
+
+        self.print_colored(f"\n❌ {failure_message}", 'red')
+        for host_name in selected_host_names:
+            self._update_node_status(host_name, 'error')
+        return False
+
+    def update_service_file(self) -> None:
+        """Operator-facing flow for applying the current service template version."""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured!", 'red')
+            self.wait_for_enter()
+            return
+
+        self.load_configuration()
+        hosts = _get_gpu_hosts(self.inventory)
+        if not hosts:
+            self.print_colored("No hosts found in inventory.", 'red')
+            self.wait_for_enter()
+            return
+
+        overrides = self._get_service_overrides()
+        target_service_version, outdated_hosts, current_hosts = self._get_service_version_drift(hosts)
+
+        self.print_header("Update Service File")
+        self.print_colored(f"Target service template version: {target_service_version}", 'cyan', bold=True)
+
+        if outdated_hosts:
+            self.print_colored(f"Needs update ({len(outdated_hosts)}): {', '.join(outdated_hosts)}", 'red')
+        else:
+            self.print_colored("All nodes already have the current service file version.", 'green')
+
+        if current_hosts:
+            self.print_colored(f"Already current ({len(current_hosts)}): {', '.join(current_hosts)}", 'green')
+
+        if overrides:
+            self.print_colored(
+                f"Active service overrides: {len(overrides)}. They will be included in this update.",
+                'yellow'
+            )
+        print()
+
+        if not outdated_hosts:
+            if self.get_input("Re-apply the service file anyway? (y/N)", "N").lower() != 'y':
+                self.print_colored("Service update cancelled.", 'yellow')
+                self.wait_for_enter()
+                return
+            initial_selection = set(hosts.keys())
+            preselection_label = "all configured nodes"
+        else:
+            initial_selection = set(outdated_hosts)
+            preselection_label = "nodes that need a service update"
+
+        selected_host_names = self.select_hosts(
+            hosts,
+            "update service file",
+            preselect_mode='none',
+            initial_selection=initial_selection,
+            preselection_label=preselection_label,
+        )
+        if not selected_host_names:
+            self.print_colored("Cancelled — no hosts selected.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        self.print_colored(f"\n🖥️  Target nodes ({len(selected_host_names)}):", 'cyan', bold=True)
+        for name in selected_host_names:
+            config = hosts[name]
+            ip = config.get('ansible_host', '?')
+            current_version = self.get_host_service_file_version(config)
+            version_color = 'red' if current_version != target_service_version else 'green'
+            self.print_colored(
+                f"   • {name}: {ip} | service {current_version} -> {target_service_version}",
+                version_color
+            )
+
+        if overrides:
+            self.print_colored("   • active overrides will also be re-applied", 'yellow')
+
+        if self.get_input("\nProceed with service file update? (y/n)", "y").lower() != 'y':
+            self.print_colored("Service update cancelled.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        self._apply_service_template_to_hosts(
+            selected_host_names,
+            overrides=overrides or None,
+            progress_message="Applying service file update...",
+            success_message=f"Service file update applied on {len(selected_host_names)} node(s).",
+            failure_message="Service file update encountered errors. Check the output above.",
+        )
+
+        self.wait_for_enter()
 
     # -- Customize Service --
 
@@ -5319,34 +5507,13 @@ class R1Setup:
             self.wait_for_enter()
             return
 
-        playbook_path = self.config_dir / 'playbooks/customize_service.yml'
-        if not playbook_path.exists():
-            self.print_colored(f"Playbook not found: {playbook_path}", 'red')
-            self.wait_for_enter()
-            return
-
-        host_limit = ','.join(selected_host_names)
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} --limit {host_limit} {playbook_path}")
-
-        if overrides:
-            extra = json.dumps(overrides)
-            cmd += f" --extra-vars '{extra}'"
-
-        self.print_colored("\nApplying service customization...", 'cyan')
-        success, _ = self.run_command(cmd, show_output=True)
-
-        if success:
-            self.print_colored(f"\n✅ Service customization applied on {len(selected_host_names)} node(s).", 'green')
-            self.record_service_file_version(selected_host_names)
-            for host_name in selected_host_names:
-                self._update_node_status(host_name, 'running')
-        else:
-            self.print_colored("\n❌ Customization encountered errors. Check the output above.", 'red')
-            for host_name in selected_host_names:
-                self._update_node_status(host_name, 'error')
+        self._apply_service_template_to_hosts(
+            selected_host_names,
+            overrides=overrides or None,
+            progress_message="Applying service customization...",
+            success_message=f"Service customization applied on {len(selected_host_names)} node(s).",
+            failure_message="Customization encountered errors. Check the output above.",
+        )
 
         self.wait_for_enter()
 
@@ -6529,7 +6696,7 @@ class R1Setup:
                 'red'
             )
             self.print_colored(
-                "  • Apply the updated service template, then run Node Status & Info again to verify.",
+                "  • Use Operations Menu -> Update Service File, then run Node Status & Info again to verify.",
                 'yellow'
             )
             print()
@@ -7418,8 +7585,14 @@ class R1Setup:
         
         self.wait_for_enter()
 
-    def select_hosts(self, hosts: Dict[str, Dict[str, Any]], operation_name: str,
-                     preselect_mode: str = 'all') -> List[str]:
+    def select_hosts(
+        self,
+        hosts: Dict[str, Dict[str, Any]],
+        operation_name: str,
+        preselect_mode: str = 'all',
+        initial_selection: Optional[set] = None,
+        preselection_label: Optional[str] = None,
+    ) -> List[str]:
         """Unified host selection UI (interactive with termios, fallback without).
 
         preselect_mode: 'all' (all selected) | 'undeployed' (never_deployed/deleted selected) | 'none'
@@ -7428,27 +7601,31 @@ class R1Setup:
         if not hosts:
             return []
 
-        # Compute initial selection based on preselect_mode
-        if preselect_mode == 'undeployed':
-            initial_selection = set()
-            for host_name in hosts:
-                status_info = self._get_node_status_info(host_name)
-                if status_info['status'] in ['never_deployed', 'deleted']:
-                    initial_selection.add(host_name)
-        elif preselect_mode == 'none':
-            initial_selection = set()
-        else:  # 'all'
-            initial_selection = set(hosts.keys())
+        # Compute initial selection based on preselect_mode unless the caller supplied one.
+        if initial_selection is None:
+            if preselect_mode == 'undeployed':
+                initial_selection = set()
+                for host_name in hosts:
+                    status_info = self._get_node_status_info(host_name)
+                    if status_info['status'] in ['never_deployed', 'deleted']:
+                        initial_selection.add(host_name)
+                preselection_label = preselection_label or "nodes that were never deployed or deleted"
+            elif preselect_mode == 'none':
+                initial_selection = set()
+            else:  # 'all'
+                initial_selection = set(hosts.keys())
+        else:
+            initial_selection = set(initial_selection)
 
         try:
             import tty
             import termios
-            return self._interactive_select_hosts(hosts, operation_name, initial_selection)
+            return self._interactive_select_hosts(hosts, operation_name, initial_selection, preselection_label)
         except ImportError:
-            return self._fallback_select_hosts(hosts, operation_name, initial_selection)
+            return self._fallback_select_hosts(hosts, operation_name, initial_selection, preselection_label)
 
     def _render_host_menu(self, hosts, host_list, selected_hosts, current_index, operation_name,
-                          initial_selection=None, interactive=True):
+                          initial_selection=None, interactive=True, preselection_label=None):
         """Render the host selection menu (shared by interactive and fallback modes)."""
         # Clear screen and move cursor to top
         print("\033[2J\033[H", end="")
@@ -7472,11 +7649,12 @@ class R1Setup:
             self.print_colored("   • Press Enter when ready to proceed", 'white')
         print()
 
-        # Show preselection info (only for 'undeployed' mode)
+        # Show preselection info when a subset was intentionally pre-selected.
         if initial_selection is not None and initial_selection != set(hosts.keys()):
             preselected = initial_selection
             if preselected:
-                self.print_colored("💡 Pre-selected nodes that were never deployed or deleted:", 'cyan', bold=True)
+                label = preselection_label or "pre-selected nodes"
+                self.print_colored(f"💡 Pre-selected {label}:", 'cyan', bold=True)
                 for host_name in sorted(preselected):
                     status_info = self._get_node_status_info(host_name)
                     status_emoji, _, status_desc = self._get_status_display_info(status_info['status'])
@@ -7529,7 +7707,7 @@ class R1Setup:
         print()
         self.print_colored("─" * 60, 'blue')
 
-    def _interactive_select_hosts(self, hosts, operation_name, initial_selection):
+    def _interactive_select_hosts(self, hosts, operation_name, initial_selection, preselection_label=None):
         """Interactive host selection with keyboard navigation (arrow keys + space)."""
         import tty
         import termios
@@ -7552,7 +7730,8 @@ class R1Setup:
 
         while True:
             self._render_host_menu(hosts, host_list, selected_hosts, current_index,
-                                   operation_name, initial_selection, interactive=True)
+                                   operation_name, initial_selection, interactive=True,
+                                   preselection_label=preselection_label)
 
             try:
                 key = get_key()
@@ -7589,14 +7768,15 @@ class R1Setup:
 
         return list(selected_hosts)
 
-    def _fallback_select_hosts(self, hosts, operation_name, initial_selection):
+    def _fallback_select_hosts(self, hosts, operation_name, initial_selection, preselection_label=None):
         """Fallback host selection for systems without termios."""
         host_list = ["All hosts"] + list(hosts.keys())
         selected_hosts = initial_selection.copy()
 
         while True:
             self._render_host_menu(hosts, host_list, selected_hosts, -1,
-                                   operation_name, initial_selection, interactive=False)
+                                   operation_name, initial_selection, interactive=False,
+                                   preselection_label=preselection_label)
 
             choice = self.get_input("Enter choice (number/a/n/c/Enter to proceed)", "").strip().lower()
 
@@ -7876,7 +8056,7 @@ class R1Setup:
                 'red'
             )
             self.print_colored(
-                "  • Apply the updated service template, then run Node Status & Info again to verify.",
+                "  • Use Operations Menu -> Update Service File, then run Node Status & Info again to verify.",
                 'yellow'
             )
             print()
