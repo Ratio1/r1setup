@@ -604,6 +604,7 @@ class TestStartupServiceUpdatePrompt(unittest.TestCase):
         app.print_colored = MagicMock()
         app.get_input = MagicMock(return_value="y")
         app._apply_service_template_to_hosts = MagicMock(return_value=True)
+        app.wait_for_enter = MagicMock()
 
         app._offer_startup_service_update()
 
@@ -615,6 +616,7 @@ class TestStartupServiceUpdatePrompt(unittest.TestCase):
             success_message="Service file update applied on 1 node(s).",
             failure_message="Service file update encountered errors. Check the output above.",
         )
+        app.wait_for_enter.assert_called_once()
         first_prompt = app.get_input.call_args_list[0]
         self.assertEqual(first_prompt.args[0], "Update outdated service files now? (Y/n)")
         self.assertEqual(first_prompt.args[1], "Y")
@@ -649,6 +651,7 @@ class TestStartupServiceUpdatePrompt(unittest.TestCase):
         app.print_colored = MagicMock()
         app.get_input = MagicMock(side_effect=["n", "y"])
         app._apply_service_template_to_hosts = MagicMock()
+        app.wait_for_enter = MagicMock()
 
         app._offer_startup_service_update()
 
@@ -658,6 +661,7 @@ class TestStartupServiceUpdatePrompt(unittest.TestCase):
             "Service updates are recommended to keep nodes aligned. Skip for now anyway? (y/N)",
         )
         app._apply_service_template_to_hosts.assert_not_called()
+        app.wait_for_enter.assert_not_called()
 
     def test_offer_startup_service_update_proceeds_when_skip_not_confirmed(self):
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)
@@ -689,10 +693,12 @@ class TestStartupServiceUpdatePrompt(unittest.TestCase):
         app.print_colored = MagicMock()
         app.get_input = MagicMock(side_effect=["n", "n"])
         app._apply_service_template_to_hosts = MagicMock(return_value=True)
+        app.wait_for_enter = MagicMock()
 
         app._offer_startup_service_update()
 
         app._apply_service_template_to_hosts.assert_called_once()
+        app.wait_for_enter.assert_called_once()
 
     def test_offer_startup_service_update_skips_when_no_eligible_drift(self):
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)

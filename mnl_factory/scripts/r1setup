@@ -61,7 +61,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.4.14"
+    CLI_VERSION = "1.4.15"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -5264,6 +5264,7 @@ class R1Setup:
             success_message=f"Service file update applied on {len(outdated_hosts)} node(s).",
             failure_message="Service file update encountered errors. Check the output above.",
         )
+        self.wait_for_enter()
         print()
 
     def _refresh_service_update_status(self, selected_host_names: List[str]) -> None:

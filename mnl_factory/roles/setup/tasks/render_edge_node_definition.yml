@@ -42,4 +42,3 @@
     dest: /etc/systemd/system/{{ edge_node_service_name }}.service
     mode: '0644'
     force: true
-  notify: reload systemd
