@@ -61,7 +61,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.4.16"
+    CLI_VERSION = "1.4.17"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -4807,6 +4807,12 @@ class R1Setup:
         return self.config_manager.get_mnl_service_version()
 
     def get_collection_version(self) -> str:
+        try:
+            version = self.version_manager._get_current_collection_version()
+            if version and str(version).strip().lower() != 'unknown':
+                return str(version).strip()
+        except Exception as e:
+            self.print_debug(f"Unable to get collection version from version manager: {e}")
         return self.config_manager.get_collection_version()
 
     def get_host_service_file_version(self, host_config: Dict[str, Any]) -> str:

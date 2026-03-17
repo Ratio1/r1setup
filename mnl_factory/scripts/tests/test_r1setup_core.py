@@ -791,6 +791,17 @@ class TestRuntimeMetadataHelpers(unittest.TestCase):
         self.assertEqual(payload["r1setup_last_applied_action"], "customize_service")
         self.assertEqual(payload["r1setup_cli_version"], r1setup.CLI_VERSION)
 
+    def test_get_collection_version_prefers_version_manager_result(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.version_manager = MagicMock()
+        app.version_manager._get_current_collection_version.return_value = "1.3.34"
+        app.config_manager = MagicMock()
+        app.config_manager.get_collection_version.return_value = "unknown"
+        app.print_debug = MagicMock()
+
+        self.assertEqual(app.get_collection_version(), "1.3.34")
+        app.config_manager.get_collection_version.assert_not_called()
+
 
 class TestActiveConfigurationRecovery(unittest.TestCase):
     """Tests automatic restoration of the previously active configuration."""
