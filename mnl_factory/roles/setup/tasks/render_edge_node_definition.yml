@@ -29,7 +29,7 @@
 
 - name: Render r1setup metadata file
   ansible.builtin.template:
-    src: r1setup-metadata.json.j2
+    src: "{{ playbook_dir }}/../roles/setup/templates/r1setup-metadata.json.j2"
     dest: "{{ mnl_r1setup_metadata_host_path }}"
     owner: root
     group: root
@@ -38,7 +38,7 @@
 
 - name: Create service for {{ mnl_app_name }}
   ansible.builtin.template:
-    src: edge_node.service.j2
+    src: "{{ playbook_dir }}/../roles/setup/templates/edge_node.service.j2"
     dest: /etc/systemd/system/{{ edge_node_service_name }}.service
     mode: '0644'
     force: true
