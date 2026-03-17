@@ -135,3 +135,45 @@ Add topology-aware machine registration and fleet visibility without disrupting 
 - Machine registration currently reuses the existing SSH connection capture flow to collect access details.
 - Empty machines now persist in metadata and appear in fleet summaries even with no assigned instance.
 - This phase introduces additive CLI functionality but still does not change deploy/runtime behavior.
+
+## Phase 3
+
+Completed At: `2026-03-17T22:49:42+02:00`
+
+### Goal
+
+Introduce a deterministic runtime naming engine and collision detection layer before deploy and migration flows start depending on runtime-name policy.
+
+### Scope Completed
+
+- added runtime-name sanitization for logical instance names
+- added deterministic runtime-name resolution for:
+  - `standard`
+  - `expert`
+  - `preserve`
+  - `custom`
+- added derived exit-status path support to runtime snapshots
+- updated legacy runtime snapshot derivation to use the shared resolver
+- added runtime collision detection across instances on the same machine
+- added focused modular runtime-naming test coverage
+
+### Files Changed
+
+- `mnl_factory/scripts/r1setup`
+- `mnl_factory/scripts/tests/test_runtime_naming.py`
+- `docs/implementation_phase_log.md`
+
+### Verification Commands
+
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_runtime_naming tests.test_machine_registration tests.test_schema_upgrade tests.test_config_roundtrip tests.test_fleet_model`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_r1setup_core`
+
+### Verification Results
+
+- runtime/fleet-focused suite: passed
+- `tests.test_r1setup_core`: passed
+
+### Notes
+
+- Runtime naming is now centralized and testable, but deploy/runtime playbooks do not consume the new naming engine yet.
+- This phase is intended to prevent later deploy and migration code from inventing names ad hoc.

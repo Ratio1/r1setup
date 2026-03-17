@@ -121,6 +121,7 @@ DEFAULT_MACHINE_DEPLOYMENT_STATE = 'unknown'
 DEFAULT_RUNTIME_SERVICE_NAME = 'edge_node'
 DEFAULT_RUNTIME_CONTAINER_NAME = 'edge_node'
 DEFAULT_RUNTIME_VOLUME_PATH = '/var/cache/edge_node/_local_cache'
+DEFAULT_RUNTIME_EXIT_STATUS_PATH = '/tmp/edge_node.exit'
 
 SSH_KEY_MANAGEMENT_REQUIRED_PLAYBOOKS = (
     'playbooks/ssh_install_key.yml',
@@ -1711,21 +1712,116 @@ class ConfigurationManager:
         return f"{ansible_user}@{ansible_host}:{ansible_port}"
 
     @staticmethod
-    def _build_runtime_snapshot(host_name: str, host_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Build a minimal runtime snapshot from legacy inventory data."""
-        service_name = str(host_config.get('edge_node_service_name') or DEFAULT_RUNTIME_SERVICE_NAME).strip()
-        container_name = str(host_config.get('mnl_docker_container_name') or DEFAULT_RUNTIME_CONTAINER_NAME).strip()
-        volume_path = str(host_config.get('mnl_docker_volume_path') or DEFAULT_RUNTIME_VOLUME_PATH).strip()
-        metadata_path = str(
-            host_config.get('mnl_r1setup_metadata_host_path') or f"{volume_path}/_data/r1setup/metadata.json"
-        ).strip()
+    def _sanitize_runtime_suffix(value: str) -> str:
+        """Convert a logical instance name into a stable runtime-safe suffix."""
+        sanitized = re.sub(r'[^a-zA-Z0-9]+', '_', str(value or '').strip().lower()).strip('_')
+        return sanitized or 'instance'
 
-        return {
-            'service_name': service_name,
-            'container_name': container_name,
-            'volume_path': volume_path,
-            'metadata_path': metadata_path,
-        }
+    @classmethod
+    def resolve_runtime_names(
+        cls,
+        logical_name: str,
+        *,
+        topology_mode: str = DEFAULT_MACHINE_TOPOLOGY_MODE,
+        runtime_name_policy: str = 'normalize_to_target',
+        existing_runtime: Optional[Dict[str, Any]] = None,
+        custom_runtime: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Resolve runtime names for a logical instance using the configured policy."""
+        existing_runtime = dict(existing_runtime or {})
+        custom_runtime = dict(custom_runtime or {})
+
+        def _finalize_runtime(service_name: str, container_name: str, volume_path: str, metadata_path: Optional[str] = None,
+                              exit_status_path: Optional[str] = None) -> Dict[str, Any]:
+            normalized_volume = str(volume_path).strip()
+            normalized_metadata = str(
+                metadata_path or f"{normalized_volume}/_data/r1setup/metadata.json"
+            ).strip()
+            normalized_exit_status = str(
+                exit_status_path or f"/tmp/{container_name}.exit"
+            ).strip()
+            return {
+                'service_name': str(service_name).strip(),
+                'container_name': str(container_name).strip(),
+                'volume_path': normalized_volume,
+                'metadata_path': normalized_metadata,
+                'exit_status_path': normalized_exit_status,
+            }
+
+        if runtime_name_policy == 'preserve' and existing_runtime:
+            return _finalize_runtime(
+                existing_runtime.get('service_name') or DEFAULT_RUNTIME_SERVICE_NAME,
+                existing_runtime.get('container_name') or DEFAULT_RUNTIME_CONTAINER_NAME,
+                existing_runtime.get('volume_path') or DEFAULT_RUNTIME_VOLUME_PATH,
+                existing_runtime.get('metadata_path'),
+                existing_runtime.get('exit_status_path'),
+            )
+
+        if runtime_name_policy == 'custom':
+            return _finalize_runtime(
+                custom_runtime.get('service_name') or DEFAULT_RUNTIME_SERVICE_NAME,
+                custom_runtime.get('container_name') or custom_runtime.get('service_name') or DEFAULT_RUNTIME_CONTAINER_NAME,
+                custom_runtime.get('volume_path') or DEFAULT_RUNTIME_VOLUME_PATH,
+                custom_runtime.get('metadata_path'),
+                custom_runtime.get('exit_status_path'),
+            )
+
+        if topology_mode == 'standard':
+            return _finalize_runtime(
+                DEFAULT_RUNTIME_SERVICE_NAME,
+                DEFAULT_RUNTIME_CONTAINER_NAME,
+                DEFAULT_RUNTIME_VOLUME_PATH,
+                exit_status_path=DEFAULT_RUNTIME_EXIT_STATUS_PATH,
+            )
+
+        suffix = cls._sanitize_runtime_suffix(logical_name)
+        runtime_base = f"edge_node_{suffix}"
+        return _finalize_runtime(
+            runtime_base,
+            runtime_base,
+            f"/var/cache/{runtime_base}/_local_cache",
+        )
+
+    @staticmethod
+    def detect_runtime_collisions(
+        machine_id: str,
+        runtime: Dict[str, Any],
+        fleet_state: Dict[str, Any],
+        *,
+        exclude_instance: Optional[str] = None,
+    ) -> Dict[str, List[str]]:
+        """Return colliding instances keyed by runtime field for a machine."""
+        collisions: Dict[str, List[str]] = {}
+        instances = fleet_state.get('fleet', {}).get('instances', {})
+
+        for instance_name, instance_data in instances.items():
+            if exclude_instance and instance_name == exclude_instance:
+                continue
+            if instance_data.get('assigned_machine_id') != machine_id:
+                continue
+            other_runtime = instance_data.get('runtime') or {}
+            for field in ('service_name', 'container_name', 'volume_path', 'metadata_path', 'exit_status_path'):
+                runtime_value = runtime.get(field)
+                if runtime_value and runtime_value == other_runtime.get(field):
+                    collisions.setdefault(field, []).append(instance_name)
+
+        return collisions
+
+    @classmethod
+    def _build_runtime_snapshot(cls, host_name: str, host_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Build a minimal runtime snapshot from legacy inventory data."""
+        return cls.resolve_runtime_names(
+            str(host_config.get('r1setup_instance_logical_name') or host_name),
+            topology_mode=str(host_config.get('r1setup_topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE),
+            runtime_name_policy=str(host_config.get('r1setup_runtime_name_policy') or 'preserve'),
+            existing_runtime={
+                'service_name': host_config.get('edge_node_service_name'),
+                'container_name': host_config.get('mnl_docker_container_name'),
+                'volume_path': host_config.get('mnl_docker_volume_path'),
+                'metadata_path': host_config.get('mnl_r1setup_metadata_host_path'),
+                'exit_status_path': host_config.get('r1setup_runtime_exit_status_path'),
+            },
+        )
 
     def build_fleet_state(self, inventory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Derive a schema-aware fleet view from the current legacy inventory."""
