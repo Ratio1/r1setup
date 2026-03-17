@@ -54,6 +54,8 @@ class TestConfigurationSchemaMetadata(unittest.TestCase):
         metadata = json.loads(metadata_path.read_text())
 
         self.assertEqual(metadata["config_schema_version"], r1setup.CONFIG_SCHEMA_VERSION)
+        self.assertIn("fleet_state", metadata)
+        self.assertIn("node-1", metadata["fleet_state"]["fleet"]["instances"])
 
     def test_normalize_inventory_backfills_missing_fields(self):
         inventory = {
@@ -81,3 +83,45 @@ class TestConfigurationSchemaMetadata(unittest.TestCase):
         self.assertEqual(host[r1setup.SERVICE_FILE_VERSION_FIELD], r1setup.DEFAULT_SERVICE_FILE_VERSION)
         self.assertNotIn("last_status_check", host)
 
+    def test_load_configuration_merges_persisted_empty_machines_into_fleet_state(self):
+        config_name = "demo"
+        self.cm.active_config["config_name"] = config_name
+        self.app.config_file.write_text(
+            "all:\n"
+            "  children:\n"
+            "    gpu_nodes:\n"
+            "      hosts:\n"
+            "        node-1:\n"
+            "          ansible_host: 10.0.0.1\n"
+            "          ansible_user: root\n"
+        )
+        metadata_path = self.app.configs_dir / f"{config_name}.json"
+        metadata_path.write_text(json.dumps({
+            "config_name": config_name,
+            "environment": "mainnet",
+            "nodes_count": 1,
+            "fleet_state": {
+                "config_schema_version": r1setup.CONFIG_SCHEMA_VERSION,
+                "fleet": {
+                    "machines": {
+                        "machine-b": {
+                            "machine_id": "machine-b",
+                            "ansible_host": "10.0.0.2",
+                            "ansible_user": "root",
+                            "ansible_port": 22,
+                            "topology_mode": "standard",
+                            "deployment_state": "empty",
+                            "instance_names": [],
+                        }
+                    },
+                    "instances": {},
+                },
+            },
+        }))
+
+        loaded = self.cm.load_configuration()
+
+        self.assertTrue(loaded)
+        self.assertIn("machine-b", self.cm.fleet_state["fleet"]["machines"])
+        self.assertIn("root@10.0.0.1:22", self.cm.fleet_state["fleet"]["machines"])
+        self.assertIn("node-1", self.cm.fleet_state["fleet"]["instances"])

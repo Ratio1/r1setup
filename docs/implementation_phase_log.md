@@ -46,3 +46,47 @@ Establish safe configuration-layer seams before changing deploy, topology, or mi
 - No user-visible deploy or operations behavior was changed in this phase.
 - Fleet state is currently derived in memory from legacy inventory rather than persisted as the execution source of truth.
 - This phase is intended to reduce implementation risk for later topology and migration work.
+
+## Phase 1
+
+Completed At: `2026-03-17T22:43:07+02:00`
+
+### Goal
+
+Persist schema-aware fleet metadata alongside legacy config data so later empty-machine and migration features have durable state to build on.
+
+### Scope Completed
+
+- added persistent `fleet_state` support to configuration metadata JSON
+- added `config_schema_version` handling in active config and config metadata
+- added fleet-state normalization and merge helpers
+- preserved legacy `hosts.yml` as the execution inventory format
+- ensured persisted empty-machine records can survive config load/save
+- added dedicated schema-upgrade and fleet-persistence test coverage
+
+### Files Changed
+
+- `mnl_factory/scripts/r1setup`
+- `mnl_factory/scripts/tests/test_config_roundtrip.py`
+- `mnl_factory/scripts/tests/test_schema_upgrade.py`
+- `docs/implementation_phase_log.md`
+
+### Verification Commands
+
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_schema_upgrade`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_config_roundtrip`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_fleet_model`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_r1setup_core`
+
+### Verification Results
+
+- `tests.test_schema_upgrade`: passed
+- `tests.test_config_roundtrip`: passed
+- `tests.test_fleet_model`: passed
+- `tests.test_r1setup_core`: passed
+
+### Notes
+
+- `fleet_state` is now persisted in the per-config metadata sidecar, not in `hosts.yml`.
+- Legacy inventory remains the execution source for current operations.
+- This phase still avoids user-visible deploy, status, and operations changes.

@@ -40,6 +40,7 @@ def check_and_reexec_with_venv():
 check_and_reexec_with_venv()
 
 import subprocess
+import copy
 import yaml
 import getpass
 import re
@@ -1123,6 +1124,7 @@ class ConfigurationManager:
 
     def __init__(self, app):
         self.app = app
+        self.fleet_state = self._default_fleet_state()
         self.active_config = {
             'config_name': None,
             'environment': None,
@@ -1159,6 +1161,7 @@ class ConfigurationManager:
                     loaded_config = json.load(f)
                     self.app.print_debug(f"Loaded active config from file: {loaded_config}")
                     self.active_config.update(loaded_config)
+                    self.fleet_state = self._normalize_fleet_state(loaded_config.get('fleet_state'))
                     self.app.print_debug(f"Final active config after update: {self.active_config}")
 
                 # Ensure network environment is synchronized after loading active config
@@ -1171,10 +1174,13 @@ class ConfigurationManager:
                 self.app.print_debug(f"Exception loading active config: {e}")
         else:
             self.app.print_debug(f"Active config file does not exist: {self.app.active_config_file}")
+            self.fleet_state = self._default_fleet_state()
 
     def _save_active_config(self) -> None:
         """Save the active configuration settings"""
         try:
+            self.active_config['config_schema_version'] = CONFIG_SCHEMA_VERSION
+            self.active_config['fleet_state'] = copy.deepcopy(self.fleet_state)
             self.app.print_debug(f"Saving active config to: {self.app.active_config_file}")
             self.app.print_debug(f"Active config being saved: {self.active_config}")
             with open(self.app.active_config_file, 'w') as f:
@@ -1248,10 +1254,94 @@ class ConfigurationManager:
         configs.sort(key=lambda x: x[1]['created_at'], reverse=True)
         return configs
 
+    @staticmethod
+    def _default_fleet_state() -> Dict[str, Any]:
+        """Return the default fleet-state structure."""
+        return {
+            'config_schema_version': CONFIG_SCHEMA_VERSION,
+            'fleet': {
+                'machines': {},
+                'instances': {},
+            },
+        }
+
+    def _normalize_fleet_state(self, fleet_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Normalize fleet-state metadata into the current schema shape."""
+        normalized = copy.deepcopy(fleet_state) if isinstance(fleet_state, dict) else {}
+        normalized['config_schema_version'] = int(normalized.get('config_schema_version') or CONFIG_SCHEMA_VERSION)
+        fleet = normalized.get('fleet')
+        if not isinstance(fleet, dict):
+            fleet = {}
+        machines = fleet.get('machines')
+        instances = fleet.get('instances')
+        fleet['machines'] = machines if isinstance(machines, dict) else {}
+        fleet['instances'] = instances if isinstance(instances, dict) else {}
+        normalized['fleet'] = fleet
+        return normalized
+
+    def _merge_fleet_state(self, fleet_state: Optional[Dict[str, Any]], inventory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Merge persisted fleet-state metadata with the legacy inventory-derived view."""
+        normalized = self._normalize_fleet_state(fleet_state)
+        derived = self.build_fleet_state(inventory)
+
+        merged = self._default_fleet_state()
+        merged['fleet']['machines'] = copy.deepcopy(normalized['fleet']['machines'])
+        merged['fleet']['instances'] = copy.deepcopy(normalized['fleet']['instances'])
+
+        for machine_id, machine_data in derived['fleet']['machines'].items():
+            persisted_machine = merged['fleet']['machines'].get(machine_id, {})
+            merged_machine = dict(persisted_machine)
+            merged_machine.update({
+                'machine_id': machine_id,
+                'ansible_host': machine_data.get('ansible_host'),
+                'ansible_user': machine_data.get('ansible_user', 'root'),
+                'ansible_port': machine_data.get('ansible_port', 22),
+            })
+            merged_machine.setdefault('topology_mode', machine_data.get('topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE))
+            merged_machine.setdefault(
+                'deployment_state',
+                machine_data.get('deployment_state', DEFAULT_MACHINE_DEPLOYMENT_STATE),
+            )
+            merged_machine['instance_names'] = []
+            merged['fleet']['machines'][machine_id] = merged_machine
+
+        for instance_name, instance_data in derived['fleet']['instances'].items():
+            persisted_instance = merged['fleet']['instances'].get(instance_name, {})
+            merged_instance = dict(persisted_instance)
+            merged_instance.update(instance_data)
+            merged['fleet']['instances'][instance_name] = merged_instance
+
+        for machine in merged['fleet']['machines'].values():
+            machine['instance_names'] = []
+
+        for instance_name, instance_data in merged['fleet']['instances'].items():
+            machine_id = instance_data.get('assigned_machine_id')
+            if not machine_id:
+                continue
+            machine = merged['fleet']['machines'].setdefault(machine_id, {
+                'machine_id': machine_id,
+                'topology_mode': DEFAULT_MACHINE_TOPOLOGY_MODE,
+                'deployment_state': DEFAULT_MACHINE_DEPLOYMENT_STATE,
+                'instance_names': [],
+            })
+            machine.setdefault('instance_names', [])
+            if instance_name not in machine['instance_names']:
+                machine['instance_names'].append(instance_name)
+
+        for machine in merged['fleet']['machines'].values():
+            machine['instance_names'] = sorted(machine.get('instance_names', []))
+
+        return merged
+
+    @staticmethod
+    def _metadata_path_for_config(configs_dir: Path, config_name: str) -> Path:
+        """Return the metadata path for a named configuration."""
+        return configs_dir / f"{config_name}.json"
+
     def _save_config_with_metadata(self, config_name: str, environment: str, nodes_count: int, update_symlink: bool = True) -> None:
         """Save configuration with metadata"""
         config_path = self.app.configs_dir / f"{config_name}.yml"
-        metadata_path = self.app.configs_dir / f"{config_name}.json"
+        metadata_path = self._metadata_path_for_config(self.app.configs_dir, config_name)
 
         # Save the inventory configuration
         inventory_to_save = dict(self.app.inventory)
@@ -1305,6 +1395,7 @@ class ConfigurationManager:
         metadata['environment'] = environment
         metadata['nodes_count'] = nodes_count
         metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
+        metadata['fleet_state'] = self._merge_fleet_state(metadata.get('fleet_state'), self.app.inventory)
 
 
         with open(metadata_path, 'w') as f:
@@ -1312,6 +1403,7 @@ class ConfigurationManager:
 
         # Update active config
         self.active_config.update(metadata)
+        self.fleet_state = copy.deepcopy(metadata['fleet_state'])
         self._save_active_config()
 
         # Create/update symlink to active configuration only if requested
@@ -1337,7 +1429,7 @@ class ConfigurationManager:
     def _load_config_by_name(self, config_name: str) -> bool:
         """Load a specific configuration by name"""
         config_path = self.app.configs_dir / f"{config_name}.yml"
-        metadata_path = self.app.configs_dir / f"{config_name}.json"
+        metadata_path = self._metadata_path_for_config(self.app.configs_dir, config_name)
 
         if not config_path.exists():
             return False
@@ -1351,8 +1443,12 @@ class ConfigurationManager:
             if metadata_path.exists():
                 with open(metadata_path) as f:
                     metadata = json.load(f)
+                metadata['fleet_state'] = self._merge_fleet_state(metadata.get('fleet_state'), self.app.inventory)
                 self.active_config.update(metadata)
+                self.fleet_state = copy.deepcopy(metadata['fleet_state'])
                 self._save_active_config()
+            else:
+                self.fleet_state = self.build_fleet_state(self.app.inventory)
 
             # Update symlink
             self._update_hosts_symlink(config_path)
@@ -1381,6 +1477,24 @@ class ConfigurationManager:
             if env:
                 self.set_mnl_app_env(env)
                 self.app.print_debug(f"Network environment synchronized to: {env}")
+
+            config_name = self.active_config.get('config_name')
+            if config_name:
+                metadata_path = self._metadata_path_for_config(self.app.configs_dir, config_name)
+                if metadata_path.exists():
+                    try:
+                        with open(metadata_path) as f:
+                            metadata = json.load(f)
+                        metadata['fleet_state'] = self._merge_fleet_state(metadata.get('fleet_state'), self.app.inventory)
+                        self.active_config.update(metadata)
+                        self.fleet_state = copy.deepcopy(metadata['fleet_state'])
+                    except Exception as e:
+                        self.app.print_debug(f"Unable to load config metadata for {config_name}: {e}")
+                        self.fleet_state = self.build_fleet_state(self.app.inventory)
+                else:
+                    self.fleet_state = self.build_fleet_state(self.app.inventory)
+            else:
+                self.fleet_state = self.build_fleet_state(self.app.inventory)
 
             updated = self._normalize_inventory(self.app.inventory)
 
@@ -4787,6 +4901,14 @@ class R1Setup:
 
     def build_fleet_state(self, inventory=None):
         return self.config_manager.build_fleet_state(inventory)
+
+    @property
+    def fleet_state(self):
+        return self.config_manager.fleet_state
+
+    @fleet_state.setter
+    def fleet_state(self, value):
+        self.config_manager.fleet_state = value
 
     def manage_configurations_menu(self):
         return self.config_manager.manage_configurations_menu()
