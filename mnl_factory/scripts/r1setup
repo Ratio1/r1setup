@@ -61,7 +61,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.4.13"
+    CLI_VERSION = "1.4.14"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -7233,10 +7233,32 @@ class R1Setup:
     def _auto_update_check(self):
         return self.version_manager._auto_update_check()
 
+    def _restore_active_configuration_if_possible(self) -> bool:
+        """Restore the previously active config if only the hosts.yml link was lost."""
+        self._load_active_config()
+        config_name = self.active_config.get('config_name')
+        if not config_name:
+            return False
+
+        config_path = self.configs_dir / f"{config_name}.yml"
+        if not config_path.exists():
+            self.print_debug(f"Cannot restore active config; missing file: {config_path}")
+            return False
+
+        restored = self._load_config_by_name(config_name)
+        if restored:
+            self.print_colored(f"Restored active configuration: {config_name}", 'green')
+        else:
+            self.print_debug(f"Failed to restore active config: {config_name}")
+        return restored
+
     def ensure_active_configuration(self) -> bool:
         """Ensure there's an active configuration before proceeding to main menu"""
         # Check if we have a valid active configuration
         if self.check_hosts_config():
+            return True
+
+        if self._restore_active_configuration_if_possible() and self.check_hosts_config():
             return True
 
         self.print_header("Configuration Required")

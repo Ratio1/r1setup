@@ -784,3 +784,57 @@ class TestRuntimeMetadataHelpers(unittest.TestCase):
         self.assertEqual(payload["r1setup_collection_version"], "1.3.30")
         self.assertEqual(payload["r1setup_last_applied_action"], "customize_service")
         self.assertEqual(payload["r1setup_cli_version"], r1setup.CLI_VERSION)
+
+
+class TestActiveConfigurationRecovery(unittest.TestCase):
+    """Tests automatic restoration of the previously active configuration."""
+
+    def test_restore_active_configuration_if_possible_relinks_previous_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+            app.configs_dir = Path(temp_dir) / "configs"
+            app.configs_dir.mkdir(parents=True, exist_ok=True)
+            (app.configs_dir / "prod.yml").write_text("all:\n  children:\n    gpu_nodes:\n      hosts: {}\n")
+            app._load_active_config = MagicMock()
+            app.config_manager = MagicMock()
+            app.config_manager.active_config = {"config_name": "prod"}
+            app._load_config_by_name = MagicMock(return_value=True)
+            app.print_colored = MagicMock()
+            app.print_debug = MagicMock()
+
+            restored = app._restore_active_configuration_if_possible()
+
+            self.assertTrue(restored)
+            app._load_config_by_name.assert_called_once_with("prod")
+            app.print_colored.assert_called_once_with("Restored active configuration: prod", 'green')
+
+    def test_ensure_active_configuration_restores_before_prompting(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(side_effect=[False, True])
+        app._restore_active_configuration_if_possible = MagicMock(return_value=True)
+        app.print_header = MagicMock()
+        app.print_colored = MagicMock()
+        app._list_available_configs = MagicMock()
+
+        ensured = app.ensure_active_configuration()
+
+        self.assertTrue(ensured)
+        app._restore_active_configuration_if_possible.assert_called_once()
+        app.print_header.assert_not_called()
+
+    def test_restore_active_configuration_if_possible_returns_false_when_saved_config_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+            app.configs_dir = Path(temp_dir) / "configs"
+            app.configs_dir.mkdir(parents=True, exist_ok=True)
+            app._load_active_config = MagicMock()
+            app.config_manager = MagicMock()
+            app.config_manager.active_config = {"config_name": "prod"}
+            app._load_config_by_name = MagicMock()
+            app.print_colored = MagicMock()
+            app.print_debug = MagicMock()
+
+            restored = app._restore_active_configuration_if_possible()
+
+            self.assertFalse(restored)
+            app._load_config_by_name.assert_not_called()
