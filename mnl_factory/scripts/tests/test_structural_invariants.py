@@ -137,9 +137,14 @@ class TestStructuralInvariants(unittest.TestCase):
             "edge_node.service.j2 must expose the metadata file path to the container",
         )
         self.assertIn(
+            "{{ mnl_docker_volume_path }}:{{ mnl_docker_persistent_folder }}",
+            template_source,
+            "edge_node.service.j2 must continue to mount the main persistent volume",
+        )
+        self.assertNotIn(
             "{{ mnl_r1setup_metadata_host_path }}:{{ mnl_r1setup_metadata_container_path }}:ro",
             template_source,
-            "edge_node.service.j2 must mount the r1setup metadata file read-only",
+            "edge_node.service.j2 should not add a second dedicated metadata mount",
         )
 
         self.assertIn(
@@ -148,9 +153,19 @@ class TestStructuralInvariants(unittest.TestCase):
             "mnl.yml must define the canonical host metadata path",
         )
         self.assertIn(
+            'mnl_r1setup_metadata_host_dir: "{{ mnl_docker_volume_path }}/_data/r1setup"',
+            group_vars_source,
+            "mnl.yml must keep metadata under the existing host persistent volume",
+        )
+        self.assertIn(
             'mnl_r1setup_metadata_container_path: "{{ mnl_r1setup_metadata_container_dir }}/metadata.json"',
             group_vars_source,
             "mnl.yml must define the canonical container metadata path",
+        )
+        self.assertIn(
+            'mnl_r1setup_metadata_container_dir: "{{ mnl_docker_persistent_folder }}/_data/r1setup"',
+            group_vars_source,
+            "mnl.yml must expose metadata inside the existing container persistent volume",
         )
         self.assertIn(
             '"managed_by": "r1setup"',
