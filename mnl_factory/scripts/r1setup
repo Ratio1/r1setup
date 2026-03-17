@@ -1333,6 +1333,36 @@ class ConfigurationManager:
 
         return merged
 
+    def get_fleet_state_copy(self) -> Dict[str, Any]:
+        """Return a deep copy of the current fleet state."""
+        return copy.deepcopy(self.fleet_state)
+
+    def ensure_configuration_shell(self, config_name: str, environment: str) -> None:
+        """Persist the current empty-or-existing inventory as an active configuration shell."""
+        hosts = _get_gpu_hosts(self.app.inventory)
+        self._save_config_with_metadata(config_name, environment, len(hosts), update_symlink=True)
+
+    def upsert_machine_record(self, machine_id: str, machine_data: Dict[str, Any]) -> None:
+        """Persist or update a machine record in the current fleet state."""
+        fleet_state = self.get_fleet_state_copy()
+        fleet_state = self._normalize_fleet_state(fleet_state)
+
+        machine_record = dict(fleet_state['fleet']['machines'].get(machine_id, {}))
+        machine_record.update(machine_data)
+        machine_record['machine_id'] = machine_id
+        machine_record.setdefault('instance_names', [])
+        machine_record['instance_names'] = sorted(set(machine_record.get('instance_names', [])))
+        fleet_state['fleet']['machines'][machine_id] = machine_record
+        self.fleet_state = fleet_state
+
+        config_name = self.active_config.get('config_name')
+        if not config_name:
+            raise ValueError("No active configuration shell is available")
+
+        env = self.get_mnl_app_env() or self.active_config.get('environment') or 'mainnet'
+        hosts = _get_gpu_hosts(self.app.inventory)
+        self._save_config_with_metadata(config_name, env, len(hosts), update_symlink=False)
+
     @staticmethod
     def _metadata_path_for_config(configs_dir: Path, config_name: str) -> Path:
         """Return the metadata path for a named configuration."""
@@ -1395,7 +1425,7 @@ class ConfigurationManager:
         metadata['environment'] = environment
         metadata['nodes_count'] = nodes_count
         metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
-        metadata['fleet_state'] = self._merge_fleet_state(metadata.get('fleet_state'), self.app.inventory)
+        metadata['fleet_state'] = self._merge_fleet_state(self.fleet_state or metadata.get('fleet_state'), self.app.inventory)
 
 
         with open(metadata_path, 'w') as f:
@@ -4902,6 +4932,15 @@ class R1Setup:
     def build_fleet_state(self, inventory=None):
         return self.config_manager.build_fleet_state(inventory)
 
+    def get_fleet_state_copy(self):
+        return self.config_manager.get_fleet_state_copy()
+
+    def ensure_configuration_shell(self, config_name, environment):
+        return self.config_manager.ensure_configuration_shell(config_name, environment)
+
+    def upsert_machine_record(self, machine_id, machine_data):
+        return self.config_manager.upsert_machine_record(machine_id, machine_data)
+
     @property
     def fleet_state(self):
         return self.config_manager.fleet_state
@@ -5074,6 +5113,223 @@ class R1Setup:
             return cmd
         return f"{cmd} --extra-vars '{json.dumps(extra_vars)}'"
 
+    def _select_topology_mode(self) -> str:
+        """Select the machine topology mode."""
+        self.print_colored("\nTopology Mode Options:")
+        self.print_colored("  1) standard  - One edge node per machine (recommended)")
+        self.print_colored("  2) expert    - Multiple edge nodes may share one machine")
+
+        while True:
+            choice = self.get_input("Select topology mode (1-2)", "1")
+            if choice == '1':
+                return 'standard'
+            if choice == '2':
+                return 'expert'
+            self.print_colored("Invalid choice. Please enter 1 or 2", 'red')
+
+    @staticmethod
+    def _extract_machine_access_config(host_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract machine-level SSH access fields from a node-style config dict."""
+        machine_data = {}
+        for key in (
+            'ansible_host',
+            'ansible_user',
+            'ansible_port',
+            'ansible_ssh_common_args',
+            'ansible_ssh_pass',
+            'ansible_become_password',
+            'ansible_ssh_private_key_file',
+        ):
+            if key in host_config:
+                machine_data[key] = host_config[key]
+        return machine_data
+
+    def _probe_machine_specs(self, machine_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Best-effort probe for remote machine CPU and memory totals."""
+        host = machine_config.get('ansible_host')
+        user = machine_config.get('ansible_user')
+        if not host or not user:
+            return {'status': 'error', 'message': 'Missing SSH connection details'}
+
+        ssh_cmd = ['ssh']
+        ssh_port = machine_config.get('ansible_port', 22)
+        if ssh_port != 22:
+            ssh_cmd.extend(['-p', str(ssh_port)])
+
+        if 'ansible_ssh_pass' in machine_config:
+            ssh_cmd = ['sshpass', '-p', machine_config['ansible_ssh_pass']] + ssh_cmd
+        elif 'ansible_ssh_private_key_file' in machine_config:
+            key_file = machine_config['ansible_ssh_private_key_file']
+            if str(key_file).startswith('~'):
+                key_file = os.path.expanduser(key_file)
+            ssh_cmd.extend(['-i', key_file])
+
+        ssh_cmd.extend([
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=/dev/null',
+            '-o', f'ConnectTimeout={self.ssh_connect_timeout}',
+            f"{user}@{host}",
+            "sh -lc 'hostname; nproc; awk \"/MemTotal/ {print int($2/1024/1024)}\" /proc/meminfo'",
+        ])
+
+        try:
+            result = subprocess.run(
+                ssh_cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.connection_timeout,
+                check=False,
+            )
+        except FileNotFoundError as e:
+            return {'status': 'error', 'message': str(e)}
+        except subprocess.TimeoutExpired:
+            return {'status': 'error', 'message': f'Probe timed out after {self.connection_timeout} seconds'}
+
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip() or 'Probe failed'
+            return {'status': 'error', 'message': message}
+
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if len(lines) < 3:
+            return {'status': 'error', 'message': 'Incomplete machine-spec probe output'}
+
+        try:
+            return {
+                'status': 'success',
+                'hostname': lines[0],
+                'cpu_total': int(lines[1]),
+                'memory_gb_total': int(lines[2]),
+                'last_checked_at': datetime.now().isoformat(),
+            }
+        except ValueError:
+            return {'status': 'error', 'message': 'Unable to parse machine-spec probe output'}
+
+    def _ensure_configuration_shell_for_machine_registration(self) -> bool:
+        """Ensure an active configuration exists before persisting machine-only fleet data."""
+        if self.active_config.get('config_name'):
+            return True
+
+        self.print_header("Create Fleet Configuration")
+        self.print_colored("A configuration is required before you can register machines.", 'yellow')
+        self.print_colored("This can be an empty fleet configuration with no deployed nodes yet.", 'white')
+        print()
+
+        while True:
+            custom_name = self.get_input("Enter configuration name (letters, numbers, -, _)", required=True)
+            if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
+                break
+            self.print_colored("Invalid name. Use only letters, numbers, hyphens (-), and underscores (_)", 'red')
+
+        env = self._select_network_environment()
+        self.set_mnl_app_env(env)
+        config_name = self._generate_config_name(0, custom_name)
+        self.ensure_configuration_shell(config_name, env)
+        self.print_colored(f"Configuration '{config_name}' created and activated.", 'green')
+        return True
+
+    def register_machine_without_deployment(self) -> None:
+        """Register a machine in fleet metadata without creating an Edge Node instance."""
+        if not self._ensure_configuration_shell_for_machine_registration():
+            return
+
+        self.print_header("Register Machine")
+        self.load_configuration()
+        fleet_state = self.get_fleet_state_copy()
+        existing_machine_ids = set(fleet_state['fleet']['machines'].keys())
+
+        self.print_colored("This flow registers a machine in the fleet without deploying an Edge Node.", 'cyan')
+        self.print_colored("You can prepare it now and assign or migrate an instance later.", 'white')
+        print()
+
+        while True:
+            machine_id = self._get_valid_hostname("Enter machine label", f"machine-{len(existing_machine_ids) + 1}")
+            if machine_id in existing_machine_ids:
+                self.print_colored(f"Machine '{machine_id}' already exists. Choose a different label.", 'red')
+                continue
+            break
+
+        topology_mode = self._select_topology_mode()
+        self.print_colored("\nCollecting SSH access details for this machine.", 'cyan')
+        machine_access = self._extract_machine_access_config(self._configure_single_node())
+
+        specs = {}
+        if self.get_input("Probe machine specs now? (Y/n)", "Y").lower() == 'y':
+            specs = self._probe_machine_specs(machine_access)
+            if specs.get('status') == 'success':
+                self.print_colored(
+                    f"Detected {specs['cpu_total']} CPU cores and {specs['memory_gb_total']} GB RAM on {specs['hostname']}.",
+                    'green',
+                )
+            else:
+                self.print_colored(f"Spec probe unavailable: {specs.get('message', 'unknown error')}", 'yellow')
+
+        machine_record = dict(machine_access)
+        machine_record.update({
+            'machine_id': machine_id,
+            'topology_mode': topology_mode,
+            'deployment_state': 'empty',
+            'instance_names': [],
+        })
+        if specs.get('status') == 'success':
+            machine_record['machine_specs'] = {
+                'hostname': specs['hostname'],
+                'cpu_total': specs['cpu_total'],
+                'memory_gb_total': specs['memory_gb_total'],
+                'last_checked_at': specs['last_checked_at'],
+            }
+
+        self.upsert_machine_record(machine_id, machine_record)
+        self.print_colored(f"Machine '{machine_id}' registered successfully.", 'green')
+        self.wait_for_enter()
+
+    def fleet_summary(self) -> None:
+        """Display the currently known fleet machines and assignments."""
+        if not self.active_config.get('config_name'):
+            self.print_colored("No active configuration. Create or load one first.", 'red')
+            self.wait_for_enter()
+            return
+
+        self.print_header("Fleet Summary")
+        self.load_configuration()
+        fleet_state = self.get_fleet_state_copy()
+        machines = fleet_state['fleet']['machines']
+        instances = fleet_state['fleet']['instances']
+
+        if not machines:
+            self.print_colored("No machines registered yet.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        self.print_section(f"Machines ({len(machines)})")
+        for machine_id in sorted(machines.keys()):
+            machine = machines[machine_id]
+            host = machine.get('ansible_host', 'unknown')
+            user = machine.get('ansible_user', 'unknown')
+            topology = machine.get('topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE)
+            deployment_state = machine.get('deployment_state', DEFAULT_MACHINE_DEPLOYMENT_STATE)
+            instance_names = machine.get('instance_names', [])
+            self.print_colored(
+                f"  • {machine_id}: {user}@{host} | mode={topology} | state={deployment_state} | instances={len(instance_names)}",
+                'white',
+            )
+            machine_specs = machine.get('machine_specs') or {}
+            if machine_specs:
+                self.print_colored(
+                    f"      specs: {machine_specs.get('cpu_total', '?')} CPU / {machine_specs.get('memory_gb_total', '?')} GB RAM",
+                    'cyan',
+                )
+            if instance_names:
+                for instance_name in instance_names:
+                    instance = instances.get(instance_name, {})
+                    status = instance.get('status', {}).get('node_status', 'unknown')
+                    runtime = instance.get('runtime', {})
+                    self.print_colored(
+                        f"      - {instance_name} [{status}] service={runtime.get('service_name', '?')} container={runtime.get('container_name', '?')}",
+                        'white',
+                    )
+
+        self.wait_for_enter()
+
     def _get_suggested_action(self):
         """Return (default_option, hint_text) based on current state."""
         has_config = self.check_hosts_config()
@@ -5210,6 +5466,8 @@ class R1Setup:
             self.print_colored("  2) Manage Configurations  - Switch, backup, restore configurations")
             self.print_colored("  3) View Configuration     - Display current configuration")
             self.print_colored("  4) Switch Environment     - Change network environment (mainnet/testnet/devnet)")
+            self.print_colored("  5) Register Machine       - Add a fleet machine without deploying a node")
+            self.print_colored("  6) Fleet Summary          - Show machines and current assignments")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -5226,8 +5484,12 @@ class R1Setup:
                 self.view_configuration()
             elif choice == '4':
                 self.switch_environment()
+            elif choice == '5':
+                self.register_machine_without_deployment()
+            elif choice == '6':
+                self.fleet_summary()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-6.", 'red')
                 self.wait_for_enter()
 
     def configure_nodes_menu(self) -> None:

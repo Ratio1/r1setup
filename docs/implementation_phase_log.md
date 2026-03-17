@@ -90,3 +90,48 @@ Persist schema-aware fleet metadata alongside legacy config data so later empty-
 - `fleet_state` is now persisted in the per-config metadata sidecar, not in `hosts.yml`.
 - Legacy inventory remains the execution source for current operations.
 - This phase still avoids user-visible deploy, status, and operations changes.
+
+## Phase 2
+
+Completed At: `2026-03-17T22:46:56+02:00`
+
+### Goal
+
+Add topology-aware machine registration and fleet visibility without disrupting the existing standard node-configuration flow.
+
+### Scope Completed
+
+- added machine-registration support without immediate deployment
+- added active-config shell creation for empty fleet configurations
+- added topology selection for registered machines
+- added best-effort machine-spec probing helper
+- added persisted machine-record upsert support in fleet metadata
+- added a fleet summary view
+- added configuration-menu entry points for:
+  - register machine
+  - fleet summary
+- kept the existing standard node-configuration path intact
+
+### Files Changed
+
+- `mnl_factory/scripts/r1setup`
+- `mnl_factory/scripts/tests/test_machine_registration.py`
+- `docs/implementation_phase_log.md`
+
+### Verification Commands
+
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_machine_registration`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_schema_upgrade tests.test_config_roundtrip tests.test_fleet_model`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_r1setup_core`
+
+### Verification Results
+
+- `tests.test_machine_registration`: passed
+- `tests.test_schema_upgrade tests.test_config_roundtrip tests.test_fleet_model`: passed
+- `tests.test_r1setup_core`: passed
+
+### Notes
+
+- Machine registration currently reuses the existing SSH connection capture flow to collect access details.
+- Empty machines now persist in metadata and appear in fleet summaries even with no assigned instance.
+- This phase introduces additive CLI functionality but still does not change deploy/runtime behavior.
