@@ -73,6 +73,7 @@ Top level:
 - `install.sh`: bootstrap installer that downloads `r1setup` scripts into `~/.ratio1/r1_setup` and symlinks `/usr/local/bin/r1setup`
 - `README.md`: root project overview
 - `docs/`: dated operational/design notes
+- `scripts/run_r1setup_repo_local.sh`: developer helper to run the repo `r1setup` against an isolated local dev collection workspace
 - `.github/workflows/`: release and publish automation
 
 Ansible collection:
@@ -118,6 +119,7 @@ Code and repo conventions:
 - For SSH key management, use the state model already present in `r1setup` instead of inventing parallel metadata.
 - Standard-mode machines keep the existing global helpers such as `get_logs` and `get_node_info`; expert-mode machines must use the `r1service <service> <action>` dispatcher plus per-instance helper registry files under `/var/lib/ratio1/r1setup/helpers/`.
 - Prefer generated execution inventories for CLI-driven Ansible operations. The settled Phase 5 split is: machine preparation runs from `playbooks/prepare_machine.yml`, instance runtime application runs from `playbooks/apply_instance.yml`, and the CLI should avoid driving multi-instance operations directly from the full persisted `hosts.yml` when a narrowed temp inventory is more accurate.
+- Local repo testing before publish can use `scripts/run_r1setup_repo_local.sh`. It supports either isolated dev configs or the real `~/.ratio1/r1_setup` config store via `--use-real-configs` / `--config-source`, and it enables `R1SETUP_NO_CLEAR=1` by default so terminal history remains visible during dev runs.
 - Update docs when user-visible menus, workflows, triggers, or safety guarantees change.
 - Prefer adding focused unit tests in `mnl_factory/scripts/tests/` for new logic.
 
@@ -212,3 +214,5 @@ Minimum required critic topics when relevant:
   - generated execution inventories must enrich hosts with resolved runtime names, helper-mode fields, metadata paths, and derived volume/base-folder values
   - deployment is now split in the CLI into `prepare_machine.yml` followed by `apply_instance.yml`
   - one deploy operation should prepare each unique machine at most once, then apply instance runtime only to instances whose machine preparation succeeded
+
+- 2026-03-17T23:15:42+02:00 | Local pre-release repo testing now has a supported helper at `scripts/run_r1setup_repo_local.sh`. It runs the repo `r1setup` against a workspace synced from the local collection, can reuse the real `~/.ratio1/r1_setup` configs when explicitly requested, and defaults to `R1SETUP_NO_CLEAR=1` so menu transitions do not wipe terminal history during dev runs.

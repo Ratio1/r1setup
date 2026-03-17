@@ -14,6 +14,31 @@ After installation, run from anywhere:
 r1setup
 ```
 
+## Repo Dev Workflow
+To test the repo version of `r1setup` and the repo collection locally before publishing changes, use:
+
+```bash
+bash /home/vi/work/ratio1/repos/multi_node_launcher/scripts/run_r1setup_repo_local.sh
+```
+
+Use your real saved `r1setup` configs:
+
+```bash
+bash /home/vi/work/ratio1/repos/multi_node_launcher/scripts/run_r1setup_repo_local.sh --use-real-configs
+```
+
+Use a custom config store:
+
+```bash
+bash /home/vi/work/ratio1/repos/multi_node_launcher/scripts/run_r1setup_repo_local.sh --config-source /path/to/r1_setup
+```
+
+Notes:
+- By default, the helper keeps terminal output visible and does not clear the screen between menus.
+- Set `R1SETUP_NO_CLEAR=0` if you want the old clear-screen behavior during a dev run.
+- `--use-real-configs` means changes to active config selection and saved configs will affect your real `~/.ratio1/r1_setup`.
+- Run `bash /home/vi/work/ratio1/repos/multi_node_launcher/scripts/run_r1setup_repo_local.sh --help` for all options.
+
 ## Features
 ### Node Management
 - Configure GPU nodes (IP, SSH, authentication)

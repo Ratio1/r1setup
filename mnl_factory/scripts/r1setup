@@ -5028,7 +5028,8 @@ class R1Setup:
 
     def print_header(self, title: str) -> None:
         """Print a formatted header"""
-        os.system('clear' if os.name != 'nt' else 'cls')
+        if not os.environ.get('R1SETUP_NO_CLEAR'):
+            os.system('clear' if os.name != 'nt' else 'cls')
         self.print_colored("=" * 60, 'cyan')
         self.print_colored(f" {title.center(58)} ", 'cyan', bold=True)
         self.print_colored("=" * 60, 'cyan')

@@ -108,6 +108,34 @@ class TestWaitForEnter(unittest.TestCase):
         self.assertTrue(arg.startswith("\n"))
 
 
+class TestPrintHeader(unittest.TestCase):
+    """Tests for R1Setup.print_header()."""
+
+    def setUp(self):
+        self.app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        self.app.colors = {
+            'cyan': '',
+            'white': '',
+            'yellow': '',
+            'red': '',
+            'green': '',
+            'blue': '',
+            'end': '',
+        }
+
+    @patch("os.system")
+    def test_print_header_clears_by_default(self, mock_system):
+        with patch.dict(os.environ, {}, clear=False):
+            self.app.print_header("Header")
+        mock_system.assert_called_once()
+
+    @patch("os.system")
+    def test_print_header_skips_clear_when_requested(self, mock_system):
+        with patch.dict(os.environ, {"R1SETUP_NO_CLEAR": "1"}, clear=False):
+            self.app.print_header("Header")
+        mock_system.assert_not_called()
+
+
 class TestServiceVersionTracking(unittest.TestCase):
     """Tests for service-template version persistence helpers."""
 
