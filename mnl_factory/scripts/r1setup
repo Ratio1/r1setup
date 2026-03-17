@@ -1952,6 +1952,106 @@ class ConfigurationManager:
 
         return fleet_state
 
+    @classmethod
+    def build_execution_host_config(cls, host_name: str, host_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a host config enriched with resolved runtime/helper fields."""
+        execution_config = copy.deepcopy(host_config)
+        runtime = cls._build_runtime_snapshot(host_name, execution_config)
+        helper_runtime = cls.build_helper_runtime(host_name, execution_config)
+        volume_path = runtime.get('volume_path') or DEFAULT_RUNTIME_VOLUME_PATH
+        metadata_path = runtime.get('metadata_path') or f"{volume_path}/_data/r1setup/metadata.json"
+        metadata_dir = str(Path(metadata_path).parent)
+
+        execution_config.update({
+            'r1setup_machine_id': cls._derive_machine_id(host_name, execution_config),
+            'r1setup_instance_logical_name': str(execution_config.get('r1setup_instance_logical_name') or host_name),
+            'r1setup_topology_mode': str(execution_config.get('r1setup_topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE),
+            'r1setup_runtime_name_policy': str(execution_config.get('r1setup_runtime_name_policy') or 'preserve'),
+            'edge_node_service_name': runtime['service_name'],
+            'mnl_docker_container_name': runtime['container_name'],
+            'mnl_docker_volume_path': volume_path,
+            'mnl_base_folder': str(Path(volume_path).parent),
+            'mnl_local_cache_folder': volume_path,
+            'mnl_config_startup_path': f"{volume_path}/config_startup.json",
+            'mnl_r1setup_metadata_host_dir': metadata_dir,
+            'mnl_r1setup_metadata_host_path': metadata_path,
+            'r1setup_runtime_exit_status_path': runtime['exit_status_path'],
+            'r1setup_helper_mode': helper_runtime['helper_mode'],
+            'r1setup_helper_registry_dir': DEFAULT_HELPER_REGISTRY_DIR,
+            'r1setup_helper_registry_path': helper_runtime['helper_registry_path'],
+            'r1setup_remote_get_logs_command': helper_runtime['remote_commands']['logs'],
+            'r1setup_remote_get_node_info_command': helper_runtime['remote_commands']['info'],
+            'r1setup_remote_restart_service_command': helper_runtime['remote_commands']['restart'],
+            'r1setup_remote_get_node_history_command': helper_runtime['remote_commands']['history'],
+            'r1setup_remote_get_e2_pem_command': helper_runtime['remote_commands']['get_e2_pem'],
+        })
+        return execution_config
+
+    @classmethod
+    def group_host_names_by_machine(
+        cls,
+        inventory: Dict[str, Any],
+        selected_host_names: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Group selected instance-hosts by physical machine identity."""
+        hosts = _get_gpu_hosts(inventory)
+        grouped: Dict[str, Dict[str, Any]] = {}
+
+        for host_name in selected_host_names:
+            host_config = hosts.get(host_name)
+            if not host_config:
+                continue
+            machine_id = cls._derive_machine_id(host_name, host_config)
+            entry = grouped.setdefault(machine_id, {
+                'representative_host': host_name,
+                'host_names': [],
+            })
+            entry['host_names'].append(host_name)
+
+        return grouped
+
+    def build_execution_inventory(
+        self,
+        host_names: List[str],
+        *,
+        inventory: Optional[Dict[str, Any]] = None,
+        dedupe_by_machine: bool = False,
+    ) -> Dict[str, Any]:
+        """Build a minimal inventory for the selected instances or machine representatives."""
+        inventory = inventory if inventory is not None else self.app.inventory
+        hosts = _get_gpu_hosts(inventory)
+        selected_host_names = [host_name for host_name in host_names if host_name in hosts]
+        execution_hosts: Dict[str, Dict[str, Any]] = {}
+
+        if dedupe_by_machine:
+            grouped = self.group_host_names_by_machine(inventory, selected_host_names)
+            for machine_id, detail in grouped.items():
+                representative_host = detail['representative_host']
+                execution_host = self.build_execution_host_config(representative_host, hosts[representative_host])
+                execution_host['r1setup_execution_scope'] = 'machine'
+                execution_host['r1setup_machine_id'] = machine_id
+                execution_host['r1setup_selected_instance_hosts'] = list(detail['host_names'])
+                execution_host['r1setup_selected_instance_logical_names'] = [
+                    str(hosts[name].get('r1setup_instance_logical_name') or name)
+                    for name in detail['host_names']
+                ]
+                execution_hosts[representative_host] = execution_host
+        else:
+            for host_name in selected_host_names:
+                execution_host = self.build_execution_host_config(host_name, hosts[host_name])
+                execution_host['r1setup_execution_scope'] = 'instance'
+                execution_hosts[host_name] = execution_host
+
+        return {
+            'all': {
+                'children': {
+                    'gpu_nodes': {
+                        'hosts': execution_hosts,
+                    }
+                }
+            }
+        }
+
     def manage_configurations_menu(self) -> None:
         """Show configuration management submenu"""
         while True:
@@ -2956,12 +3056,16 @@ class NodeStatusTracker:
             self.app.print_colored(f"❌ Service status playbook not found: {playbook_path}", 'red')
             return False, ''
 
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.app.config_file} {playbook_path}")
-
-        return self.app.run_command(cmd, show_output=False, timeout=self.app.connection_timeout)
+        host_names = list(_get_gpu_hosts(self.app.inventory).keys())
+        success, output, _, _ = self.app.run_generated_playbook(
+            playbook_path,
+            host_names,
+            machine_scope=False,
+            last_applied_action='status_check',
+            show_output=False,
+            timeout=self.app.connection_timeout,
+        )
+        return success, output
 
     def _parse_status_fields(self, text):
         """Parse service and container status from a text block.
@@ -3453,6 +3557,20 @@ class DeploymentService:
     def __init__(self, app):
         self.app = app
 
+    def _extract_successful_hosts_from_output(
+        self,
+        output: str,
+        expected_hosts: List[str],
+    ) -> List[str]:
+        """Return hosts that completed successfully according to PLAY RECAP."""
+        recap = self.app._parse_ansible_play_recap(output or "")
+        successful_hosts = []
+        for host_name in expected_hosts:
+            result = recap.get(host_name, {})
+            if result.get('status') == 'connected':
+                successful_hosts.append(host_name)
+        return successful_hosts
+
     def deploy_full(self) -> None:
         """Deploy full setup (Docker + NVIDIA + GPU)"""
         self._deploy_setup(
@@ -3540,19 +3658,19 @@ class DeploymentService:
             self.app.wait_for_enter()
             return
 
-        # Create host limit for selected hosts
-        host_limit = ','.join(selected_host_names)
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.app.config_file} --limit {host_limit} {playbook_path}")
-
         # Update selected node statuses to deploying (deletion is a deployment operation)
         for host_name in selected_host_names:
             self.app._update_node_status(host_name, 'deploying')
 
         self.app.print_colored("\nStarting Edge Node deletion on selected nodes...", 'cyan')
-        success, _ = self.app.run_command(cmd, show_output=True)
+        success, _, _, _ = self.app.run_generated_playbook(
+            playbook_path,
+            selected_host_names,
+            machine_scope=False,
+            last_applied_action='delete_edge_node',
+            show_output=True,
+            timeout=self.app.connection_timeout,
+        )
 
         if success:
             self.app.print_colored(f"\n✅ Deletion succeeded on {len(selected_host_names)} node(s)", 'green')
@@ -3681,55 +3799,111 @@ class DeploymentService:
             self.app.print_colored("Deployment cancelled.", 'yellow')
             return
 
-        playbook_path = self.app.config_dir / f'playbooks/{playbook}'
-        if not playbook_path.exists():
-            self.app.print_colored(f"Playbook not found: {playbook_path}", 'red')
+        machine_prepare_path = self.app.config_dir / 'playbooks/prepare_machine.yml'
+        instance_apply_path = self.app.config_dir / 'playbooks/apply_instance.yml'
+        if not machine_prepare_path.exists():
+            self.app.print_colored(f"Playbook not found: {machine_prepare_path}", 'red')
             self.app.wait_for_enter()
             return
-
-        # Create host limit for selected hosts
-        host_limit = ','.join(selected_host_names)
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.app.config_file} --limit {host_limit} {playbook_path}")
-
-        cmd = self.app._append_ansible_extra_vars(
-            cmd,
-            self.app._build_runtime_metadata_extra_vars(last_applied_action, extra_vars),
-        )
+        if not instance_apply_path.exists():
+            self.app.print_colored(f"Playbook not found: {instance_apply_path}", 'red')
+            self.app.wait_for_enter()
+            return
 
         # Update selected node statuses to deploying
         for host_name in selected_host_names:
             self.app._update_node_status(host_name, 'deploying')
 
-        self.app.print_colored(f"\nStarting {title.lower()} on selected nodes...", 'cyan')
-        success, _ = self.app.run_command(cmd, show_output=True)
+        machine_groups = self.app.group_host_names_by_machine(selected_host_names)
+        machine_host_names = [detail['representative_host'] for detail in machine_groups.values()]
+        self.app.print_colored(
+            f"\nPreparing {len(machine_host_names)} machine(s) for {len(selected_host_names)} selected instance(s)...",
+            'cyan',
+        )
+
+        machine_success, machine_output, executed_machine_hosts, _ = self.app.run_generated_playbook(
+            machine_prepare_path,
+            selected_host_names,
+            machine_scope=True,
+            extra_vars=extra_vars,
+            last_applied_action=f"{last_applied_action}_machine_prepare",
+            show_output=True,
+            timeout=self.app.connection_timeout,
+        )
+        successful_machine_hosts = self._extract_successful_hosts_from_output(machine_output, executed_machine_hosts)
+        successful_machine_ids = {
+            self.app.config_manager._derive_machine_id(host_name, all_hosts[host_name])
+            for host_name in successful_machine_hosts
+            if host_name in all_hosts
+        }
+        deployable_host_names = [
+            host_name
+            for host_name in selected_host_names
+            if self.app.config_manager._derive_machine_id(host_name, all_hosts[host_name]) in successful_machine_ids
+        ]
+        skipped_host_names = [host_name for host_name in selected_host_names if host_name not in deployable_host_names]
+
+        if skipped_host_names:
+            self.app.print_colored(
+                f"\n⚠️  Machine preparation failed or was incomplete for: {', '.join(skipped_host_names)}",
+                'yellow',
+            )
+            for host_name in skipped_host_names:
+                self.app._update_node_status(host_name, 'error')
+
+        if not deployable_host_names:
+            self.app.print_colored(
+                "\n❌ No machines completed preparation successfully. Instance apply phase was skipped.",
+                'red',
+            )
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_colored(
+            f"\nApplying instance runtime on {len(deployable_host_names)} selected node(s)...",
+            'cyan',
+        )
+        success, instance_output, _, _ = self.app.run_generated_playbook(
+            instance_apply_path,
+            deployable_host_names,
+            machine_scope=False,
+            extra_vars=extra_vars,
+            last_applied_action=last_applied_action,
+            show_output=True,
+            timeout=self.app.connection_timeout,
+        )
+        successful_instance_hosts = self._extract_successful_hosts_from_output(instance_output, deployable_host_names)
+        failed_instance_hosts = [host_name for host_name in deployable_host_names if host_name not in successful_instance_hosts]
 
         if success:
-            self.app.print_colored(f"\n✅ Deployment succeeded on {len(selected_host_names)} node(s)", 'green')
+            self.app.print_colored(f"\n✅ Deployment succeeded on {len(successful_instance_hosts)} node(s)", 'green')
             # Update deployment metadata after successful deployment
             deployment_type = "full" if "NVIDIA" in description else "docker_only"
             self._update_deployment_metadata(deployment_type)
-            self.app.record_service_file_version(selected_host_names)
+            self.app.record_service_file_version(successful_instance_hosts)
 
             # Update selected node statuses to running after successful deployment
-            for host_name in selected_host_names:
+            for host_name in successful_instance_hosts:
                 self.app._update_node_status(host_name, 'running')
+            for host_name in failed_instance_hosts:
+                self.app._update_node_status(host_name, 'error')
 
             # Show updated statuses
             self.app.print_colored(f"\n📊 Node Deployment Status:", 'cyan', bold=True)
-            for host_name in selected_host_names:
+            for host_name in successful_instance_hosts + failed_instance_hosts + skipped_host_names:
                 self.app.print_colored(f"   • {host_name}: ", 'white', end='')
                 self.app._display_node_status(host_name, compact=True)
                 print()  # New line after each status
 
             # Display copy-friendly node addresses after successful deployment
-            self.app._display_copy_friendly_addresses(selected_host_names)
+            if successful_instance_hosts:
+                self.app._display_copy_friendly_addresses(successful_instance_hosts)
         else:
-            self.app.print_colored(f"\n❌ Deployment failed. Check output above for details.", 'red')
+            self.app.print_colored(f"\n❌ Instance apply phase failed. Check output above for details.", 'red')
             # Update selected node statuses to error after failed deployment
-            for host_name in selected_host_names:
+            for host_name in deployable_host_names:
+                self.app._update_node_status(host_name, 'error')
+            for host_name in skipped_host_names:
                 self.app._update_node_status(host_name, 'error')
             self.app.print_colored(f"\n📊 Selected node statuses updated to Error due to deployment failure.", 'yellow')
 
@@ -5003,6 +5177,32 @@ class R1Setup:
         try:
             if show_output:
                 self.print_colored(f"Running: {cmd}", 'cyan')
+                process = subprocess.Popen(
+                    cmd,
+                    shell=shell,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True
+                )
+                captured_lines = []
+                try:
+                    stdout, _ = process.communicate(timeout=timeout)
+                    if stdout:
+                        print(stdout, end='')
+                        captured_lines.append(stdout)
+                    return process.returncode == 0, ''.join(captured_lines)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        stdout, _ = process.communicate(timeout=5)
+                        if stdout:
+                            print(stdout, end='')
+                            captured_lines.append(stdout)
+                        self.print_colored(f"Command timed out after {timeout} seconds but captured partial output", 'yellow')
+                        return False, ''.join(captured_lines)
+                    except subprocess.TimeoutExpired:
+                        self.print_colored(f"Command timed out after {timeout} seconds: {cmd}", 'red')
+                        return False, f"Command timed out after {timeout} seconds"
 
             if timeout and not show_output:
                 # Use Popen for timeout cases where we want to capture partial output
@@ -5027,21 +5227,16 @@ class R1Setup:
                     except subprocess.TimeoutExpired:
                         self.print_colored(f"Command timed out after {timeout} seconds: {cmd}", 'red')
                         return False, f"Command timed out after {timeout} seconds"
-            else:
-                # Use regular subprocess.run for other cases
-                result = subprocess.run(
-                    cmd,
-                    shell=shell,
-                    capture_output=not show_output,
-                    text=True,
-                    check=False,
-                    timeout=timeout
-                )
-
-                if show_output:
-                    return result.returncode == 0, ""
-                else:
-                    return result.returncode == 0, result.stdout
+            # Use regular subprocess.run for non-streaming cases
+            result = subprocess.run(
+                cmd,
+                shell=shell,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout
+            )
+            return result.returncode == 0, result.stdout
         except subprocess.TimeoutExpired:
             self.print_colored(f"Command timed out after {timeout} seconds: {cmd}", 'red')
             return False, f"Command timed out after {timeout} seconds"
@@ -5125,6 +5320,17 @@ class R1Setup:
 
     def build_fleet_state(self, inventory=None):
         return self.config_manager.build_fleet_state(inventory)
+
+    def build_execution_inventory(self, host_names, dedupe_by_machine=False, inventory=None):
+        return self.config_manager.build_execution_inventory(
+            host_names,
+            inventory=inventory,
+            dedupe_by_machine=dedupe_by_machine,
+        )
+
+    def group_host_names_by_machine(self, selected_host_names, inventory=None):
+        inventory = inventory if inventory is not None else self.inventory
+        return self.config_manager.group_host_names_by_machine(inventory, selected_host_names)
 
     def get_fleet_state_copy(self):
         return self.config_manager.get_fleet_state_copy()
@@ -5396,11 +5602,96 @@ class R1Setup:
         return payload
 
     @staticmethod
+    def build_machine_extra_vars(extra_vars: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Attach machine-scope execution metadata to an extra-vars payload."""
+        payload = dict(extra_vars or {})
+        payload['r1setup_execution_scope'] = 'machine'
+        return payload
+
+    def build_instance_extra_vars(
+        self,
+        last_applied_action: str,
+        extra_vars: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Attach instance-scope execution metadata to an extra-vars payload."""
+        payload = self._build_runtime_metadata_extra_vars(last_applied_action, extra_vars)
+        payload['r1setup_execution_scope'] = 'instance'
+        return payload
+
+    @staticmethod
     def _append_ansible_extra_vars(cmd: str, extra_vars: Optional[Dict[str, Any]] = None) -> str:
         """Append JSON-encoded extra-vars to an ansible-playbook command."""
         if not extra_vars:
             return cmd
         return f"{cmd} --extra-vars '{json.dumps(extra_vars)}'"
+
+    @staticmethod
+    def _get_execution_inventory_host_names(execution_inventory: Dict[str, Any]) -> List[str]:
+        """Return host names from a generated execution inventory."""
+        return list(_get_gpu_hosts(execution_inventory).keys())
+
+    def _write_execution_inventory(
+        self,
+        host_names: List[str],
+        *,
+        dedupe_by_machine: bool = False,
+    ) -> Tuple[Path, Dict[str, Any]]:
+        """Write a generated execution inventory to a temp file."""
+        execution_inventory = self.build_execution_inventory(host_names, dedupe_by_machine=dedupe_by_machine)
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            suffix='.yml',
+            prefix='r1setup_exec_inventory_',
+            delete=False,
+        ) as handle:
+            yaml.safe_dump(execution_inventory, handle, sort_keys=False)
+            temp_path = Path(handle.name)
+        return temp_path, execution_inventory
+
+    def run_generated_playbook(
+        self,
+        playbook_path: Path,
+        host_names: List[str],
+        *,
+        machine_scope: bool = False,
+        extra_vars: Optional[Dict[str, Any]] = None,
+        last_applied_action: str = 'operation',
+        show_output: bool = False,
+        timeout: Optional[int] = None,
+    ) -> Tuple[bool, str, List[str], Dict[str, Any]]:
+        """Run a playbook with a generated per-operation inventory."""
+        inventory_path, execution_inventory = self._write_execution_inventory(
+            host_names,
+            dedupe_by_machine=machine_scope,
+        )
+        execution_host_names = self._get_execution_inventory_host_names(execution_inventory)
+
+        cmd = (
+            f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+            f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+            f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+            f"ansible-playbook -i {shlex.quote(str(inventory_path))} {shlex.quote(str(playbook_path))}"
+        )
+
+        if machine_scope:
+            payload = self.build_machine_extra_vars(extra_vars)
+        else:
+            payload = self.build_instance_extra_vars(last_applied_action, extra_vars)
+        cmd = self._append_ansible_extra_vars(cmd, payload)
+
+        try:
+            success, output = self.run_command(
+                cmd,
+                show_output=show_output,
+                timeout=timeout,
+            )
+        finally:
+            try:
+                inventory_path.unlink()
+            except FileNotFoundError:
+                pass
+
+        return success, output, execution_host_names, execution_inventory
 
     def _select_topology_mode(self) -> str:
         """Select the machine topology mode."""
@@ -6114,22 +6405,19 @@ class R1Setup:
             self.wait_for_enter()
             return False
 
-        host_limit = ','.join(selected_host_names)
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} --limit {host_limit} {playbook_path}")
-
-        cmd = self._append_ansible_extra_vars(
-            cmd,
-            self._build_runtime_metadata_extra_vars(last_applied_action, overrides),
-        )
-
         for host_name in selected_host_names:
             self._update_node_status(host_name, 'deploying')
 
         self.print_colored(f"\n{progress_message}", 'cyan')
-        success, _ = self.run_command(cmd, show_output=True)
+        success, _, _, _ = self.run_generated_playbook(
+            playbook_path,
+            selected_host_names,
+            machine_scope=False,
+            extra_vars=overrides,
+            last_applied_action=last_applied_action,
+            show_output=True,
+            timeout=self.connection_timeout,
+        )
 
         if success:
             self.print_colored(f"\n✅ {success_message}", 'green')
@@ -7290,12 +7578,14 @@ class R1Setup:
             self.print_colored(f"Node info playbook not found: {playbook_path}", 'red')
             return
 
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} {playbook_path}")
-
-        success, output = self.run_command(cmd, show_output=False, timeout=self.connection_timeout)
+        success, output, _, _ = self.run_generated_playbook(
+            playbook_path,
+            host_names,
+            machine_scope=False,
+            last_applied_action='get_node_info',
+            show_output=False,
+            timeout=self.connection_timeout,
+        )
 
         if success:
             node_results = self._parse_node_info_output(output)
@@ -7326,20 +7616,27 @@ class R1Setup:
         else:
             self.print_colored(f"\n\u26a0\ufe0f  Could not retrieve node addresses at this time. Use menu option 5 to check later.", 'yellow')
 
-    def _fetch_node_info_results(self, progress_message: str = "Retrieving node info...") -> Optional[Dict[str, Dict[str, Any]]]:
+    def _fetch_node_info_results(
+        self,
+        progress_message: str = "Retrieving node info...",
+        host_names: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Dict[str, Any]]]:
         """Fetch parsed node info results without forcing callers to duplicate playbook logic."""
         playbook_path = self.config_dir / 'playbooks/get_node_info.yml'
         if not playbook_path.exists():
             self.print_colored(f"Node info playbook not found: {playbook_path}", 'red')
             return None
 
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} {playbook_path}")
-
         self.print_colored(progress_message, 'yellow')
-        success, output = self.run_command(cmd, show_output=False, timeout=self.connection_timeout * 2)
+        target_hosts = host_names or list(_get_gpu_hosts(self.inventory).keys())
+        success, output, _, _ = self.run_generated_playbook(
+            playbook_path,
+            target_hosts,
+            machine_scope=False,
+            last_applied_action='get_node_info',
+            show_output=False,
+            timeout=self.connection_timeout * 2,
+        )
 
         if not success and "timed out" in output.lower():
             self.print_colored(f"Node info retrieval timed out after {self.connection_timeout * 2} seconds", 'red')
@@ -7777,6 +8074,10 @@ class R1Setup:
             
         self.print_debug(f"Final connectivity results: {node_results}")
         return node_results
+
+    def _parse_ansible_play_recap(self, output: str) -> Dict[str, Dict[str, Any]]:
+        """Parse generic Ansible PLAY RECAP output into host result summaries."""
+        return self._parse_connectivity_output(output)
 
     def _display_connectivity_results(self, connectivity_results: Dict[str, Dict[str, Any]], hosts: Dict[str, Dict[str, Any]]) -> None:
         """Display formatted connectivity test results"""
@@ -9110,6 +9411,13 @@ class R1Setup:
             self.print_colored("No hosts selected. Operation cancelled.", 'yellow')
             return
 
+        if not self._ensure_helper_mode_supported_for_hosts(
+            selected_hosts,
+            action_label=operation_name,
+        ):
+            self.wait_for_enter()
+            return
+
         # Show final confirmation with selected hosts
         self.print_colored(f"\n📋 Selected hosts for {operation_name}:", 'cyan', bold=True)
         for host_name in selected_hosts:
@@ -9134,17 +9442,6 @@ class R1Setup:
             self.wait_for_enter()
             return
 
-        # Build Ansible command with host limitation
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-               f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-               f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} {playbook_path}")
-
-        # Add --limit parameter to target only selected hosts
-        if len(selected_hosts) < len(hosts):
-            limit_hosts = ','.join(selected_hosts)
-            cmd += f" --limit '{limit_hosts}'"
-
         # Update node statuses to reflect the operation being performed
         if "start" in playbook_name or "restart" in playbook_name:
             for host_name in selected_hosts:
@@ -9154,7 +9451,14 @@ class R1Setup:
                 self._update_node_status(host_name, 'deploying')
 
         self.print_colored(f"\n{action_text} on {len(selected_hosts)} node(s)...", 'cyan')
-        success, _ = self.run_command(cmd, show_output=True)
+        success, _, _, _ = self.run_generated_playbook(
+            playbook_path,
+            selected_hosts,
+            machine_scope=False,
+            last_applied_action=playbook_name.replace('.yml', ''),
+            show_output=True,
+            timeout=self.connection_timeout,
+        )
 
         if success:
             self.print_colored(f"\n✅ {title} completed successfully!", 'green')

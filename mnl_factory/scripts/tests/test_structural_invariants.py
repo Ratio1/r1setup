@@ -114,6 +114,8 @@ class TestStructuralInvariants(unittest.TestCase):
         services_tasks_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "tasks" / "services.yml"
         render_tasks_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "tasks" / "render_edge_node_definition.yml"
         node_info_playbook_path = R1SETUP_PATH.parent.parent / "playbooks" / "get_node_info.yml"
+        prepare_machine_playbook_path = R1SETUP_PATH.parent.parent / "playbooks" / "prepare_machine.yml"
+        apply_instance_playbook_path = R1SETUP_PATH.parent.parent / "playbooks" / "apply_instance.yml"
         group_vars_source = group_vars_path.read_text()
         template_source = template_path.read_text()
         metadata_template_source = metadata_template_path.read_text()
@@ -122,6 +124,8 @@ class TestStructuralInvariants(unittest.TestCase):
         services_tasks_source = services_tasks_path.read_text()
         render_tasks_source = render_tasks_path.read_text()
         node_info_playbook_source = node_info_playbook_path.read_text()
+        prepare_machine_playbook_source = prepare_machine_playbook_path.read_text()
+        apply_instance_playbook_source = apply_instance_playbook_path.read_text()
 
         service_version_match = re.search(r'^mnl_service_version:\s*"([^"]+)"', group_vars_source, re.MULTILINE)
         self.assertIsNotNone(service_version_match, "mnl_service_version must be defined in group_vars/mnl.yml")
@@ -259,4 +263,14 @@ class TestStructuralInvariants(unittest.TestCase):
             '{{ r1setup_remote_get_node_info_command }}',
             node_info_playbook_source,
             "get_node_info.yml must use the topology-aware helper command",
+        )
+        self.assertIn(
+            "Prepare target machines",
+            prepare_machine_playbook_source,
+            "prepare_machine.yml must exist for machine-level deduped preparation",
+        )
+        self.assertIn(
+            "Apply Edge Node instance runtime",
+            apply_instance_playbook_source,
+            "apply_instance.yml must exist for instance-level runtime application",
         )

@@ -117,6 +117,7 @@ Code and repo conventions:
 - When refreshing node status, prefer updating `r1setup_service_file_version` from live remote data using non-fatal fallbacks instead of trusting local state alone.
 - For SSH key management, use the state model already present in `r1setup` instead of inventing parallel metadata.
 - Standard-mode machines keep the existing global helpers such as `get_logs` and `get_node_info`; expert-mode machines must use the `r1service <service> <action>` dispatcher plus per-instance helper registry files under `/var/lib/ratio1/r1setup/helpers/`.
+- Prefer generated execution inventories for CLI-driven Ansible operations. The settled Phase 5 split is: machine preparation runs from `playbooks/prepare_machine.yml`, instance runtime application runs from `playbooks/apply_instance.yml`, and the CLI should avoid driving multi-instance operations directly from the full persisted `hosts.yml` when a narrowed temp inventory is more accurate.
 - Update docs when user-visible menus, workflows, triggers, or safety guarantees change.
 - Prefer adding focused unit tests in `mnl_factory/scripts/tests/` for new logic.
 
@@ -205,3 +206,9 @@ Minimum required critic topics when relevant:
   - per-instance helper registry files live under `/var/lib/ratio1/r1setup/helpers/<service>.env`
   - `r1setup` must reject mixed standard/expert helper semantics on one physical machine instead of guessing
   - topology-aware helper command selection is now used by the `get_node_info.yml` playbook and the CLI log-streaming paths
+
+- 2026-03-17T23:15:42+02:00 | Phase 5 generated execution inventory support is implemented. The stable rule is:
+  - CLI-driven Ansible operations should prefer temp generated inventories scoped to the selected machines or instances
+  - generated execution inventories must enrich hosts with resolved runtime names, helper-mode fields, metadata paths, and derived volume/base-folder values
+  - deployment is now split in the CLI into `prepare_machine.yml` followed by `apply_instance.yml`
+  - one deploy operation should prepare each unique machine at most once, then apply instance runtime only to instances whose machine preparation succeeded

@@ -241,3 +241,70 @@ Introduce an explicit helper-mode strategy so standard deployments keep their gl
 - Standard-mode machines still use the existing global helper names such as `get_logs` and `get_node_info`.
 - Expert-mode machines now install `r1service` plus per-instance registry files so multiple instances can coexist without helper entrypoint collisions.
 - Mixed helper semantics on one machine are now rejected locally before deploy/customize/delete operations proceed.
+
+## Phase 5
+
+Completed At: `2026-03-17T23:15:42+02:00`
+
+### Goal
+
+Introduce generated per-operation inventories and split machine-level preparation from instance-level runtime application so multi-instance operations stop depending on one flat execution model.
+
+### Scope Completed
+
+- added generated execution inventory builders in `r1setup`
+- added execution host enrichment for:
+  - resolved runtime names
+  - helper-mode fields
+  - derived metadata paths
+  - derived base-folder and local-cache paths
+- added machine grouping and machine-dedup inventory generation
+- added shared machine-scope and instance-scope extra-vars builders
+- added a shared generated-playbook runner that writes and removes temporary execution inventories
+- split CLI deployment into:
+  - `prepare_machine.yml`
+  - `apply_instance.yml`
+- updated deployment flow to:
+  - prepare each unique machine once
+  - apply runtime definitions only to instances whose machine preparation succeeded
+  - report machine-prep and instance-apply outcomes separately
+- switched these flows to generated per-operation inventories:
+  - deployment
+  - delete
+  - customize service / update service template
+  - start / stop / restart service
+  - service status checks
+  - node info retrieval
+- added focused modular test coverage for inventory building and generated playbook execution
+
+### Files Changed
+
+- `mnl_factory/scripts/r1setup`
+- `mnl_factory/playbooks/prepare_machine.yml`
+- `mnl_factory/playbooks/apply_instance.yml`
+- `mnl_factory/scripts/tests/test_inventory_builder.py`
+- `mnl_factory/scripts/tests/test_r1setup_core.py`
+- `mnl_factory/scripts/tests/test_structural_invariants.py`
+- `docs/implementation_phase_log.md`
+
+### Verification Commands
+
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_inventory_builder`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_r1setup_core`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_structural_invariants tests.test_runtime_naming tests.test_machine_registration tests.test_schema_upgrade tests.test_config_roundtrip tests.test_fleet_model tests.test_dispatcher_helpers`
+- `cd mnl_factory/scripts && python3 -m unittest discover tests`
+- `cd mnl_factory/scripts && python3 -m py_compile r1setup`
+
+### Verification Results
+
+- `tests.test_inventory_builder`: passed
+- `tests.test_r1setup_core`: passed
+- structural/runtime/fleet/dispatcher compatibility suite: passed
+- `python3 -m unittest discover tests`: passed
+- `python3 -m py_compile r1setup`: passed
+
+### Notes
+
+- `site.yml` remains in the repo as the legacy one-shot collection playbook, but the CLI deployment path now prefers the explicit machine-prep plus instance-apply sequence.
+- Generated execution inventories now carry resolved runtime/helper values even when the legacy stored inventory does not yet persist all of them explicitly.
+- Deployment can now continue on machines that prepared successfully even if another selected machine fails during the preparation phase.

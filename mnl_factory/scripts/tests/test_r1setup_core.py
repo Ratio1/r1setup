@@ -186,7 +186,8 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
             base_path = Path(temp_dir)
             playbooks_dir = base_path / "playbooks"
             playbooks_dir.mkdir(parents=True, exist_ok=True)
-            (playbooks_dir / "site.yml").write_text("---\n")
+            (playbooks_dir / "prepare_machine.yml").write_text("---\n")
+            (playbooks_dir / "apply_instance.yml").write_text("---\n")
 
             app = MagicMock()
             app.check_hosts_config.return_value = True
@@ -210,7 +211,7 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
             app.config_dir = base_path
             app.config_file = base_path / "hosts.yml"
             app.active_config = {"deployment_status": "never_deployed"}
-            app.run_command.return_value = (True, "")
+            app.connection_timeout = 30
             app.print_colored = MagicMock()
             app.print_header = MagicMock()
             app.wait_for_enter = MagicMock()
@@ -218,12 +219,21 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
             app._display_node_status = MagicMock()
             app._display_copy_friendly_addresses = MagicMock()
             app.record_service_file_version = MagicMock()
-            app._build_runtime_metadata_extra_vars = MagicMock(return_value={
-                "r1setup_cli_version": "1.4.12",
-                "r1setup_collection_version": "1.3.30",
-                "r1setup_last_applied_action": "deploy_full",
-            })
-            app._append_ansible_extra_vars = MagicMock(side_effect=lambda cmd, extra_vars: f"{cmd} --extra-vars '{extra_vars}'")
+            app.group_host_names_by_machine.return_value = {
+                "root@10.0.0.1:22": {
+                    "representative_host": "node-1",
+                    "host_names": ["node-1"],
+                }
+            }
+            app.config_manager = MagicMock()
+            app.config_manager._derive_machine_id.side_effect = lambda host_name, host_config: f"{host_config.get('ansible_user', 'root')}@{host_config['ansible_host']}:22"
+            app._parse_ansible_play_recap.return_value = {
+                "node-1": {"status": "connected"}
+            }
+            app.run_generated_playbook.side_effect = [
+                (True, "machine phase", ["node-1"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-1": {}}}}}}),
+                (True, "instance phase", ["node-1"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-1": {}}}}}}),
+            ]
 
             service = r1setup.DeploymentService(app)
 
@@ -237,7 +247,7 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
 
             update_metadata.assert_called_once_with("full")
             app.record_service_file_version.assert_called_once_with(["node-1"])
-            self.assertIn("r1setup_last_applied_action", app.run_command.call_args[0][0])
+            self.assertEqual(app.run_generated_playbook.call_count, 2)
 
 
 class TestNodeInfoDetails(unittest.TestCase):

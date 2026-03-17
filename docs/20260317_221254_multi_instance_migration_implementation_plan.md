@@ -22,10 +22,10 @@ Completed:
 - Phase 2: machine registration and fleet summary foundation
 - Phase 3: runtime naming engine and collision detection
 - Phase 4: dispatcher-based helper strategy
+- Phase 5: generated inventory and operation split
 
 Not Started:
 
-- Phase 5: generated inventory and operation split
 - Phase 6: visualization and fleet UX
 - Phase 7: empty-machine operations
 - Phase 8: migration planning framework
@@ -34,53 +34,54 @@ Not Started:
 
 ## Recommended Next Step
 
-The next best step is Phase 5: generated inventory and operation split.
+The next best step is Phase 6: visualization and fleet UX.
 
 Reasoning:
 
-- runtime naming is now centralized and test-covered
-- helper behavior is now explicit for standard vs expert machines
-- machine registration exists, so machine-level vs instance-level execution boundaries can now be built on top of persisted fleet metadata
-- generated inventory and operation splitting are the prerequisite for safe empty-machine preparation and later migration execution
+- runtime naming is centralized and now flows into generated execution inventories
+- helper behavior is explicit for standard vs expert machines
+- machine-level preparation and instance-level runtime application are now separated in the CLI execution path
+- the next missing operator-facing piece is representing that machine/instance split correctly in the CLI views
 
 Practical goal for the next implementation slice:
 
-- generate operation-specific inventory and extra-vars from the persisted fleet/runtime model
-- split machine-preparation concerns from instance-targeted service actions
-- stop treating the flat legacy host inventory as the only execution model
+- make machine and instance relationships visible in the CLI instead of still presenting a flat host list
+- surface empty machines, grouped expert-mode instances, and mixed per-machine instance states
+- keep standard-mode output simple while exposing machine-level context where it now matters operationally
 
-### Immediate Phase 5 Breakdown
+### Immediate Phase 6 Breakdown
 
 The next coding slice should be executed in this order:
 
-1. add shared builders for:
-   - generated execution inventory
-   - machine extra-vars
-   - instance extra-vars
-2. route deploy/customize/status operations through those builders instead of ad hoc host limits only
-3. separate machine-preparation work from instance apply/start/stop/status behavior conceptually, even if some existing playbooks are reused at first
-4. ensure one operation prepares a shared machine at most once
-5. add focused modular tests for generated inventory and machine-vs-instance execution boundaries
-6. after the phase is complete:
+1. add grouped machine/instance view helpers driven by fleet state and generated-status results
+2. update fleet summary and node status screens to render:
+   - empty machines
+   - standard machines
+   - expert machines with grouped instances
+3. surface available machine specs and topology mode in grouped views when known
+4. keep standard mode concise so one-machine-one-node users do not get forced into expert-only UI noise
+5. make incomplete operation state, where available, visible enough for later migration flows
+6. add focused modular tests for grouped rendering and mixed per-machine state display
+7. after the phase is complete:
    - update `docs/implementation_phase_log.md`
    - run targeted tests plus broad CLI regression
    - create a dedicated phase commit before moving on
 
-### Immediate Deliverables For Phase 5
+### Immediate Deliverables For Phase 6
 
-- one authoritative execution-inventory builder
-- one authoritative extra-vars builder path
-- one machine-level dedup mechanism per operation
-- one focused test module for generated inventory and operation splitting
+- one grouped machine/instance view model for CLI display
+- updated fleet summary rendering
+- updated status rendering that can show mixed states per physical machine
+- one focused test module for machine grouping and display behavior
 
-### Exit Signal For Starting Phase 6
+### Exit Signal For Starting Phase 7
 
-Do not start visualization and fleet UX work until all of the following are true:
+Do not start empty-machine operations until all of the following are true:
 
-- operations no longer depend only on the flat legacy host inventory
-- machine-level preparation and instance-level actions are resolved through shared builders
-- same-machine multi-instance execution no longer implies redundant machine-preparation work
-- tests cover generated inventory contents and per-machine dedup semantics
+- the CLI can render empty machines and grouped expert-mode instances clearly
+- the operator can see machine topology mode and capacity context in the display
+- mixed states on one machine no longer look like separate unrelated hosts
+- grouped-display behavior is test covered
 
 ## Implementation Principles
 
