@@ -43,4 +43,12 @@ mnl_r1setup_metadata_host_path: "{{ mnl_r1setup_metadata_host_dir }}/metadata.js
 mnl_r1setup_metadata_container_dir: "{{ mnl_docker_persistent_folder }}/_data/r1setup"
 mnl_r1setup_metadata_container_path: "{{ mnl_r1setup_metadata_container_dir }}/metadata.json"
 
+# Helper/dispatcher paths
+r1setup_helper_mode: "{{ 'expert_dispatcher' if (r1setup_topology_mode | default('standard')) == 'expert' else 'standard_helpers' }}"
+r1setup_helper_registry_dir: "/var/lib/ratio1/r1setup/helpers"
+r1setup_helper_registry_path: "{{ r1setup_helper_registry_dir }}/{{ edge_node_service_name }}.env"
+r1setup_remote_get_logs_command: "{{ 'r1service ' ~ edge_node_service_name ~ ' logs' if r1setup_helper_mode == 'expert_dispatcher' else 'get_logs' }}"
+r1setup_remote_get_node_info_command: "{{ 'r1service ' ~ edge_node_service_name ~ ' info' if r1setup_helper_mode == 'expert_dispatcher' else 'get_node_info' }}"
+r1setup_remote_restart_service_command: "{{ 'r1service ' ~ edge_node_service_name ~ ' restart' if r1setup_helper_mode == 'expert_dispatcher' else 'restart_service' }}"
+
 # Optional settings (commented out)

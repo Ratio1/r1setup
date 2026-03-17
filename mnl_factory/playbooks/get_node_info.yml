@@ -5,7 +5,7 @@
   gather_facts: true
   tasks:
     - name: Run get_node_info command
-      ansible.builtin.shell: get_node_info
+      ansible.builtin.shell: "{{ r1setup_remote_get_node_info_command }}"
       register: node_info
       ignore_errors: true
 

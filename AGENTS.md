@@ -116,6 +116,7 @@ Code and repo conventions:
 - Keep per-node applied service-unit state in inventory host metadata under `r1setup_service_file_version`; missing values must be normalized to `v0`.
 - When refreshing node status, prefer updating `r1setup_service_file_version` from live remote data using non-fatal fallbacks instead of trusting local state alone.
 - For SSH key management, use the state model already present in `r1setup` instead of inventing parallel metadata.
+- Standard-mode machines keep the existing global helpers such as `get_logs` and `get_node_info`; expert-mode machines must use the `r1service <service> <action>` dispatcher plus per-instance helper registry files under `/var/lib/ratio1/r1setup/helpers/`.
 - Update docs when user-visible menus, workflows, triggers, or safety guarantees change.
 - Prefer adding focused unit tests in `mnl_factory/scripts/tests/` for new logic.
 
@@ -197,3 +198,10 @@ Minimum required critic topics when relevant:
 - 2026-03-17T02:02:00+02:00 | Edge Node deployments now carry launcher-owned runtime metadata in a dedicated JSON file at `/var/lib/ratio1/r1setup/edge_node/metadata.json`, mounted read-only into the container at `/run/r1setup/metadata.json` via `R1SETUP_METADATA_PATH`. Render that file from the same apply path as `edge_node.service`, include service file version plus CLI/collection version and last applied action, and update/remove it whenever the service definition is applied/deleted.
 
 - 2026-03-17T02:22:00+02:00 | Correction to the previous 2026-03-17 metadata-path entry: runtime metadata now lives inside the existing Edge Node persistent volume under `{{ mnl_docker_volume_path }}/_data/r1setup/metadata.json` and is read in-container via `{{ mnl_docker_persistent_folder }}/_data/r1setup/metadata.json`. Do not add a second dedicated Docker mount for the metadata file in this design; keep only `R1SETUP_METADATA_PATH`.
+
+- 2026-03-17T23:01:53+02:00 | Phase 4 helper strategy is implemented. The stable rule is:
+  - standard topology keeps machine-global helpers like `get_logs`, `get_node_info`, and `restart_service`
+  - expert topology uses `/usr/local/bin/r1service <service> <action>`
+  - per-instance helper registry files live under `/var/lib/ratio1/r1setup/helpers/<service>.env`
+  - `r1setup` must reject mixed standard/expert helper semantics on one physical machine instead of guessing
+  - topology-aware helper command selection is now used by the `get_node_info.yml` playbook and the CLI log-streaming paths

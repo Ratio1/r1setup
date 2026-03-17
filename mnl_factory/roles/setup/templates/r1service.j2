@@ -1,0 +1,78 @@
+#!/bin/bash
+set -eu
+
+REGISTRY_DIR="{{ r1setup_helper_registry_dir }}"
+
+list_instances() {
+  if [ ! -d "$REGISTRY_DIR" ]; then
+    return 0
+  fi
+
+  find "$REGISTRY_DIR" -maxdepth 1 -type f -name '*.env' -printf '%f\n' 2>/dev/null | sed 's/\.env$//' | sort
+}
+
+show_usage() {
+  cat <<EOF
+Usage:
+  r1service list
+  r1service <instance> logs [journalctl args]
+  r1service <instance> info
+  r1service <instance> restart
+  r1service <instance> history
+  r1service <instance> get-e2-pem
+EOF
+}
+
+if [ "$#" -lt 1 ]; then
+  show_usage
+  exit 1
+fi
+
+if [ "$1" = "list" ]; then
+  list_instances
+  exit 0
+fi
+
+if [ "$#" -lt 2 ]; then
+  show_usage
+  exit 1
+fi
+
+INSTANCE_NAME="$1"
+shift
+ACTION="$1"
+shift
+
+REGISTRY_PATH="$REGISTRY_DIR/$INSTANCE_NAME.env"
+if [ ! -f "$REGISTRY_PATH" ]; then
+  echo "Unknown instance '$INSTANCE_NAME'. Registered instances:" >&2
+  list_instances >&2 || true
+  exit 1
+fi
+
+. "$REGISTRY_PATH"
+
+case "$ACTION" in
+  logs)
+    exec journalctl -a -u "$EDGE_NODE_SERVICE_NAME" "$@"
+    ;;
+  info)
+    exec docker exec -i "$MNL_DOCKER_CONTAINER_NAME" bash -lc "get_node_info"
+    ;;
+  restart)
+    sudo systemctl enable "$EDGE_NODE_SERVICE_NAME"
+    sudo systemctl restart "$EDGE_NODE_SERVICE_NAME"
+    exec sudo journalctl -u "$EDGE_NODE_SERVICE_NAME" -a -n 100 "$@"
+    ;;
+  history)
+    exec docker exec -i "$MNL_DOCKER_CONTAINER_NAME" bash -lc "get_node_history"
+    ;;
+  get-e2-pem)
+    exec docker exec -i "$MNL_DOCKER_CONTAINER_NAME" bash -lc "get_e2_pem_file"
+    ;;
+  *)
+    echo "Unsupported action '$ACTION'." >&2
+    show_usage >&2
+    exit 1
+    ;;
+esac

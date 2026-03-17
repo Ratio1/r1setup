@@ -109,9 +109,19 @@ class TestStructuralInvariants(unittest.TestCase):
         group_vars_path = R1SETUP_PATH.parent.parent / "group_vars" / "mnl.yml"
         template_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "templates" / "edge_node.service.j2"
         metadata_template_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "templates" / "r1setup-metadata.json.j2"
+        dispatcher_template_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "templates" / "r1service.j2"
+        helper_registry_template_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "templates" / "r1service-instance.env.j2"
+        services_tasks_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "tasks" / "services.yml"
+        render_tasks_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "tasks" / "render_edge_node_definition.yml"
+        node_info_playbook_path = R1SETUP_PATH.parent.parent / "playbooks" / "get_node_info.yml"
         group_vars_source = group_vars_path.read_text()
         template_source = template_path.read_text()
         metadata_template_source = metadata_template_path.read_text()
+        dispatcher_template_source = dispatcher_template_path.read_text()
+        helper_registry_template_source = helper_registry_template_path.read_text()
+        services_tasks_source = services_tasks_path.read_text()
+        render_tasks_source = render_tasks_path.read_text()
+        node_info_playbook_source = node_info_playbook_path.read_text()
 
         service_version_match = re.search(r'^mnl_service_version:\s*"([^"]+)"', group_vars_source, re.MULTILINE)
         self.assertIsNotNone(service_version_match, "mnl_service_version must be defined in group_vars/mnl.yml")
@@ -168,6 +178,21 @@ class TestStructuralInvariants(unittest.TestCase):
             "mnl.yml must expose metadata inside the existing container persistent volume",
         )
         self.assertIn(
+            'r1setup_helper_mode: "{{ \'expert_dispatcher\' if (r1setup_topology_mode | default(\'standard\')) == \'expert\' else \'standard_helpers\' }}"',
+            group_vars_source,
+            "mnl.yml must define helper mode from topology",
+        )
+        self.assertIn(
+            'r1setup_helper_registry_dir: "/var/lib/ratio1/r1setup/helpers"',
+            group_vars_source,
+            "mnl.yml must define the helper registry directory",
+        )
+        self.assertIn(
+            'r1setup_remote_get_node_info_command:',
+            group_vars_source,
+            "mnl.yml must define a topology-aware node-info helper command",
+        )
+        self.assertIn(
             '"managed_by": "r1setup"',
             metadata_template_source,
             "r1setup metadata template must identify its manager",
@@ -199,4 +224,39 @@ class TestStructuralInvariants(unittest.TestCase):
             "{{ mnl_service_version }}",
             image_url_match.group(1),
             "mnl_service_version must not change Docker image selection semantics",
+        )
+        self.assertIn(
+            'Usage:',
+            dispatcher_template_source,
+            "r1service dispatcher must provide operator-facing usage text",
+        )
+        self.assertIn(
+            'REGISTRY_DIR="{{ r1setup_helper_registry_dir }}"',
+            dispatcher_template_source,
+            "r1service dispatcher must use the shared helper registry directory",
+        )
+        self.assertIn(
+            "EDGE_NODE_SERVICE_NAME='{{ edge_node_service_name }}'",
+            helper_registry_template_source,
+            "helper registry template must persist the service name",
+        )
+        self.assertIn(
+            'when: r1setup_helper_mode == \'standard_helpers\'',
+            services_tasks_source,
+            "services.yml must keep standard helpers gated behind standard helper mode",
+        )
+        self.assertIn(
+            'when: r1setup_helper_mode == \'expert_dispatcher\'',
+            services_tasks_source,
+            "services.yml must install the dispatcher only for expert helper mode",
+        )
+        self.assertIn(
+            'Render helper registry entry',
+            render_tasks_source,
+            "render_edge_node_definition.yml must maintain the per-instance helper registry",
+        )
+        self.assertIn(
+            '{{ r1setup_remote_get_node_info_command }}',
+            node_info_playbook_source,
+            "get_node_info.yml must use the topology-aware helper command",
         )

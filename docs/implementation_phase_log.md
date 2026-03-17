@@ -177,3 +177,67 @@ Introduce a deterministic runtime naming engine and collision detection layer be
 
 - Runtime naming is now centralized and testable, but deploy/runtime playbooks do not consume the new naming engine yet.
 - This phase is intended to prevent later deploy and migration code from inventing names ad hoc.
+
+## Phase 4
+
+Completed At: `2026-03-17T23:01:53+02:00`
+
+### Goal
+
+Introduce an explicit helper-mode strategy so standard deployments keep their global helper scripts while expert-mode machines use an unambiguous dispatcher path.
+
+### Scope Completed
+
+- added centralized helper-mode resolution in `r1setup`
+- added topology-aware remote helper command resolution for:
+  - logs
+  - node info
+  - restart
+  - node history
+  - e2 pem retrieval
+- added unsupported mixed-helper detection for one machine carrying both standard and expert helper semantics
+- updated CLI log retrieval to use resolved remote helper commands instead of hardcoded `get_logs`
+- added a shared expert-mode dispatcher script at `/usr/local/bin/r1service`
+- added per-instance helper registry entries under `/var/lib/ratio1/r1setup/helpers`
+- updated the node-info playbook to use topology-aware helper commands
+- updated delete cleanup to remove per-instance helper registry entries and only remove global helper scripts in standard mode
+- added focused modular test coverage for dispatcher/helper behavior
+
+### Files Changed
+
+- `mnl_factory/scripts/r1setup`
+- `mnl_factory/scripts/tests/test_dispatcher_helpers.py`
+- `mnl_factory/scripts/tests/test_structural_invariants.py`
+- `mnl_factory/group_vars/mnl.yml`
+- `mnl_factory/roles/setup/tasks/services.yml`
+- `mnl_factory/roles/setup/tasks/render_edge_node_definition.yml`
+- `mnl_factory/roles/setup/templates/get_node_info.command.j2`
+- `mnl_factory/roles/setup/templates/r1service.j2`
+- `mnl_factory/roles/setup/templates/r1service-instance.env.j2`
+- `mnl_factory/playbooks/get_node_info.yml`
+- `mnl_factory/playbooks/delete_edge_node.yml`
+- `docs/implementation_phase_log.md`
+
+### Verification Commands
+
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_dispatcher_helpers`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_structural_invariants`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_runtime_naming tests.test_machine_registration tests.test_schema_upgrade tests.test_config_roundtrip tests.test_fleet_model`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_r1setup_core`
+- `cd mnl_factory/scripts && python3 -m unittest discover tests`
+- `cd mnl_factory/scripts && python3 -m py_compile r1setup`
+
+### Verification Results
+
+- `tests.test_dispatcher_helpers`: passed
+- `tests.test_structural_invariants`: passed
+- runtime/fleet-focused compatibility suite: passed
+- `tests.test_r1setup_core`: passed
+- `python3 -m unittest discover tests`: passed
+- `python3 -m py_compile r1setup`: passed
+
+### Notes
+
+- Standard-mode machines still use the existing global helper names such as `get_logs` and `get_node_info`.
+- Expert-mode machines now install `r1service` plus per-instance registry files so multiple instances can coexist without helper entrypoint collisions.
+- Mixed helper semantics on one machine are now rejected locally before deploy/customize/delete operations proceed.

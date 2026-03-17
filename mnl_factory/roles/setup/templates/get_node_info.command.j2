@@ -1,1 +1,2 @@
-docker exec -it {{ mnl_docker_container_name }} bash -c "get_node_info"
+#!/bin/bash
+docker exec -i {{ mnl_docker_container_name }} bash -lc "get_node_info"

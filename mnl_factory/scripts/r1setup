@@ -45,6 +45,7 @@ import yaml
 import getpass
 import re
 import json
+import shlex
 import urllib.request
 import urllib.error
 import shutil
@@ -122,6 +123,9 @@ DEFAULT_RUNTIME_SERVICE_NAME = 'edge_node'
 DEFAULT_RUNTIME_CONTAINER_NAME = 'edge_node'
 DEFAULT_RUNTIME_VOLUME_PATH = '/var/cache/edge_node/_local_cache'
 DEFAULT_RUNTIME_EXIT_STATUS_PATH = '/tmp/edge_node.exit'
+HELPER_MODE_STANDARD = 'standard_helpers'
+HELPER_MODE_EXPERT = 'expert_dispatcher'
+DEFAULT_HELPER_REGISTRY_DIR = '/var/lib/ratio1/r1setup/helpers'
 
 SSH_KEY_MANAGEMENT_REQUIRED_PLAYBOOKS = (
     'playbooks/ssh_install_key.yml',
@@ -1717,6 +1721,11 @@ class ConfigurationManager:
         sanitized = re.sub(r'[^a-zA-Z0-9]+', '_', str(value or '').strip().lower()).strip('_')
         return sanitized or 'instance'
 
+    @staticmethod
+    def resolve_helper_mode(topology_mode: str = DEFAULT_MACHINE_TOPOLOGY_MODE) -> str:
+        """Resolve helper-installation mode from topology."""
+        return HELPER_MODE_EXPERT if str(topology_mode or '').strip() == 'expert' else HELPER_MODE_STANDARD
+
     @classmethod
     def resolve_runtime_names(
         cls,
@@ -1782,6 +1791,44 @@ class ConfigurationManager:
             f"/var/cache/{runtime_base}/_local_cache",
         )
 
+    @classmethod
+    def build_helper_runtime(
+        cls,
+        host_name: str,
+        host_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build helper-mode and remote helper commands for a host config."""
+        runtime = cls._build_runtime_snapshot(host_name, host_config)
+        helper_mode = cls.resolve_helper_mode(
+            str(host_config.get('r1setup_topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE)
+        )
+        service_name = runtime.get('service_name') or DEFAULT_RUNTIME_SERVICE_NAME
+        helper_registry_path = f"{DEFAULT_HELPER_REGISTRY_DIR}/{service_name}.env"
+
+        if helper_mode == HELPER_MODE_EXPERT:
+            command_prefix = f"r1service {shlex.quote(service_name)}"
+            remote_commands = {
+                'logs': f"{command_prefix} logs",
+                'info': f"{command_prefix} info",
+                'restart': f"{command_prefix} restart",
+                'history': f"{command_prefix} history",
+                'get_e2_pem': f"{command_prefix} get-e2-pem",
+            }
+        else:
+            remote_commands = {
+                'logs': 'get_logs',
+                'info': 'get_node_info',
+                'restart': 'restart_service',
+                'history': 'get_node_history',
+                'get_e2_pem': 'get_e2_pem_file',
+            }
+
+        return {
+            'helper_mode': helper_mode,
+            'helper_registry_path': helper_registry_path,
+            'remote_commands': remote_commands,
+        }
+
     @staticmethod
     def detect_runtime_collisions(
         machine_id: str,
@@ -1822,6 +1869,43 @@ class ConfigurationManager:
                 'exit_status_path': host_config.get('r1setup_runtime_exit_status_path'),
             },
         )
+
+    def detect_helper_mode_conflicts(
+        self,
+        inventory: Optional[Dict[str, Any]] = None,
+        *,
+        selected_host_names: Optional[List[str]] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return machines whose configured instances disagree on helper mode."""
+        inventory = inventory if inventory is not None else self.app.inventory
+        hosts = _get_gpu_hosts(inventory)
+        selected = set(selected_host_names or hosts.keys())
+        machine_details: Dict[str, Dict[str, Any]] = {}
+
+        for host_name, host_config in hosts.items():
+            machine_id = self._derive_machine_id(host_name, host_config)
+            detail = machine_details.setdefault(machine_id, {
+                'all_hosts': [],
+                'selected_hosts': [],
+                'helper_modes': {},
+            })
+            helper_mode = self.resolve_helper_mode(
+                str(host_config.get('r1setup_topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE)
+            )
+            detail['all_hosts'].append(host_name)
+            detail['helper_modes'].setdefault(helper_mode, []).append(host_name)
+            if host_name in selected:
+                detail['selected_hosts'].append(host_name)
+
+        conflicts = {}
+        for machine_id, detail in machine_details.items():
+            if not detail['selected_hosts']:
+                continue
+            if len(detail['helper_modes']) <= 1:
+                continue
+            conflicts[machine_id] = detail
+
+        return conflicts
 
     def build_fleet_state(self, inventory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Derive a schema-aware fleet view from the current legacy inventory."""
@@ -3410,6 +3494,13 @@ class DeploymentService:
             self.app.wait_for_enter()
             return
 
+        if not self.app._ensure_helper_mode_supported_for_hosts(
+            selected_host_names,
+            action_label="delete selected nodes",
+        ):
+            self.app.wait_for_enter()
+            return
+
         # Filter hosts to only include selected ones
         selected_hosts = {name: config for name, config in all_hosts.items() if name in selected_host_names}
 
@@ -3522,6 +3613,13 @@ class DeploymentService:
 
         if not selected_host_names:
             self.app.print_colored("Deployment cancelled - no hosts selected.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        if not self.app._ensure_helper_mode_supported_for_hosts(
+            selected_host_names,
+            action_label="deploy selected nodes",
+        ):
             self.app.wait_for_enter()
             return
 
@@ -5188,6 +5286,101 @@ class R1Setup:
     def record_service_file_versions(self, host_versions: Dict[str, str]) -> None:
         return self.config_manager.record_service_file_versions(host_versions)
 
+    def detect_helper_mode_conflicts(
+        self,
+        selected_host_names: Optional[List[str]] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        return self.config_manager.detect_helper_mode_conflicts(
+            self.inventory,
+            selected_host_names=selected_host_names,
+        )
+
+    def _build_host_helper_runtime(self, host_name: str, host_config: Dict[str, Any]) -> Dict[str, Any]:
+        return self.config_manager.build_helper_runtime(host_name, host_config)
+
+    def _build_remote_helper_command(
+        self,
+        host_name: str,
+        host_config: Dict[str, Any],
+        action: str,
+        *args: str,
+    ) -> str:
+        """Resolve a host-aware remote helper command."""
+        helper_runtime = self._build_host_helper_runtime(host_name, host_config)
+        remote_commands = helper_runtime.get('remote_commands') or {}
+        base_command = remote_commands.get(action)
+        if not base_command:
+            raise ValueError(f"Unsupported helper action: {action}")
+
+        extra_args = [str(arg) for arg in args if str(arg).strip()]
+        if not extra_args:
+            return base_command
+        return f"{base_command} {' '.join(shlex.quote(arg) for arg in extra_args)}"
+
+    def _build_node_ssh_command(
+        self,
+        node_name: str,
+        node_config: Dict[str, Any],
+        remote_command: str,
+    ) -> List[str]:
+        """Build an SSH command list for a node-aware remote command."""
+        host = node_config.get('ansible_host', '')
+        user = node_config.get('ansible_user', '')
+        if not host or not user:
+            raise ValueError(f"Node '{node_name}' is missing ansible_host or ansible_user")
+
+        ssh_cmd = ['ssh']
+        ssh_port = node_config.get('ansible_port')
+        if ssh_port and str(ssh_port) != '22':
+            ssh_cmd.extend(['-p', str(ssh_port)])
+
+        if 'ansible_ssh_private_key_file' in node_config:
+            key_file = node_config['ansible_ssh_private_key_file']
+            if str(key_file).startswith('~'):
+                key_file = os.path.expanduser(key_file)
+            ssh_cmd.extend(['-i', str(key_file)])
+
+        ssh_cmd.extend([f"{user}@{host}", remote_command])
+        if 'ansible_ssh_pass' in node_config:
+            return ['sshpass', '-p', node_config['ansible_ssh_pass']] + ssh_cmd
+        return ssh_cmd
+
+    def _ensure_helper_mode_supported_for_hosts(
+        self,
+        selected_host_names: List[str],
+        *,
+        action_label: str,
+    ) -> bool:
+        """Reject unsupported mixed helper semantics on the same machine."""
+        conflicts = self.detect_helper_mode_conflicts(selected_host_names)
+        if not conflicts:
+            return True
+
+        self.print_colored(
+            f"Unsupported helper-mode mix detected while preparing to {action_label}.",
+            'red',
+            bold=True,
+        )
+        for machine_id in sorted(conflicts.keys()):
+            detail = conflicts[machine_id]
+            mode_parts = []
+            for helper_mode, host_names in sorted(detail['helper_modes'].items()):
+                mode_parts.append(f"{helper_mode}: {', '.join(sorted(host_names))}")
+            self.print_colored(
+                f"  • {machine_id}: {' | '.join(mode_parts)}",
+                'yellow',
+            )
+
+        self.print_colored(
+            "A single machine cannot mix standard global helpers and expert dispatcher helpers.",
+            'yellow',
+        )
+        self.print_colored(
+            "Keep the machine in one helper mode or migrate to expert semantics explicitly before proceeding.",
+            'yellow',
+        )
+        return False
+
     def _build_runtime_metadata_extra_vars(
         self,
         last_applied_action: str,
@@ -5909,6 +6102,12 @@ class R1Setup:
         failure_message: str,
     ) -> bool:
         """Apply the service template playbook to selected nodes."""
+        if not self._ensure_helper_mode_supported_for_hosts(
+            selected_host_names,
+            action_label="apply service-helper changes",
+        ):
+            return False
+
         playbook_path = self.config_dir / 'playbooks/customize_service.yml'
         if not playbook_path.exists():
             self.print_colored(f"Playbook not found: {playbook_path}", 'red')
@@ -8178,8 +8377,10 @@ class R1Setup:
             self.wait_for_enter()
             return
         
+        remote_log_command = self._build_remote_helper_command(node_name, node_config, 'logs', '-f')
+
         self.print_colored(f"📡 Ready to stream logs from: {user}@{host}", 'cyan')
-        self.print_colored("🔍 This will run 'get_logs -f' on the target machine", 'white')
+        self.print_colored(f"🔍 This will run '{remote_log_command}' on the target machine", 'white')
         self.print_colored("⚠️  Use Ctrl+C to stop streaming and return to menu", 'yellow', bold=True)
         print()
         
@@ -8188,21 +8389,19 @@ class R1Setup:
         print()
         
         try:
-            # Construct SSH command to follow logs using the deployed get_logs script
-            ssh_cmd = f"ssh {user}@{host} 'get_logs -f'"
-            
-            # Handle SSH key vs password authentication
-            if 'ansible_ssh_pass' in node_config:
-                # Use sshpass for password authentication
-                ssh_cmd = f"sshpass -p '{node_config['ansible_ssh_pass']}' {ssh_cmd}"
-            
+            ssh_cmd = self._build_node_ssh_command(node_name, node_config, remote_log_command)
+
             self.print_colored(f"Connecting to {user}@{host}...", 'yellow')
             print("=" * 80)
             
             # Execute the command
-            process = subprocess.Popen(ssh_cmd, shell=True, stdout=subprocess.PIPE, 
-                                     stderr=subprocess.STDOUT, text=True, 
-                                     universal_newlines=True)
+            process = subprocess.Popen(
+                ssh_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                universal_newlines=True,
+            )
             
             # Stream the output
             try:
@@ -8326,18 +8525,18 @@ class R1Setup:
                 self.wait_for_enter()
                 return
             
-            # Construct SSH command to get logs using the deployed get_logs script
-            ssh_cmd = f"ssh {user}@{host} 'get_logs -n {lines_count}'"
-            
-            # Handle SSH key vs password authentication
-            if 'ansible_ssh_pass' in node_config:
-                # Use sshpass for password authentication
-                ssh_cmd = f"sshpass -p '{node_config['ansible_ssh_pass']}' {ssh_cmd}"
-            
+            remote_log_command = self._build_remote_helper_command(node_name, node_config, 'logs', '-n', str(lines_count))
+            ssh_cmd = self._build_node_ssh_command(node_name, node_config, remote_log_command)
+
             self.print_colored(f"Connecting to {user}@{host} and retrieving {lines_count} log lines...", 'yellow')
             
             # Execute the command
-            result = subprocess.run(ssh_cmd, shell=True, capture_output=True, text=True, timeout=self.connection_timeout)
+            result = subprocess.run(
+                ssh_cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.connection_timeout,
+            )
 
             if result.returncode == 0:
                 # Save logs to file

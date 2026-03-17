@@ -13,6 +13,75 @@ Implement:
 
 using maintainable Python and Ansible design, while preserving backward compatibility for current users.
 
+## Current Status
+
+Completed:
+
+- Phase 0: safety baseline and config-layer refactor seams
+- Phase 1: fleet metadata persistence
+- Phase 2: machine registration and fleet summary foundation
+- Phase 3: runtime naming engine and collision detection
+- Phase 4: dispatcher-based helper strategy
+
+Not Started:
+
+- Phase 5: generated inventory and operation split
+- Phase 6: visualization and fleet UX
+- Phase 7: empty-machine operations
+- Phase 8: migration planning framework
+- Phase 9: migration execution
+- Phase 10: rollback and finalization
+
+## Recommended Next Step
+
+The next best step is Phase 5: generated inventory and operation split.
+
+Reasoning:
+
+- runtime naming is now centralized and test-covered
+- helper behavior is now explicit for standard vs expert machines
+- machine registration exists, so machine-level vs instance-level execution boundaries can now be built on top of persisted fleet metadata
+- generated inventory and operation splitting are the prerequisite for safe empty-machine preparation and later migration execution
+
+Practical goal for the next implementation slice:
+
+- generate operation-specific inventory and extra-vars from the persisted fleet/runtime model
+- split machine-preparation concerns from instance-targeted service actions
+- stop treating the flat legacy host inventory as the only execution model
+
+### Immediate Phase 5 Breakdown
+
+The next coding slice should be executed in this order:
+
+1. add shared builders for:
+   - generated execution inventory
+   - machine extra-vars
+   - instance extra-vars
+2. route deploy/customize/status operations through those builders instead of ad hoc host limits only
+3. separate machine-preparation work from instance apply/start/stop/status behavior conceptually, even if some existing playbooks are reused at first
+4. ensure one operation prepares a shared machine at most once
+5. add focused modular tests for generated inventory and machine-vs-instance execution boundaries
+6. after the phase is complete:
+   - update `docs/implementation_phase_log.md`
+   - run targeted tests plus broad CLI regression
+   - create a dedicated phase commit before moving on
+
+### Immediate Deliverables For Phase 5
+
+- one authoritative execution-inventory builder
+- one authoritative extra-vars builder path
+- one machine-level dedup mechanism per operation
+- one focused test module for generated inventory and operation splitting
+
+### Exit Signal For Starting Phase 6
+
+Do not start visualization and fleet UX work until all of the following are true:
+
+- operations no longer depend only on the flat legacy host inventory
+- machine-level preparation and instance-level actions are resolved through shared builders
+- same-machine multi-instance execution no longer implies redundant machine-preparation work
+- tests cover generated inventory contents and per-machine dedup semantics
+
 ## Implementation Principles
 
 - Preserve existing standard-mode behavior by default.
