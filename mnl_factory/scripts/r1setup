@@ -114,6 +114,12 @@ SSH_AUTH_MODE_VERIFICATION_FAILED = 'verification_failed'
 SERVICE_FILE_VERSION_FIELD = 'r1setup_service_file_version'
 DEFAULT_SERVICE_FILE_VERSION = 'v0'
 UNKNOWN_SERVICE_FILE_VERSION_MARKERS = {'', 'unknown', 'not found', 'n/a', 'none', 'null'}
+CONFIG_SCHEMA_VERSION = 1
+DEFAULT_MACHINE_TOPOLOGY_MODE = 'standard'
+DEFAULT_MACHINE_DEPLOYMENT_STATE = 'unknown'
+DEFAULT_RUNTIME_SERVICE_NAME = 'edge_node'
+DEFAULT_RUNTIME_CONTAINER_NAME = 'edge_node'
+DEFAULT_RUNTIME_VOLUME_PATH = '/var/cache/edge_node/_local_cache'
 
 SSH_KEY_MANAGEMENT_REQUIRED_PLAYBOOKS = (
     'playbooks/ssh_install_key.yml',
@@ -1122,6 +1128,7 @@ class ConfigurationManager:
             'environment': None,
             'created_at': None,
             'nodes_count': 0,
+            'config_schema_version': CONFIG_SCHEMA_VERSION,
             'last_deployed_date': None,
             'last_deployed_network': None,
             'deployment_status': 'never_deployed',
@@ -1138,6 +1145,7 @@ class ConfigurationManager:
             'environment': None,
             'created_at': None,
             'nodes_count': 0,
+            'config_schema_version': CONFIG_SCHEMA_VERSION,
             'last_deployed_date': None,
             'last_deployed_network': None,
             'deployment_status': 'never_deployed',
@@ -1276,6 +1284,8 @@ class ConfigurationManager:
         # Fill in any missing metadata fields
         if 'created_at' not in metadata:
             metadata['created_at'] = datetime.now().isoformat()
+        if 'config_schema_version' not in metadata:
+            metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
         if 'config_name' not in metadata:
             metadata['config_name'] = config_name
         if 'description' not in metadata:
@@ -1294,6 +1304,7 @@ class ConfigurationManager:
         # Always update these fields
         metadata['environment'] = environment
         metadata['nodes_count'] = nodes_count
+        metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
 
 
         with open(metadata_path, 'w') as f:
@@ -1371,45 +1382,11 @@ class ConfigurationManager:
                 self.set_mnl_app_env(env)
                 self.app.print_debug(f"Network environment synchronized to: {env}")
 
-            # Initialize status fields for existing nodes that don't have them
-            hosts = _get_gpu_hosts(self.app.inventory)
-            updated = False
-            self.app.print_debug(f"Checking status field initialization for {len(hosts)} nodes")
-
-            for host_name, host_config in hosts.items():
-                needs_update = False
-                timestamp = datetime.now().isoformat()
-
-                if 'node_status' not in host_config:
-                    host_config['node_status'] = 'unknown'
-                    needs_update = True
-
-                if 'last_status_update' not in host_config:
-                    host_config['last_status_update'] = timestamp
-                    needs_update = True
-
-                normalized_service_version = self.get_host_service_file_version(host_config)
-                if host_config.get(SERVICE_FILE_VERSION_FIELD) != normalized_service_version:
-                    host_config[SERVICE_FILE_VERSION_FIELD] = normalized_service_version
-                    needs_update = True
-
-                # Remove legacy last_status_check field if it exists
-                if 'last_status_check' in host_config:
-                    del host_config['last_status_check']
-                    needs_update = True
-
-                if needs_update:
-                    updated = True
-                    self.app.print_debug(f"Initialized missing status fields for node: {host_name}")
-                    self.app.print_debug(f"  status={host_config.get('node_status')}, update={host_config.get('last_status_update')}")
-                else:
-                    current_status = host_config.get('node_status', 'unknown')
-                    current_update = host_config.get('last_status_update', 'none')
-                    self.app.print_debug(f"Node {host_name} has all status fields: status={current_status}, update={current_update}")
+            updated = self._normalize_inventory(self.app.inventory)
 
             # Save configuration if we updated any status fields
             if updated:
-                self.app.print_debug(f"Saving configuration after initializing {sum(1 for host_config in hosts.values() if 'node_status' not in host_config)} status fields")
+                self.app.print_debug("Saving configuration after normalizing inventory state")
                 self._save_configuration()
             else:
                 self.app.print_debug("All nodes already have status fields, no updates needed")
@@ -1523,6 +1500,133 @@ class ConfigurationManager:
             # Update existing config - no need to update symlink since we're not switching configs
             config_name = self.active_config['config_name']
             self._save_config_with_metadata(config_name, env, nodes_count, update_symlink=False)
+
+    @staticmethod
+    def _normalize_host_config(host_config: Dict[str, Any], timestamp: Optional[str] = None) -> bool:
+        """Normalize host-level persisted fields without changing runtime behavior."""
+        changed = False
+        timestamp = timestamp or datetime.now().isoformat()
+
+        if 'node_status' not in host_config:
+            host_config['node_status'] = 'unknown'
+            changed = True
+
+        if 'last_status_update' not in host_config:
+            host_config['last_status_update'] = timestamp
+            changed = True
+
+        normalized_service_version = ConfigurationManager.get_host_service_file_version(host_config)
+        if host_config.get(SERVICE_FILE_VERSION_FIELD) != normalized_service_version:
+            host_config[SERVICE_FILE_VERSION_FIELD] = normalized_service_version
+            changed = True
+
+        if 'last_status_check' in host_config:
+            del host_config['last_status_check']
+            changed = True
+
+        return changed
+
+    def _normalize_inventory(self, inventory: Optional[Dict[str, Any]] = None) -> bool:
+        """Normalize persisted inventory state in place.
+
+        Returns True when any host-level data was updated.
+        """
+        inventory = inventory if inventory is not None else self.app.inventory
+        hosts = _get_gpu_hosts(inventory)
+        updated = False
+        timestamp = datetime.now().isoformat()
+        self.app.print_debug(f"Checking status field initialization for {len(hosts)} nodes")
+
+        for host_name, host_config in hosts.items():
+            needs_update = self._normalize_host_config(host_config, timestamp)
+            if needs_update:
+                updated = True
+                self.app.print_debug(f"Initialized missing status fields for node: {host_name}")
+                self.app.print_debug(
+                    f"  status={host_config.get('node_status')}, update={host_config.get('last_status_update')}"
+                )
+            else:
+                current_status = host_config.get('node_status', 'unknown')
+                current_update = host_config.get('last_status_update', 'none')
+                self.app.print_debug(
+                    f"Node {host_name} has all status fields: status={current_status}, update={current_update}"
+                )
+
+        return updated
+
+    @staticmethod
+    def _derive_machine_id(host_name: str, host_config: Dict[str, Any]) -> str:
+        """Return a stable machine identity for fleet grouping."""
+        explicit_id = str(host_config.get('r1setup_machine_id') or '').strip()
+        if explicit_id:
+            return explicit_id
+
+        ansible_host = str(host_config.get('ansible_host') or host_name).strip()
+        ansible_user = str(host_config.get('ansible_user') or 'root').strip()
+        ansible_port = str(host_config.get('ansible_port') or 22).strip()
+        return f"{ansible_user}@{ansible_host}:{ansible_port}"
+
+    @staticmethod
+    def _build_runtime_snapshot(host_name: str, host_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Build a minimal runtime snapshot from legacy inventory data."""
+        service_name = str(host_config.get('edge_node_service_name') or DEFAULT_RUNTIME_SERVICE_NAME).strip()
+        container_name = str(host_config.get('mnl_docker_container_name') or DEFAULT_RUNTIME_CONTAINER_NAME).strip()
+        volume_path = str(host_config.get('mnl_docker_volume_path') or DEFAULT_RUNTIME_VOLUME_PATH).strip()
+        metadata_path = str(
+            host_config.get('mnl_r1setup_metadata_host_path') or f"{volume_path}/_data/r1setup/metadata.json"
+        ).strip()
+
+        return {
+            'service_name': service_name,
+            'container_name': container_name,
+            'volume_path': volume_path,
+            'metadata_path': metadata_path,
+        }
+
+    def build_fleet_state(self, inventory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Derive a schema-aware fleet view from the current legacy inventory."""
+        inventory = inventory if inventory is not None else self.app.inventory
+        hosts = _get_gpu_hosts(inventory)
+        fleet_state = {
+            'config_schema_version': CONFIG_SCHEMA_VERSION,
+            'fleet': {
+                'machines': {},
+                'instances': {},
+            },
+        }
+
+        for host_name, host_config in sorted(hosts.items()):
+            machine_id = self._derive_machine_id(host_name, host_config)
+            runtime = self._build_runtime_snapshot(host_name, host_config)
+            machine = fleet_state['fleet']['machines'].setdefault(machine_id, {
+                'machine_id': machine_id,
+                'ansible_host': host_config.get('ansible_host'),
+                'ansible_user': host_config.get('ansible_user', 'root'),
+                'ansible_port': host_config.get('ansible_port', 22),
+                'topology_mode': host_config.get('r1setup_topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE),
+                'deployment_state': host_config.get(
+                    'r1setup_machine_deployment_state', DEFAULT_MACHINE_DEPLOYMENT_STATE
+                ),
+                'instance_names': [],
+            })
+            machine['instance_names'].append(host_name)
+
+            fleet_state['fleet']['instances'][host_name] = {
+                'logical_name': str(host_config.get('r1setup_instance_logical_name') or host_name),
+                'assigned_machine_id': machine_id,
+                'runtime_name_policy': host_config.get('r1setup_runtime_name_policy', 'preserve'),
+                'runtime': runtime,
+                'resources': {
+                    'cpu_limit_cores': host_config.get('r1setup_cpu_limit_cores'),
+                    'memory_limit_gb': host_config.get('r1setup_memory_limit_gb'),
+                },
+                'status': {
+                    'node_status': host_config.get('node_status', 'unknown'),
+                    'service_file_version': self.get_host_service_file_version(host_config),
+                },
+            }
+
+        return fleet_state
 
     def manage_configurations_menu(self) -> None:
         """Show configuration management submenu"""
@@ -4680,6 +4784,9 @@ class R1Setup:
 
     def _save_configuration(self):
         return self.config_manager._save_configuration()
+
+    def build_fleet_state(self, inventory=None):
+        return self.config_manager.build_fleet_state(inventory)
 
     def manage_configurations_menu(self):
         return self.config_manager.manage_configurations_menu()
