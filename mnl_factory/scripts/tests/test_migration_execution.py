@@ -98,7 +98,12 @@ class TestMigrationExecution(unittest.TestCase):
 
             def verify_target(_plan):
                 verification_complete["value"] = True
-                return {"status": "success", "app_health": True}
+                return {
+                    "status": "success",
+                    "runtime_health": "verified",
+                    "app_health": True,
+                    "app_health_status": "verified",
+                }
 
             def finalize_assignment(*args, **kwargs):
                 self.assertTrue(verification_complete["value"])
@@ -138,6 +143,8 @@ class TestMigrationExecution(unittest.TestCase):
             self.assertEqual(finalize_kwargs["runtime_name_policy"], "preserve")
             self.assertEqual(finalize_kwargs["migration_plan_state"]["status"], "executed")
             self.assertEqual(finalize_kwargs["migration_plan_state"]["last_step"], "target_verified")
+            self.assertEqual(finalize_kwargs["migration_plan_state"]["runtime_health"], "verified")
+            self.assertEqual(finalize_kwargs["migration_plan_state"]["app_health_status"], "verified")
             app.record_service_file_version.assert_called_once_with(["node-1"])
             self.assertEqual(
                 [call.args for call in app._update_node_status.call_args_list],
@@ -179,3 +186,61 @@ class TestMigrationExecution(unittest.TestCase):
             self.assertEqual(app.set_migration_plan_state.call_args_list[0].args[0]["status"], "executing")
             self.assertEqual(app.set_migration_plan_state.call_args_list[-1].args[0]["status"], "failed")
             self.assertEqual(app.set_migration_plan_state.call_args_list[-1].args[0]["last_step"], "source_archived")
+
+    def test_execute_saved_migration_plan_allows_unknown_app_health_when_runtime_is_verified(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plan = self._build_plan(temp_dir)
+            app = self._build_app(plan)
+            planner = r1setup.MigrationPlanner(app)
+
+            planner._prepare_target_machine_for_migration = MagicMock(return_value={"status": "success", "prepared": True})
+            planner._stop_source_instance_for_migration = MagicMock(return_value={"status": "success"})
+            planner._create_source_archive = MagicMock(return_value={"status": "success"})
+            planner._compute_remote_checksum = MagicMock(side_effect=[
+                {"status": "success", "checksum": "abc123"},
+                {"status": "success", "checksum": "abc123"},
+            ])
+            planner._copy_from_machine = MagicMock(return_value={"status": "success"})
+            planner._compute_local_checksum = MagicMock(return_value="abc123")
+            planner._copy_to_machine = MagicMock(return_value={"status": "success"})
+            planner._prepare_target_volume_root = MagicMock(return_value={"status": "success"})
+            planner._extract_archive_on_target = MagicMock(return_value={"status": "success"})
+            planner._apply_target_runtime_definition = MagicMock(return_value={"status": "success"})
+            planner._start_target_instance = MagicMock(return_value={"status": "success"})
+            planner._verify_target_migration_health = MagicMock(return_value={
+                "status": "success",
+                "runtime_health": "verified",
+                "app_health": None,
+                "app_health_status": "unknown",
+            })
+
+            planner.execute_saved_migration_plan()
+
+            finalize_kwargs = app.finalize_instance_migration.call_args.kwargs
+            self.assertEqual(finalize_kwargs["migration_plan_state"]["status"], "executed")
+            self.assertEqual(finalize_kwargs["migration_plan_state"]["runtime_health"], "verified")
+            self.assertIsNone(finalize_kwargs["migration_plan_state"]["app_health"])
+            self.assertEqual(finalize_kwargs["migration_plan_state"]["app_health_status"], "unknown")
+            rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
+            self.assertIn("Application health: unknown", rendered_text)
+
+    def test_verify_target_migration_health_fails_on_explicit_app_probe_failure(self):
+        plan = self._build_plan("/tmp")
+        app = self._build_app(plan)
+        app.status_tracker = MagicMock()
+        app.status_tracker._parse_ansible_status_lines.return_value = {
+            "node-1": {"status": "running"},
+        }
+        app._parse_node_info_output = MagicMock(return_value={
+            "node-1": {"status": "unreachable"},
+        })
+        planner = r1setup.MigrationPlanner(app)
+        planner._run_target_instance_playbook = MagicMock(side_effect=[
+            (True, "status-output"),
+            (True, "node-info-output"),
+        ])
+
+        result = planner._verify_target_migration_health(plan)
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("Application health check returned status 'unreachable'", result["message"])

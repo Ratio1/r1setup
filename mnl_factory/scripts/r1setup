@@ -5958,11 +5958,24 @@ class MigrationPlanner:
             show_output=False,
         )
         app_health = None
+        app_health_status = 'unknown'
         if node_info_success:
             node_results = self.app._parse_node_info_output(node_info_output)
-            app_health = node_results.get(plan['instance_name'], {}).get('status') == 'success'
+            node_entry = node_results.get(plan['instance_name'])
+            if node_entry:
+                node_status = str(node_entry.get('status') or 'unknown')
+                if node_status == 'success':
+                    app_health = True
+                    app_health_status = 'verified'
+                elif node_status in ('unreachable', 'error', 'failed'):
+                    return {'status': 'error', 'message': f"Application health check returned status '{node_status}'"}
 
-        return {'status': 'success', 'app_health': app_health}
+        return {
+            'status': 'success',
+            'runtime_health': 'verified',
+            'app_health': app_health,
+            'app_health_status': app_health_status,
+        }
 
     def _mark_migration_failure(self, plan: Dict[str, Any], message: str) -> None:
         """Persist and log a migration execution failure."""
@@ -5995,6 +6008,11 @@ class MigrationPlanner:
         )
         self.app.set_migration_plan_state(updated_plan)
         return updated_plan
+
+    def _announce_migration_phase(self, step_number: int, total_steps: int, title: str, detail: str) -> None:
+        """Print a visible progress marker for long-running migration phases."""
+        self.app.print_colored(f"[{step_number}/{total_steps}] {title}", 'cyan', bold=True)
+        self.app.print_colored(detail, 'white')
 
     def _cleanup_local_archive(self, archive_path: Path) -> Dict[str, Any]:
         """Remove a local archive path if it exists."""
@@ -6463,6 +6481,8 @@ class MigrationPlanner:
             },
         )
 
+        total_steps = 9
+        self._announce_migration_phase(1, total_steps, "Prepare Target Machine", "Ensuring the destination host is ready to accept the migrated node.")
         prep_result = self._prepare_target_machine_for_migration(executing_plan)
         if prep_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, prep_result.get('message', 'Target preparation failed'))
@@ -6471,6 +6491,7 @@ class MigrationPlanner:
             return
         executing_plan = self._persist_plan_step(executing_plan, 'target_prepared')
 
+        self._announce_migration_phase(2, total_steps, "Stop Source Instance", "Stopping the source service before archiving its persistent volume.")
         stop_result = self._stop_source_instance_for_migration(executing_plan['instance_name'])
         if stop_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, stop_result.get('message', 'Source stop failed'))
@@ -6480,6 +6501,7 @@ class MigrationPlanner:
         self.app._update_node_status(executing_plan['instance_name'], 'stopped')
         executing_plan = self._persist_plan_step(executing_plan, 'source_stopped')
 
+        self._announce_migration_phase(3, total_steps, "Archive Source Volume", "Creating the transfer archive on the source machine and verifying its checksum.")
         archive_result = self._create_source_archive(
             source_machine,
             source_runtime.get('volume_path', ''),
@@ -6500,6 +6522,7 @@ class MigrationPlanner:
             return
         source_checksum = source_checksum_result['checksum']
 
+        self._announce_migration_phase(4, total_steps, "Download To Controller", "Copying the archive to the local controller temp folder and validating integrity.")
         download_result = self._copy_from_machine(source_machine, transfer.get('source_archive_path', ''), str(local_archive_path))
         if download_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, download_result.get('message', 'Archive download failed'))
@@ -6515,6 +6538,7 @@ class MigrationPlanner:
             return
         executing_plan = self._persist_plan_step(executing_plan, 'archive_downloaded')
 
+        self._announce_migration_phase(5, total_steps, "Upload To Target", "Transferring the verified archive from the controller to the target machine.")
         upload_result = self._copy_to_machine(target_machine, str(local_archive_path), transfer.get('target_archive_path', ''))
         if upload_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, upload_result.get('message', 'Archive upload failed'))
@@ -6535,6 +6559,7 @@ class MigrationPlanner:
             return
         executing_plan = self._persist_plan_step(executing_plan, 'archive_uploaded')
 
+        self._announce_migration_phase(6, total_steps, "Prepare Target Volume", "Creating the target volume root with source ownership and permissions.")
         prepare_volume_result = self._prepare_target_volume_root(
             source_machine,
             target_machine,
@@ -6548,6 +6573,7 @@ class MigrationPlanner:
             return
         executing_plan = self._persist_plan_step(executing_plan, 'target_volume_prepared')
 
+        self._announce_migration_phase(7, total_steps, "Extract On Target", "Restoring the transferred archive into the target volume path.")
         extract_result = self._extract_archive_on_target(
             target_machine,
             transfer.get('target_archive_path', ''),
@@ -6560,6 +6586,7 @@ class MigrationPlanner:
             return
         executing_plan = self._persist_plan_step(executing_plan, 'target_extracted')
 
+        self._announce_migration_phase(8, total_steps, "Apply And Start Target Runtime", "Rendering the service definition on the target machine and starting the node.")
         apply_result = self._apply_target_runtime_definition(executing_plan)
         if apply_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, apply_result.get('message', 'Target apply failed'))
@@ -6576,6 +6603,7 @@ class MigrationPlanner:
             return
         executing_plan = self._persist_plan_step(executing_plan, 'target_started')
 
+        self._announce_migration_phase(9, total_steps, "Verify Target Health", "Checking runtime status and best-effort application health on the target machine.")
         verify_result = self._verify_target_migration_health(executing_plan)
         if verify_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, verify_result.get('message', 'Target verification failed'))
@@ -6586,7 +6614,9 @@ class MigrationPlanner:
             executing_plan,
             'target_verified',
             verified_target=True,
+            runtime_health=verify_result.get('runtime_health'),
             app_health=verify_result.get('app_health'),
+            app_health_status=verify_result.get('app_health_status'),
         )
 
         finalized_plan = self._update_plan_fields(
@@ -6594,7 +6624,9 @@ class MigrationPlanner:
             status='executed',
             finalized_assignment=True,
             verified_target=True,
+            runtime_health=verify_result.get('runtime_health'),
             app_health=verify_result.get('app_health'),
+            app_health_status=verify_result.get('app_health_status'),
             finished_at=datetime.now().isoformat(),
             last_updated_at=datetime.now().isoformat(),
         )
@@ -6619,6 +6651,15 @@ class MigrationPlanner:
             },
         )
         self.app.print_colored("Migration execution completed successfully.", 'green')
+        self.app.print_colored("  • Source service stopped: yes", 'white')
+        self.app.print_colored("  • Archive verified across source, controller, and target: yes", 'white')
+        self.app.print_colored("  • Target runtime verified running: yes", 'white')
+        app_health_status = str(finalized_plan.get('app_health_status') or 'unknown')
+        if app_health_status == 'verified':
+            self.app.print_colored("  • Application health: verified", 'green')
+        else:
+            self.app.print_colored("  • Application health: unknown (runtime verified, app probe not confirmed)", 'yellow')
+        self.app.print_colored("  • Assignment updated to target machine: yes", 'white')
         self.app.print_colored(
             "Assignment has been updated to the target machine. Source cleanup remains deferred for rollback/finalization.",
             'yellow',

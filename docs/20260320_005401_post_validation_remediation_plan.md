@@ -767,6 +767,42 @@ Result:
 - near-16 GiB machines are messaged as tolerated boundary cases rather than looking like hard failures
 - expert-mode prompts now surface observed capacity for the actual machine before confirmation
 
+### Phase 6
+
+Status:
+
+- completed
+
+Implemented:
+
+- migration verification now separates:
+  - runtime health
+  - app health
+  - app-health unknown state
+- explicit app-probe failure is now treated as a verification error instead of being flattened into a misleading boolean
+- successful migration execution now persists `runtime_health` and `app_health_status` in plan state
+- long-running migration execution now prints visible step markers for each major phase
+- success messaging now summarizes what was verified instead of only printing a generic completion line
+
+Files changed:
+
+- [r1setup](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- [test_migration_execution.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_migration_execution.py)
+
+Verification:
+
+- `python3 -m unittest tests.test_migration_execution tests.test_migration_finalization tests.test_migration_planning`
+- `python3 -m unittest tests.test_r1setup_core tests.test_machine_specs tests.test_instance_operations`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Result:
+
+- all verification commands passed
+- successful migrations no longer need to persist a contradictory false app-health flag when runtime is verified but app-level confirmation is unavailable
+- migration progress is now operator-visible phase by phase
+- explicit app-probe failures now stop the migration instead of being silently reported as generic success
+
 ## Phase 9: Real-Host Revalidation
 
 ### Objective
