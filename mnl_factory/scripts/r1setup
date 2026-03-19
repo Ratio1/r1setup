@@ -126,6 +126,9 @@ DEFAULT_RUNTIME_EXIT_STATUS_PATH = '/tmp/edge_node.exit'
 HELPER_MODE_STANDARD = 'standard_helpers'
 HELPER_MODE_EXPERT = 'expert_dispatcher'
 DEFAULT_HELPER_REGISTRY_DIR = '/var/lib/ratio1/r1setup/helpers'
+MIN_RECOMMENDED_NODE_CPU_CORES = 4
+MIN_RECOMMENDED_NODE_MEMORY_GIB = 16.0
+MIN_TOLERATED_NODE_MEMORY_GIB = 15.0
 
 SSH_KEY_MANAGEMENT_REQUIRED_PLAYBOOKS = (
     'playbooks/ssh_install_key.yml',
@@ -2483,14 +2486,93 @@ class ConfigurationManager:
         return f"{user}@{host}:{port}"
 
     @staticmethod
-    def _format_machine_specs_summary(machine_specs: Optional[Dict[str, Any]]) -> str:
+    def _format_machine_memory_gib(memory_total: Any) -> str:
+        """Return a stable GiB display string for machine memory totals."""
+        if memory_total in (None, ''):
+            return '?'
+        try:
+            numeric = float(memory_total)
+        except (TypeError, ValueError):
+            return str(memory_total)
+        if numeric.is_integer():
+            return str(int(numeric))
+        return f"{numeric:.1f}"
+
+    @classmethod
+    def _format_machine_specs_summary(cls, machine_specs: Optional[Dict[str, Any]]) -> str:
         """Return a concise machine-spec string or an empty string."""
         specs = machine_specs or {}
         cpu_total = specs.get('cpu_total')
         memory_total = specs.get('memory_gb_total')
         if cpu_total is None and memory_total is None:
             return ''
-        return f"{cpu_total if cpu_total is not None else '?'} CPU / {memory_total if memory_total is not None else '?'} GB RAM"
+        return (
+            f"{cpu_total if cpu_total is not None else '?'} CPU / "
+            f"{cls._format_machine_memory_gib(memory_total)} GiB RAM"
+        )
+
+    @staticmethod
+    def assess_machine_resource_recommendation(
+        machine_specs: Optional[Dict[str, Any]],
+        *,
+        planned_instances: int = 1,
+    ) -> Dict[str, Any]:
+        """Classify machine capacity against the recommended per-instance minimum."""
+        specs = machine_specs or {}
+        cpu_total = specs.get('cpu_total')
+        memory_total = specs.get('memory_gb_total')
+        if cpu_total in (None, '') or memory_total in (None, ''):
+            return {
+                'status': 'unknown',
+                'color': 'white',
+                'message': 'Machine specs are unavailable; recommended capacity could not be evaluated.',
+            }
+
+        try:
+            cpu_total_value = int(cpu_total)
+            memory_total_value = float(memory_total)
+        except (TypeError, ValueError):
+            return {
+                'status': 'unknown',
+                'color': 'white',
+                'message': 'Machine specs are unavailable; recommended capacity could not be evaluated.',
+            }
+
+        planned_instances = max(1, int(planned_instances))
+        required_cpu = MIN_RECOMMENDED_NODE_CPU_CORES * planned_instances
+        required_memory_nominal = MIN_RECOMMENDED_NODE_MEMORY_GIB * planned_instances
+        required_memory_tolerated = MIN_TOLERATED_NODE_MEMORY_GIB * planned_instances
+
+        if cpu_total_value >= required_cpu and memory_total_value >= required_memory_nominal:
+            return {
+                'status': 'meets_recommendation',
+                'color': 'green',
+                'message': (
+                    f"Observed capacity meets the recommended minimum for {planned_instances} node(s): "
+                    f"{required_cpu} CPU / {required_memory_nominal:.0f} GiB RAM."
+                ),
+            }
+
+        if cpu_total_value >= required_cpu and memory_total_value >= required_memory_tolerated:
+            return {
+                'status': 'tolerated_near_boundary',
+                'color': 'yellow',
+                'message': (
+                    f"Observed memory is slightly below the nominal recommendation for {planned_instances} node(s), "
+                    f"but within the tolerated near-16 GiB boundary "
+                    f"({memory_total_value:.1f} GiB observed vs {required_memory_nominal:.0f} GiB nominal)."
+                ),
+            }
+
+        return {
+            'status': 'below_recommendation',
+            'color': 'yellow',
+            'message': (
+                f"Observed capacity is below the recommended minimum for {planned_instances} node(s): "
+                f"{cpu_total_value} CPU / {memory_total_value:.1f} GiB RAM observed, "
+                f"{required_cpu} CPU / {required_memory_nominal:.0f} GiB RAM recommended."
+            ),
+        }
 
     def build_machine_group_views(
         self,
@@ -8520,7 +8602,14 @@ class R1Setup:
             '-o', 'UserKnownHostsFile=/dev/null',
             '-o', f'ConnectTimeout={self.ssh_connect_timeout}',
             f"{user}@{host}",
-            "sh -lc 'hostname; nproc; awk \"/MemTotal/ {print int($2/1024/1024)}\" /proc/meminfo'",
+            (
+                "python3 -c 'import os, socket; "
+                "cpu = os.cpu_count() or 0; "
+                "mem_gib = round((os.sysconf(\"SC_PAGE_SIZE\") * os.sysconf(\"SC_PHYS_PAGES\")) / (1024 ** 3), 1); "
+                "print(socket.gethostname()); "
+                "print(cpu); "
+                "print(mem_gib)'"
+            ),
         ])
 
         try:
@@ -8545,11 +8634,17 @@ class R1Setup:
             return {'status': 'error', 'message': 'Incomplete machine-spec probe output'}
 
         try:
+            cpu_total = int(lines[1])
+            memory_gb_total = float(lines[2])
+            if cpu_total <= 0:
+                raise ValueError("invalid cpu_total")
+            if memory_gb_total <= 0 or memory_gb_total > 16384:
+                raise ValueError("invalid memory_gb_total")
             return {
                 'status': 'success',
                 'hostname': lines[0],
-                'cpu_total': int(lines[1]),
-                'memory_gb_total': int(lines[2]),
+                'cpu_total': cpu_total,
+                'memory_gb_total': memory_gb_total,
                 'last_checked_at': datetime.now().isoformat(),
             }
         except ValueError:
@@ -8670,9 +8765,11 @@ class R1Setup:
             specs = self._probe_machine_specs(machine_access)
             if specs.get('status') == 'success':
                 self.print_colored(
-                    f"Detected {specs['cpu_total']} CPU cores and {specs['memory_gb_total']} GB RAM on {specs['hostname']}.",
+                    f"Detected {specs['cpu_total']} CPU cores and {self.config_manager._format_machine_memory_gib(specs['memory_gb_total'])} GiB RAM on {specs['hostname']}.",
                     'green',
                 )
+                recommendation = self.config_manager.assess_machine_resource_recommendation(specs)
+                self.print_colored(recommendation['message'], recommendation['color'])
             else:
                 self.print_colored(f"Spec probe unavailable: {specs.get('message', 'unknown error')}", 'yellow')
 
@@ -10193,9 +10290,23 @@ class R1Setup:
                         'white',
                     )
                     self.print_colored("Adding another node on the same machine is an expert-mode operation.", 'yellow')
-                    self.print_colored("Recommended minimum resources per node: 4 CPU / 16 GB RAM.", 'yellow')
+                    self.print_colored(
+                        f"Recommended minimum resources per node: {MIN_RECOMMENDED_NODE_CPU_CORES} CPU / {MIN_RECOMMENDED_NODE_MEMORY_GIB:.0f} GiB RAM.",
+                        'yellow',
+                    )
                     self.print_colored("Existing runtime names will be preserved for current instances.", 'cyan')
                     self.print_colored("New expert-mode instances will use unique runtime names.", 'cyan')
+                    machine_specs = machine_record.get('machine_specs') or {}
+                    if machine_specs:
+                        recommendation = self.config_manager.assess_machine_resource_recommendation(
+                            machine_specs,
+                            planned_instances=len(existing_instances) + 1,
+                        )
+                        self.print_colored(
+                            f"Observed machine capacity: {self.config_manager._format_machine_specs_summary(machine_specs)}",
+                            'cyan',
+                        )
+                        self.print_colored(recommendation['message'], recommendation['color'])
 
                     proceed_expert = self.get_input("Continue and convert this machine to expert mode? (y/n)", "n").lower() == 'y'
                     if not proceed_expert:

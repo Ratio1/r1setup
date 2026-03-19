@@ -732,6 +732,41 @@ Result:
 - last-instance deletion keeps the machine record and marks it prepared instead of leaving stale active state
 - edit flows no longer drop shared-machine identity or runtime fields during persistence
 
+### Phase 5
+
+Status:
+
+- completed
+
+Implemented:
+
+- machine-spec probing now uses remote Python sysconf values and stores fractional GiB instead of lossy integer shell parsing
+- machine-spec display now uses explicit `GiB RAM` wording to match the observed unit
+- added recommendation assessment for:
+  - meets recommendation
+  - tolerated near-boundary machines around the nominal 16 GiB class
+  - below-recommendation capacity
+- registration and expert-mode entry now surface measured machine capacity and the recommendation result directly to the operator
+
+Files changed:
+
+- [r1setup](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- [test_machine_specs.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_machine_specs.py)
+- [test_machine_grouping.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_machine_grouping.py)
+
+Verification:
+
+- `python3 -m unittest tests.test_machine_specs tests.test_machine_grouping tests.test_r1setup_core tests.test_instance_operations tests.test_config_roundtrip`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Result:
+
+- all verification commands passed
+- machine spec summaries now use consistent GiB wording
+- near-16 GiB machines are messaged as tolerated boundary cases rather than looking like hard failures
+- expert-mode prompts now surface observed capacity for the actual machine before confirmation
+
 ## Phase 9: Real-Host Revalidation
 
 ### Objective

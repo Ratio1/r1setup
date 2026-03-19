@@ -91,7 +91,7 @@ class TestMachineGroupViews(unittest.TestCase):
         self.assertEqual(expert_view["topology_mode"], "expert")
         self.assertEqual(expert_view["instance_count"], 2)
         self.assertEqual(expert_view["group_status"], "Mixed States")
-        self.assertEqual(expert_view["machine_specs_summary"], "16 CPU / 64 GB RAM")
+        self.assertEqual(expert_view["machine_specs_summary"], "16 CPU / 64 GiB RAM")
         self.assertEqual(
             [instance["instance_name"] for instance in expert_view["instances"]],
             ["node-1", "node-2"],
@@ -105,7 +105,7 @@ class TestMachineGroupViews(unittest.TestCase):
         self.assertEqual(empty_view["topology_mode"], "standard")
         self.assertEqual(empty_view["instance_count"], 0)
         self.assertEqual(empty_view["group_status"], "No Instances")
-        self.assertEqual(empty_view["machine_specs_summary"], "8 CPU / 32 GB RAM")
+        self.assertEqual(empty_view["machine_specs_summary"], "8 CPU / 32 GiB RAM")
 
     def test_service_name_suffix_does_not_force_expert_topology(self):
         inventory = {
