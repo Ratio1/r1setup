@@ -228,3 +228,9 @@ Minimum required critic topics when relevant:
   - machine-only preparation must use a generated inventory built from fleet machine records, not from fake instance hosts
   - successful machine-only preparation should move machine deployment state to `prepared`; failed preparation should move it to `error`
   - standard mode remains the default behavior; machine-only preparation is additive and does not replace normal one-machine-one-node deployment
+
+- 2026-03-19T22:32:03+02:00 | Phase 8 migration planning is implemented. The stable rule is:
+  - migration planning must be non-mutating: no source stop, assignment change, archive creation, or transfer during planning
+  - plans must explicitly show the transfer route as `source machine -> local temp -> target machine`
+  - target runtime naming must be resolved during planning and checked for collisions before execution
+  - saved migration plans now persist locally in config metadata as `migration_plan_state`

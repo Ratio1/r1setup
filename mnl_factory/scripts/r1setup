@@ -1368,6 +1368,36 @@ class ConfigurationManager:
         hosts = _get_gpu_hosts(self.app.inventory)
         self._save_config_with_metadata(config_name, env, len(hosts), update_symlink=False)
 
+    def set_migration_plan_state(self, plan_state: Optional[Dict[str, Any]]) -> None:
+        """Persist or clear the locally saved migration-plan state."""
+        config_name = self.active_config.get('config_name')
+        if not config_name:
+            raise ValueError("No active configuration shell is available")
+
+        metadata_path = self._metadata_path_for_config(self.app.configs_dir, config_name)
+        metadata = {}
+        if metadata_path.exists():
+            try:
+                with open(metadata_path) as f:
+                    metadata = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                metadata = {}
+
+        if plan_state:
+            metadata['migration_plan_state'] = copy.deepcopy(plan_state)
+            self.active_config['migration_plan_state'] = copy.deepcopy(plan_state)
+        else:
+            metadata.pop('migration_plan_state', None)
+            self.active_config.pop('migration_plan_state', None)
+
+        metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
+        metadata['fleet_state'] = self._merge_fleet_state(self.fleet_state or metadata.get('fleet_state'), self.app.inventory)
+
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+        self._save_active_config()
+
     @staticmethod
     def _metadata_path_for_config(configs_dir: Path, config_name: str) -> Path:
         """Return the metadata path for a named configuration."""
@@ -4462,6 +4492,541 @@ class DeploymentService:
 
 
 
+class MigrationPlanner:
+    """Build and persist migration plans without executing data transfer."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def _get_plannable_instances(self) -> Dict[str, Dict[str, Any]]:
+        """Return logical instances that have a valid current machine assignment."""
+        fleet_state = self.app.get_fleet_state_copy()
+        instances = fleet_state.get('fleet', {}).get('instances', {})
+        machines = fleet_state.get('fleet', {}).get('machines', {})
+        return {
+            instance_name: dict(instance_data)
+            for instance_name, instance_data in instances.items()
+            if instance_data.get('assigned_machine_id') in machines
+        }
+
+    def _select_migration_source_instance(self, plannable_instances: Dict[str, Dict[str, Any]]) -> Optional[str]:
+        """Select one logical instance to migrate."""
+        instance_names = sorted(plannable_instances.keys())
+        if not instance_names:
+            return None
+
+        while True:
+            self.app.print_header("Select Instance For Migration")
+            self.app.print_colored("Choose the logical instance you want to move.", 'cyan')
+            print()
+            for index, instance_name in enumerate(instance_names, start=1):
+                instance_data = plannable_instances[instance_name]
+                source_machine_id = instance_data.get('assigned_machine_id', 'unknown')
+                runtime = instance_data.get('runtime') or {}
+                self.app.print_colored(
+                    f"  {index}) {instance_name} | source={source_machine_id} | service={runtime.get('service_name', '?')}",
+                    'white',
+                )
+            print()
+            self.app.print_colored("  0) Cancel", 'white')
+            print()
+
+            choice = self.app.get_input("Select instance", "0").strip()
+            if choice == '0':
+                return None
+            try:
+                selection = int(choice)
+            except ValueError:
+                self.app.print_colored("Invalid choice. Please enter a number.", 'red')
+                self.app.wait_for_enter()
+                continue
+            if 1 <= selection <= len(instance_names):
+                return instance_names[selection - 1]
+            self.app.print_colored(f"Invalid option. Valid choices are 0-{len(instance_names)}.", 'red')
+            self.app.wait_for_enter()
+
+    def _confirm_source_machine(self, source_machine_id: str, source_machine_record: Dict[str, Any]) -> bool:
+        """Confirm the resolved current source machine for the selected instance."""
+        connection_display = self.app.config_manager._format_machine_connection_display(source_machine_record)
+        self.app.print_colored(
+            f"Resolved source machine: {source_machine_id} ({connection_display})",
+            'cyan',
+        )
+        return self.app.get_input("Use this as the source machine? (Y/n)", "Y").lower() == 'y'
+
+    def _select_migration_target_machine(
+        self,
+        fleet_state: Dict[str, Any],
+        source_machine_id: str,
+    ) -> Optional[str]:
+        """Select a target machine for a migration plan."""
+        machines = fleet_state.get('fleet', {}).get('machines', {})
+        target_machine_ids = [machine_id for machine_id in sorted(machines.keys()) if machine_id != source_machine_id]
+        if not target_machine_ids:
+            return None
+
+        while True:
+            self.app.print_header("Select Migration Target Machine")
+            self.app.print_colored("Choose the target machine for the migration plan.", 'cyan')
+            print()
+            for index, machine_id in enumerate(target_machine_ids, start=1):
+                machine_record = machines[machine_id]
+                connection_display = self.app.config_manager._format_machine_connection_display(machine_record)
+                specs_summary = self.app.config_manager._format_machine_specs_summary(machine_record.get('machine_specs'))
+                topology_mode = machine_record.get('topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE)
+                deployment_state = machine_record.get('deployment_state', DEFAULT_MACHINE_DEPLOYMENT_STATE)
+                instance_count = len(machine_record.get('instance_names') or [])
+                self.app.print_colored(
+                    f"  {index}) {machine_id} | {connection_display} | mode={topology_mode} | state={deployment_state} | instances={instance_count}",
+                    'white',
+                )
+                if specs_summary:
+                    self.app.print_colored(f"      specs: {specs_summary}", 'cyan')
+            print()
+            self.app.print_colored("  0) Cancel", 'white')
+            print()
+
+            choice = self.app.get_input("Select target machine", "0").strip()
+            if choice == '0':
+                return None
+            try:
+                selection = int(choice)
+            except ValueError:
+                self.app.print_colored("Invalid choice. Please enter a number.", 'red')
+                self.app.wait_for_enter()
+                continue
+            if 1 <= selection <= len(target_machine_ids):
+                return target_machine_ids[selection - 1]
+            self.app.print_colored(f"Invalid option. Valid choices are 0-{len(target_machine_ids)}.", 'red')
+            self.app.wait_for_enter()
+
+    def _select_runtime_name_policy(self) -> Optional[str]:
+        """Choose how runtime names should be resolved on the target machine."""
+        self.app.print_header("Select Target Runtime Naming")
+        self.app.print_colored("Choose how runtime names should be resolved on the target machine.", 'cyan')
+        print()
+        self.app.print_colored("  1) preserve             - Keep the current service/container/volume names")
+        self.app.print_colored("  2) normalize_to_target  - Resolve names according to the target topology")
+        self.app.print_colored("  3) custom               - Enter custom target runtime names")
+        print()
+        self.app.print_colored("  0) Cancel", 'white')
+        print()
+
+        while True:
+            choice = self.app.get_input("Select naming policy", "1").strip()
+            if choice == '0':
+                return None
+            if choice == '1':
+                return 'preserve'
+            if choice == '2':
+                return 'normalize_to_target'
+            if choice == '3':
+                return 'custom'
+            self.app.print_colored("Invalid option. Valid choices are 0-3.", 'red')
+
+    def _collect_custom_runtime(self, source_runtime: Dict[str, Any]) -> Dict[str, Any]:
+        """Prompt for custom target runtime names."""
+        self.app.print_header("Custom Target Runtime Names")
+        self.app.print_colored("Enter the target runtime names to use after migration.", 'cyan')
+        print()
+        return {
+            'service_name': self.app.get_input(
+                "Target service name",
+                str(source_runtime.get('service_name') or DEFAULT_RUNTIME_SERVICE_NAME),
+            ),
+            'container_name': self.app.get_input(
+                "Target container name",
+                str(source_runtime.get('container_name') or DEFAULT_RUNTIME_CONTAINER_NAME),
+            ),
+            'volume_path': self.app.get_input(
+                "Target volume path",
+                str(source_runtime.get('volume_path') or DEFAULT_RUNTIME_VOLUME_PATH),
+            ),
+        }
+
+    @staticmethod
+    def _build_remote_shell_probe(command: str) -> str:
+        """Wrap a shell command for remote execution."""
+        return f"sh -lc {shlex.quote(command)}"
+
+    def _probe_machine_reachability(self, machine_record: Dict[str, Any]) -> Dict[str, Any]:
+        """Check whether a machine responds to a simple non-mutating SSH probe."""
+        return self.app._run_machine_probe(machine_record, self._build_remote_shell_probe("printf ok"))
+
+    def _probe_remote_path_size(self, machine_record: Dict[str, Any], remote_path: str) -> Dict[str, Any]:
+        """Return the size in bytes of a remote path."""
+        if not remote_path:
+            return {'status': 'error', 'message': 'Missing remote path'}
+        inner = f"test -d {shlex.quote(remote_path)} && du -sb {shlex.quote(remote_path)} | awk '{{print $1}}'"
+        result = self.app._run_machine_probe(machine_record, self._build_remote_shell_probe(inner))
+        if result.get('status') != 'success':
+            return result
+        try:
+            result['bytes'] = int((result.get('stdout') or '').strip().splitlines()[0])
+            return result
+        except (IndexError, ValueError):
+            return {'status': 'error', 'message': 'Unable to parse remote size probe output'}
+
+    @staticmethod
+    def _get_free_space_probe_path(volume_path: str) -> str:
+        """Return a stable ancestor path to use for free-space probes."""
+        path = Path(str(volume_path or '/').strip() or '/')
+        parts = path.parts
+        if len(parts) >= 3:
+            return str(Path(*parts[:3]))
+        if len(parts) >= 2:
+            return str(Path(*parts[:2]))
+        return '/'
+
+    def _probe_remote_free_space(self, machine_record: Dict[str, Any], remote_path: str) -> Dict[str, Any]:
+        """Return free space in bytes for a remote path's filesystem."""
+        probe_path = self._get_free_space_probe_path(remote_path)
+        inner = f"df -PB1 {shlex.quote(probe_path)} | tail -1 | awk '{{print $4}}'"
+        result = self.app._run_machine_probe(machine_record, self._build_remote_shell_probe(inner))
+        if result.get('status') != 'success':
+            return result
+        try:
+            result['bytes'] = int((result.get('stdout') or '').strip().splitlines()[0])
+            result['probe_path'] = probe_path
+            return result
+        except (IndexError, ValueError):
+            return {'status': 'error', 'message': 'Unable to parse remote free-space output'}
+
+    def _collect_preflight(
+        self,
+        source_machine_record: Dict[str, Any],
+        target_machine_record: Dict[str, Any],
+        source_runtime: Dict[str, Any],
+        target_runtime: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Collect non-mutating preflight data for a migration plan."""
+        local_temp_dir = self.app._default_migration_temp_dir()
+        source_reachability = self._probe_machine_reachability(source_machine_record)
+        target_reachability = self._probe_machine_reachability(target_machine_record)
+        source_volume_probe = self._probe_remote_path_size(source_machine_record, source_runtime.get('volume_path', ''))
+        target_free_probe = self._probe_remote_free_space(target_machine_record, target_runtime.get('volume_path', ''))
+
+        try:
+            local_free_bytes = self.app._probe_local_free_space(local_temp_dir)
+            local_free_probe = {'status': 'success', 'bytes': local_free_bytes}
+        except Exception as e:
+            local_free_probe = {'status': 'error', 'message': str(e)}
+
+        return {
+            'local_temp_dir': str(local_temp_dir),
+            'source_reachability': source_reachability,
+            'target_reachability': target_reachability,
+            'source_volume_probe': source_volume_probe,
+            'local_free_probe': local_free_probe,
+            'target_free_probe': target_free_probe,
+        }
+
+    def build_migration_plan(
+        self,
+        instance_name: str,
+        target_machine_id: str,
+        *,
+        runtime_name_policy: str = 'preserve',
+        custom_runtime: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build a migration plan without mutating remote state."""
+        fleet_state = self.app.get_fleet_state_copy()
+        normalized_fleet = self.app.config_manager._normalize_fleet_state(fleet_state)
+        instances = normalized_fleet.get('fleet', {}).get('instances', {})
+        machines = normalized_fleet.get('fleet', {}).get('machines', {})
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        instance_data = dict(instances.get(instance_name, {}))
+        source_machine_id = str(instance_data.get('assigned_machine_id') or '').strip()
+        source_machine_record = dict(machines.get(source_machine_id, {}))
+        target_machine_record = dict(machines.get(target_machine_id, {}))
+        source_runtime = dict(instance_data.get('runtime') or {})
+
+        if not instance_data:
+            errors.append(f"Instance '{instance_name}' is not present in the active fleet state.")
+        if not source_machine_id or not source_machine_record:
+            errors.append("The selected instance does not have a valid source machine assignment.")
+        if not target_machine_record:
+            errors.append(f"Target machine '{target_machine_id}' is not registered in the active fleet state.")
+        if source_machine_id and target_machine_id == source_machine_id:
+            errors.append("The target machine must be different from the current source machine.")
+        if not source_runtime.get('volume_path'):
+            errors.append("The selected instance is missing a source volume path.")
+
+        target_topology_mode = str(target_machine_record.get('topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE)
+        target_runtime = self.app.config_manager.resolve_runtime_names(
+            str(instance_data.get('logical_name') or instance_name),
+            topology_mode=target_topology_mode,
+            runtime_name_policy=runtime_name_policy,
+            existing_runtime=source_runtime,
+            custom_runtime=custom_runtime,
+        )
+        collisions = self.app.config_manager.detect_runtime_collisions(
+            target_machine_id,
+            target_runtime,
+            normalized_fleet,
+            exclude_instance=instance_name,
+        )
+        if collisions:
+            for field, conflicting_instances in sorted(collisions.items()):
+                errors.append(
+                    f"Target runtime {field} collides with: {', '.join(sorted(conflicting_instances))}"
+                )
+
+        target_instance_names = list(target_machine_record.get('instance_names') or [])
+        if target_topology_mode == 'standard' and target_instance_names:
+            errors.append(
+                f"Target machine '{target_machine_id}' is standard mode and already has assigned instances."
+            )
+
+        target_deployment_state = str(target_machine_record.get('deployment_state') or DEFAULT_MACHINE_DEPLOYMENT_STATE)
+        requires_target_preparation = target_deployment_state != 'prepared'
+        if requires_target_preparation:
+            warnings.append(
+                f"Target machine '{target_machine_id}' is not marked prepared and will need machine preparation before execution."
+            )
+
+        if errors:
+            preflight = {
+                'local_temp_dir': str(self.app._default_migration_temp_dir()),
+                'source_reachability': {'status': 'error', 'message': 'Skipped because plan has structural errors'},
+                'target_reachability': {'status': 'error', 'message': 'Skipped because plan has structural errors'},
+                'source_volume_probe': {'status': 'error', 'message': 'Skipped because plan has structural errors'},
+                'local_free_probe': {'status': 'error', 'message': 'Skipped because plan has structural errors'},
+                'target_free_probe': {'status': 'error', 'message': 'Skipped because plan has structural errors'},
+            }
+        else:
+            preflight = self._collect_preflight(
+                source_machine_record,
+                target_machine_record,
+                source_runtime,
+                target_runtime,
+            )
+
+        source_reachable = preflight['source_reachability'].get('status') == 'success'
+        target_reachable = preflight['target_reachability'].get('status') == 'success'
+        if not source_reachable:
+            errors.append(
+                f"Source machine reachability probe failed: {preflight['source_reachability'].get('message', 'unknown error')}"
+            )
+        if not target_reachable:
+            errors.append(
+                f"Target machine reachability probe failed: {preflight['target_reachability'].get('message', 'unknown error')}"
+            )
+
+        source_volume_bytes = preflight['source_volume_probe'].get('bytes')
+        if preflight['source_volume_probe'].get('status') != 'success':
+            errors.append(
+                f"Source volume size probe failed: {preflight['source_volume_probe'].get('message', 'unknown error')}"
+            )
+
+        local_free_bytes = preflight['local_free_probe'].get('bytes')
+        if preflight['local_free_probe'].get('status') != 'success':
+            errors.append(
+                f"Controller temp-space probe failed: {preflight['local_free_probe'].get('message', 'unknown error')}"
+            )
+
+        target_free_bytes = preflight['target_free_probe'].get('bytes')
+        if preflight['target_free_probe'].get('status') != 'success':
+            errors.append(
+                f"Target free-space probe failed: {preflight['target_free_probe'].get('message', 'unknown error')}"
+            )
+
+        if source_volume_bytes is not None and local_free_bytes is not None and local_free_bytes < source_volume_bytes:
+            errors.append("Controller temp directory does not have enough free space for the migration archive.")
+        if source_volume_bytes is not None and target_free_bytes is not None and target_free_bytes < source_volume_bytes:
+            errors.append("Target machine does not have enough free space for the migrated volume.")
+
+        safe_archive_name = f"{self.app.config_manager._sanitize_runtime_suffix(instance_name)}.tar.gz"
+        source_archive_path = f"/tmp/r1setup_migration_{safe_archive_name}"
+        local_archive_path = str(Path(preflight['local_temp_dir']) / safe_archive_name)
+        target_archive_path = f"/tmp/r1setup_migration_{safe_archive_name}"
+        status = 'planned' if not errors else 'blocked'
+
+        return {
+            'plan_id': f"migration-{self.app.config_manager._sanitize_runtime_suffix(instance_name)}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            'status': status,
+            'created_at': datetime.now().isoformat(),
+            'instance_name': instance_name,
+            'logical_name': str(instance_data.get('logical_name') or instance_name),
+            'source_machine_id': source_machine_id,
+            'target_machine_id': target_machine_id,
+            'runtime_name_policy': runtime_name_policy,
+            'source_runtime': source_runtime,
+            'target_runtime': target_runtime,
+            'transfer': {
+                'route': f"{source_machine_id} -> local temp -> {target_machine_id}",
+                'source_archive_path': source_archive_path,
+                'local_temp_dir': preflight['local_temp_dir'],
+                'local_archive_path': local_archive_path,
+                'target_archive_path': target_archive_path,
+                'checksum_algorithm': 'sha256',
+            },
+            'preflight': {
+                'source_reachable': source_reachable,
+                'target_reachable': target_reachable,
+                'source_volume_bytes': source_volume_bytes,
+                'local_free_bytes': local_free_bytes,
+                'target_free_bytes': target_free_bytes,
+                'target_deployment_state': target_deployment_state,
+                'requires_target_preparation': requires_target_preparation,
+            },
+            'validation': {
+                'errors': errors,
+                'warnings': warnings,
+                'collisions': collisions,
+            },
+        }
+
+    @staticmethod
+    def _format_bytes(value: Optional[int]) -> str:
+        """Return a compact operator-facing byte count."""
+        if value is None:
+            return 'unknown'
+        if value >= 1024 ** 3:
+            return f"{value / (1024 ** 3):.2f} GB"
+        if value >= 1024 ** 2:
+            return f"{value / (1024 ** 2):.2f} MB"
+        if value >= 1024:
+            return f"{value / 1024:.2f} KB"
+        return f"{value} B"
+
+    def _display_migration_plan(self, plan: Dict[str, Any]) -> None:
+        """Render a migration plan review summary."""
+        self.app.print_header("Migration Plan Review")
+        self.app.print_colored(f"Plan ID: {plan['plan_id']}", 'cyan')
+        self.app.print_colored(
+            f"Status: {plan['status']}",
+            'green' if plan['status'] == 'planned' else 'red',
+        )
+        self.app.print_colored(
+            f"Instance: {plan['instance_name']} | source={plan['source_machine_id']} | target={plan['target_machine_id']}",
+            'white',
+        )
+        self.app.print_colored(f"Naming Policy: {plan['runtime_name_policy']}", 'white')
+        print()
+
+        self.app.print_section("Resolved Target Runtime")
+        target_runtime = plan.get('target_runtime') or {}
+        self.app.print_colored(f"service={target_runtime.get('service_name', '?')}", 'white')
+        self.app.print_colored(f"container={target_runtime.get('container_name', '?')}", 'white')
+        self.app.print_colored(f"volume={target_runtime.get('volume_path', '?')}", 'white')
+        print()
+
+        self.app.print_section("Transfer Route")
+        transfer = plan.get('transfer') or {}
+        self.app.print_colored(f"Route: {transfer.get('route', 'unknown')}", 'cyan')
+        self.app.print_colored(f"Source archive: {transfer.get('source_archive_path', '?')}", 'white')
+        self.app.print_colored(f"Local archive: {transfer.get('local_archive_path', '?')}", 'white')
+        self.app.print_colored(f"Target archive: {transfer.get('target_archive_path', '?')}", 'white')
+        self.app.print_colored(f"Checksum: {transfer.get('checksum_algorithm', 'unknown')}", 'white')
+        print()
+
+        self.app.print_section("Preflight")
+        preflight = plan.get('preflight') or {}
+        self.app.print_colored(
+            f"Source volume size: {self._format_bytes(preflight.get('source_volume_bytes'))}",
+            'white',
+        )
+        self.app.print_colored(
+            f"Controller free space: {self._format_bytes(preflight.get('local_free_bytes'))}",
+            'white',
+        )
+        self.app.print_colored(
+            f"Target free space: {self._format_bytes(preflight.get('target_free_bytes'))}",
+            'white',
+        )
+        self.app.print_colored(
+            f"Target deployment state: {preflight.get('target_deployment_state', 'unknown')}",
+            'white',
+        )
+        if preflight.get('requires_target_preparation'):
+            self.app.print_colored("Target preparation required before execution.", 'yellow')
+        print()
+
+        validation = plan.get('validation') or {}
+        errors = validation.get('errors') or []
+        warnings = validation.get('warnings') or []
+
+        if errors:
+            self.app.print_section("Blocking Errors")
+            for error in errors:
+                self.app.print_colored(f"  • {error}", 'red')
+            print()
+
+        if warnings:
+            self.app.print_section("Warnings")
+            for warning in warnings:
+                self.app.print_colored(f"  • {warning}", 'yellow')
+            print()
+
+        self.app.print_colored(
+            "Planning only: no source shutdown, assignment change, or data transfer has occurred.",
+            'cyan',
+        )
+
+    def plan_instance_migration(self) -> None:
+        """Interactively build and optionally persist a migration plan."""
+        if not self.app.active_config.get('config_name'):
+            self.app.print_colored("No active configuration. Create or load one first.", 'red')
+            self.app.wait_for_enter()
+            return
+
+        self.app.load_configuration()
+        plannable_instances = self._get_plannable_instances()
+        if not plannable_instances:
+            self.app.print_colored("No assigned instances are available for migration planning.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        instance_name = self._select_migration_source_instance(plannable_instances)
+        if not instance_name:
+            self.app.print_colored("Migration planning cancelled.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        fleet_state = self.app.get_fleet_state_copy()
+        source_machine_id = plannable_instances[instance_name]['assigned_machine_id']
+        source_machine_record = fleet_state.get('fleet', {}).get('machines', {}).get(source_machine_id, {})
+        if not self._confirm_source_machine(source_machine_id, source_machine_record):
+            self.app.print_colored("Migration planning cancelled.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        target_machine_id = self._select_migration_target_machine(fleet_state, source_machine_id)
+        if not target_machine_id:
+            self.app.print_colored("Migration planning cancelled.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        runtime_name_policy = self._select_runtime_name_policy()
+        if not runtime_name_policy:
+            self.app.print_colored("Migration planning cancelled.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        custom_runtime = None
+        if runtime_name_policy == 'custom':
+            custom_runtime = self._collect_custom_runtime(plannable_instances[instance_name].get('runtime') or {})
+
+        plan = self.build_migration_plan(
+            instance_name,
+            target_machine_id,
+            runtime_name_policy=runtime_name_policy,
+            custom_runtime=custom_runtime,
+        )
+        self._display_migration_plan(plan)
+
+        if self.app.get_input("\nSave this migration plan locally? (Y/n)", "Y").lower() == 'y':
+            self.app.set_migration_plan_state(plan)
+            self.app.print_colored("Migration plan saved locally.", 'green')
+        else:
+            self.app.print_colored("Migration plan was not saved.", 'yellow')
+
+        self.app.wait_for_enter()
+
+
 class SSHKeyManager:
     """Handles SSH key management workflows and metadata migration."""
 
@@ -5374,6 +5939,7 @@ class R1Setup:
         self.config_manager = ConfigurationManager(self)
         self.status_tracker = NodeStatusTracker(self)
         self.deployment_service = DeploymentService(self)
+        self.migration_planner = MigrationPlanner(self)
         self.settings_manager = SettingsManager(self)
         self.ssh_key_manager = SSHKeyManager(self)
         self.settings_manager.load_settings()
@@ -5762,6 +6328,9 @@ class R1Setup:
     def upsert_machine_record(self, machine_id, machine_data):
         return self.config_manager.upsert_machine_record(machine_id, machine_data)
 
+    def set_migration_plan_state(self, plan_state):
+        return self.config_manager.set_migration_plan_state(plan_state)
+
     @property
     def fleet_state(self):
         return self.config_manager.fleet_state
@@ -5862,6 +6431,9 @@ class R1Setup:
 
     def prepare_registered_machines(self, skip_gpu=False):
         return self.deployment_service.prepare_registered_machines(skip_gpu=skip_gpu)
+
+    def plan_instance_migration(self):
+        return self.migration_planner.plan_instance_migration()
 
     def delete_edge_node(self):
         return self.deployment_service.delete_edge_node()
@@ -6330,6 +6902,68 @@ class R1Setup:
         except ValueError:
             return {'status': 'error', 'message': 'Unable to parse machine-spec probe output'}
 
+    @staticmethod
+    def _default_migration_temp_dir() -> Path:
+        """Return the default controller-side temp directory for migration artifacts."""
+        return Path.home() / '.ratio1' / 'migration_tmp'
+
+    def _probe_local_free_space(self, path: Path) -> int:
+        """Return controller-side free space in bytes for the given path."""
+        target = Path(path)
+        probe_path = target if target.exists() else target.parent
+        probe_path.mkdir(parents=True, exist_ok=True)
+        return shutil.disk_usage(probe_path).free
+
+    @staticmethod
+    def _build_machine_ssh_command(machine_config: Dict[str, Any], remote_command: str) -> List[str]:
+        """Build an SSH command list for a machine-scoped remote command."""
+        host = machine_config.get('ansible_host', '')
+        user = machine_config.get('ansible_user', '')
+        if not host or not user:
+            raise ValueError("Machine record is missing ansible_host or ansible_user")
+
+        ssh_cmd = ['ssh']
+        ssh_port = machine_config.get('ansible_port')
+        if ssh_port and str(ssh_port) != '22':
+            ssh_cmd.extend(['-p', str(ssh_port)])
+
+        if 'ansible_ssh_private_key_file' in machine_config:
+            key_file = machine_config['ansible_ssh_private_key_file']
+            if str(key_file).startswith('~'):
+                key_file = os.path.expanduser(key_file)
+            ssh_cmd.extend(['-i', str(key_file)])
+
+        ssh_cmd.extend([f"{user}@{host}", remote_command])
+        if 'ansible_ssh_pass' in machine_config:
+            return ['sshpass', '-p', machine_config['ansible_ssh_pass']] + ssh_cmd
+        return ssh_cmd
+
+    def _run_machine_probe(self, machine_config: Dict[str, Any], remote_command: str) -> Dict[str, Any]:
+        """Run a non-mutating remote probe command against a machine."""
+        try:
+            ssh_cmd = self._build_machine_ssh_command(machine_config, remote_command)
+        except ValueError as e:
+            return {'status': 'error', 'message': str(e)}
+
+        try:
+            result = subprocess.run(
+                ssh_cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.connection_timeout,
+                check=False,
+            )
+        except FileNotFoundError as e:
+            return {'status': 'error', 'message': str(e)}
+        except subprocess.TimeoutExpired:
+            return {'status': 'error', 'message': f'Probe timed out after {self.connection_timeout} seconds'}
+
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip() or 'Probe failed'
+            return {'status': 'error', 'message': message}
+
+        return {'status': 'success', 'stdout': result.stdout, 'stderr': result.stderr}
+
     def _ensure_configuration_shell_for_machine_registration(self) -> bool:
         """Ensure an active configuration exists before persisting machine-only fleet data."""
         if self.active_config.get('config_name'):
@@ -6693,14 +7327,21 @@ class R1Setup:
                     self.print_colored("🗑️ Status: Deleted", 'red')
             else:
                 self.print_colored("📋 Status: Never deployed", 'yellow')
+            migration_plan_state = self.active_config.get('migration_plan_state')
+            if migration_plan_state:
+                self.print_colored(
+                    f"🧭 Saved Migration Plan: {migration_plan_state.get('instance_name', '?')} -> {migration_plan_state.get('target_machine_id', '?')} [{migration_plan_state.get('status', 'unknown')}]",
+                    'cyan',
+                )
 
             self.print_colored("Deployment Menu", 'cyan', bold=True)
             print()
             self.print_colored("  1) Deploy with GPU        - Deploy full Edge Node with GPU support")
             self.print_colored("  2) Deploy CPU Only        - Deploy Edge Node without GPU capabilities")
             self.print_colored("  3) Prepare Machines       - Prepare registered machines without deploying nodes")
-            self.print_colored("  4) Delete Deployment      - Remove deployed Edge Node")
-            self.print_colored("  5) Deployment Status      - Check detailed deployment status")
+            self.print_colored("  4) Plan Migration        - Build and save a migration plan without executing it")
+            self.print_colored("  5) Delete Deployment      - Remove deployed Edge Node")
+            self.print_colored("  6) Deployment Status      - Check detailed deployment status")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -6717,11 +7358,13 @@ class R1Setup:
             elif choice == '3':
                 self.prepare_registered_machines(skip_gpu=False)
             elif choice == '4':
-                self.delete_edge_node()
+                self.plan_instance_migration()
             elif choice == '5':
+                self.delete_edge_node()
+            elif choice == '6':
                 self.deployment_status()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-5.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-6.", 'red')
                 self.wait_for_enter()
 
     def operations_menu(self) -> None:

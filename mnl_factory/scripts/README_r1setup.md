@@ -49,6 +49,7 @@ Notes:
 - Full deployment (Docker + NVIDIA + GPU)
 - Docker-only deployment
 - Prepare registered machines without deploying an Edge Node yet
+- Plan an Edge Node migration before any data transfer or source shutdown happens
 
 ### Operations
 - Start, stop, and restart deployed services

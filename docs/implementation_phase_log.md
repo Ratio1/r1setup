@@ -433,3 +433,70 @@ Allow useful machine-scope operations on registered machines that do not yet hav
   - registered empty machines can be selected and prepared without placeholder instances
   - machine-only operations update machine state through fleet metadata
   - the machine-scope execution path is test covered
+
+## Phase 8
+
+Completed At: `2026-03-19T22:32:03+02:00`
+
+### Goal
+
+Add a planning-only migration workflow so operators can assemble, review, and save a migration plan before any source shutdown, assignment switch, or data transfer occurs.
+
+### Scope Completed
+
+- added migration-plan persistence in config metadata
+- added a dedicated `MigrationPlanner` in `r1setup`
+- added migration-planning flow in the deployment menu
+- added source-instance selection and target-machine selection UX
+- added target runtime-name policy selection for:
+  - `preserve`
+  - `normalize_to_target`
+  - `custom`
+- added migration-plan validation for:
+  - source assignment validity
+  - target machine existence
+  - target standard-mode occupancy
+  - target runtime collisions
+  - controller temp-space availability
+  - source volume size probe
+  - target free-space probe
+- added explicit transfer-route planning as:
+  - `source machine -> local temp -> target machine`
+- added focused modular test coverage for:
+  - migration-plan persistence
+  - successful plan assembly
+  - blocked-plan validation
+  - saved-plan flow
+
+### Files Changed
+
+- `mnl_factory/scripts/r1setup`
+- `mnl_factory/scripts/tests/test_migration_planning.py`
+- `mnl_factory/scripts/README_r1setup.md`
+- `docs/20260317_221254_multi_instance_migration_implementation_plan.md`
+- `docs/implementation_phase_log.md`
+- `AGENTS.md`
+
+### Verification Commands
+
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_migration_planning`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_r1setup_core tests.test_inventory_builder tests.test_empty_machine_operations`
+- `cd mnl_factory/scripts && python3 -m unittest discover tests`
+- `cd mnl_factory/scripts && python3 -m py_compile r1setup`
+
+### Verification Results
+
+- `tests.test_migration_planning`: passed
+- `tests.test_r1setup_core tests.test_inventory_builder tests.test_empty_machine_operations`: passed
+- `python3 -m unittest discover tests`: passed
+- `python3 -m py_compile r1setup`: passed
+
+### Notes
+
+- Migration planning is non-mutating: no source shutdown, assignment switch, archive creation, or transfer occurs in this phase.
+- The saved plan now carries the exact target runtime names and controller-temp transfer path needed by execution.
+- Acceptance criteria for the migration-planning phase are met:
+  - a migration plan can be created and reviewed before touching remotes destructively
+  - source/target conflicts are detected before execution starts
+  - the transfer route explicitly uses controller temp storage
+  - migration-planning behavior is test covered

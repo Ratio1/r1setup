@@ -25,61 +25,59 @@ Completed:
 - Phase 5: generated inventory and operation split
 - Phase 6: visualization and fleet UX
 - Phase 7: empty-machine operations
+- Phase 8: migration planning framework
 
 Not Started:
 
-- Phase 8: migration planning framework
 - Phase 9: migration execution
 - Phase 10: rollback and finalization
 
 ## Recommended Next Step
 
-The next best step is Phase 8: migration planning framework.
+The next best step is Phase 9: migration execution.
 
 Reasoning:
 
-- grouped fleet views and machine-only preparation now exist
-- registered machines can now be prepared without inventing placeholder instances
-- the next missing major capability is planning a safe reassignment of a logical instance from one machine to another
+- migration plans can now be built, reviewed, and saved locally without remote mutation
+- source/target validation, target naming resolution, and controller-temp transfer routing are now explicit
+- the next missing capability is executing the planned transfer safely and resumably
 
 Practical goal for the next implementation slice:
 
-- define a first-class migration planning model before any destructive transfer logic is added
-- make source/target selection, naming decisions, collision checks, and rollback checkpoints explicit
-- prepare the later transfer workflow to use controller-side temp storage instead of direct machine-to-machine copy
+- stop the source runtime at the correct moment, archive the source volume, and move it through the controller temp folder to the target machine
+- keep assignment changes deferred until target verification succeeds
+- make rollback/finalization explicit instead of implicit cleanup
 
-### Immediate Phase 8 Breakdown
+### Immediate Phase 9 Breakdown
 
 The next coding slice should be executed in this order:
 
-1. define migration plan types and persisted migration-state metadata
-2. add source-instance and target-machine selection UX
-3. add naming/collision resolution for migration targets
-4. add preflight validation for:
-   - machine readiness
-   - target conflicts
-   - controller temp-space requirements
-   - source volume availability
-5. add focused modular tests for migration planning and validation
+1. execute the planned source shutdown and archive creation
+2. transfer the archive via:
+   - source machine -> controller temp folder
+   - controller temp folder -> target machine
+3. restore the target volume to the resolved target runtime path
+4. start and verify the target runtime before any final assignment switch
+5. add focused modular tests for execution sequencing, transfer routing, and verification guards
 6. after the phase is complete:
    - update `docs/implementation_phase_log.md`
    - run targeted tests plus broad CLI regression
    - create a dedicated phase commit before moving on
 
-### Immediate Deliverables For Phase 8
+### Immediate Deliverables For Phase 9
 
-- one migration planning model with explicit source/target intent
-- one operator flow that can assemble a migration plan without executing it
-- one focused test module for migration-planning validation
+- one migration execution workflow driven by the saved or newly built plan
+- explicit controller-temp transfer routing
+- one focused test module for migration execution safeguards
 
-### Exit Signal For Starting Phase 9
+### Exit Signal For Starting Phase 10
 
-Do not start migration execution until all of the following are true:
+Do not start rollback/finalization work until all of the following are true:
 
-- a migration plan can be built and reviewed without mutating remote state
-- source/target conflicts are detected before execution
-- controller temp-folder requirements are visible in the plan
-- migration-planning behavior is test covered
+- source data is not finalized away until target verification succeeds
+- controller-temp transfer routing is used instead of direct machine-to-machine copy
+- assignment switch happens only after target verification
+- migration execution behavior is test covered
 
 ## Implementation Principles
 
