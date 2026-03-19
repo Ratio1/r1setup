@@ -48,6 +48,7 @@ Notes:
 ### Deployment  
 - Full deployment (Docker + NVIDIA + GPU)
 - Docker-only deployment
+- Prepare registered machines without deploying an Edge Node yet
 
 ### Operations
 - Start, stop, and restart deployed services

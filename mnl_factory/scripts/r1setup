@@ -2217,6 +2217,84 @@ class ConfigurationManager:
             }
         }
 
+    @staticmethod
+    def _build_machine_execution_host_alias(machine_id: str, used_aliases: Optional[set] = None) -> str:
+        """Return a stable inventory-safe alias for a registered machine."""
+        alias_base = re.sub(r'[^a-zA-Z0-9_]+', '_', str(machine_id or '').strip()).strip('_').lower()
+        alias_base = alias_base or 'machine'
+        alias = alias_base
+        used_aliases = used_aliases if used_aliases is not None else set()
+        counter = 2
+        while alias in used_aliases:
+            alias = f"{alias_base}_{counter}"
+            counter += 1
+        return alias
+
+    def build_registered_machine_execution_inventory(
+        self,
+        machine_ids: List[str],
+        *,
+        fleet_state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build a machine-scope inventory from registered fleet machine records."""
+        normalized_fleet = self._normalize_fleet_state(fleet_state if fleet_state is not None else self.get_fleet_state_copy())
+        machines = normalized_fleet.get('fleet', {}).get('machines', {})
+        instances = normalized_fleet.get('fleet', {}).get('instances', {})
+        execution_hosts: Dict[str, Dict[str, Any]] = {}
+        used_aliases: set = set()
+
+        for machine_id in machine_ids:
+            machine_record = dict(machines.get(machine_id, {}))
+            if not machine_record:
+                continue
+
+            alias = self._build_machine_execution_host_alias(machine_id, used_aliases)
+            used_aliases.add(alias)
+
+            host_config = {
+                'ansible_host': machine_record.get('ansible_host'),
+                'ansible_user': machine_record.get('ansible_user', 'root'),
+                'ansible_port': machine_record.get('ansible_port', 22),
+                'r1setup_execution_scope': 'machine',
+                'r1setup_machine_id': machine_id,
+                'r1setup_machine_inventory_alias': alias,
+                'r1setup_machine_label': machine_record.get('machine_id', machine_id),
+                'r1setup_topology_mode': machine_record.get('topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE),
+                'r1setup_machine_deployment_state': machine_record.get(
+                    'deployment_state',
+                    DEFAULT_MACHINE_DEPLOYMENT_STATE,
+                ),
+                'r1setup_selected_instance_hosts': list(machine_record.get('instance_names') or []),
+                'r1setup_selected_instance_logical_names': [
+                    str(instances.get(instance_name, {}).get('logical_name') or instance_name)
+                    for instance_name in machine_record.get('instance_names') or []
+                ],
+                'r1setup_helper_mode': self.resolve_helper_mode(
+                    str(machine_record.get('topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE)
+                ),
+            }
+
+            for key in (
+                'ansible_ssh_common_args',
+                'ansible_ssh_pass',
+                'ansible_become_password',
+                'ansible_ssh_private_key_file',
+            ):
+                if key in machine_record:
+                    host_config[key] = machine_record[key]
+
+            execution_hosts[alias] = host_config
+
+        return {
+            'all': {
+                'children': {
+                    'gpu_nodes': {
+                        'hosts': execution_hosts,
+                    }
+                }
+            }
+        }
+
     def manage_configurations_menu(self) -> None:
         """Show configuration management submenu"""
         while True:
@@ -3735,6 +3813,163 @@ class DeploymentService:
             if result.get('status') == 'connected':
                 successful_hosts.append(host_name)
         return successful_hosts
+
+    def _get_empty_registered_machine_records(self) -> Dict[str, Dict[str, Any]]:
+        """Return registered machines that currently have no assigned instances."""
+        fleet_state = self.app.get_fleet_state_copy()
+        machines = fleet_state.get('fleet', {}).get('machines', {})
+        return {
+            machine_id: dict(machine_data)
+            for machine_id, machine_data in machines.items()
+            if not machine_data.get('instance_names')
+        }
+
+    def _update_machine_deployment_state(self, machine_id: str, deployment_state: str) -> None:
+        """Persist a machine deployment-state change."""
+        fleet_state = self.app.get_fleet_state_copy()
+        machine_record = dict(fleet_state.get('fleet', {}).get('machines', {}).get(machine_id, {}))
+        if not machine_record:
+            return
+        machine_record['deployment_state'] = deployment_state
+        self.app.upsert_machine_record(machine_id, machine_record)
+
+    @staticmethod
+    def _extract_successful_machine_ids(
+        execution_inventory: Dict[str, Any],
+        successful_execution_hosts: List[str],
+    ) -> List[str]:
+        """Map successful machine inventory aliases back to fleet machine ids."""
+        execution_hosts = _get_gpu_hosts(execution_inventory)
+        successful_machine_ids = []
+        for host_name in successful_execution_hosts:
+            machine_id = str(execution_hosts.get(host_name, {}).get('r1setup_machine_id') or '').strip()
+            if machine_id:
+                successful_machine_ids.append(machine_id)
+        return successful_machine_ids
+
+    def prepare_registered_machines(self, *, skip_gpu: bool = False) -> None:
+        """Prepare registered machines that do not yet have assigned instances."""
+        if not self.app.active_config.get('config_name'):
+            self.app.print_colored("No active configuration. Create or load one first.", 'red')
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_header("Prepare Registered Machines")
+        self.app.load_configuration()
+        machine_records = self._get_empty_registered_machine_records()
+
+        if not machine_records:
+            self.app.print_colored("No registered empty machines are available.", 'yellow')
+            self.app.print_colored(
+                "Register a machine first or assign instances before using this preparation flow.",
+                'white',
+            )
+            self.app.wait_for_enter()
+            return
+
+        operation_name = "machine preparation"
+        selected_machine_ids = self.app.select_registered_machines(
+            machine_records,
+            operation_name,
+            preselect_mode='all',
+        )
+        if not selected_machine_ids:
+            self.app.print_colored("Machine preparation cancelled - no machines selected.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        env = self.app.get_mnl_app_env()
+        self.app.print_colored("📋 Machine Preparation Details:", 'cyan', bold=True)
+        self.app.print_colored(
+            f"   • Action: {'Install Docker + NVIDIA prerequisites' if not skip_gpu else 'Install Docker prerequisites only'}",
+            'white',
+        )
+        self.app.print_colored(f"   • Network context: {env if env else 'Not set'}", 'white')
+        self.app.print_colored(f"   • Selected Machines: {len(selected_machine_ids)}/{len(machine_records)}", 'white')
+        print()
+        self.app.print_colored("🖥️  Selected Registered Machines:", 'cyan', bold=True)
+        for machine_id in selected_machine_ids:
+            machine_record = machine_records[machine_id]
+            connection_display = self.app.config_manager._format_machine_connection_display(machine_record)
+            specs_summary = self.app.config_manager._format_machine_specs_summary(machine_record.get('machine_specs'))
+            topology_mode = machine_record.get('topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE)
+            deployment_state = machine_record.get('deployment_state', DEFAULT_MACHINE_DEPLOYMENT_STATE)
+            self.app.print_colored(
+                f"   • {machine_id}: {connection_display} | mode={topology_mode} | state={deployment_state}",
+                'white',
+            )
+            if specs_summary:
+                self.app.print_colored(f"     specs: {specs_summary}", 'cyan')
+
+        self.app.print_colored("\n⚠️  This will:", 'yellow', bold=True)
+        self.app.print_colored("   • Install machine prerequisites", 'yellow')
+        self.app.print_colored("   • Install and configure Docker", 'yellow')
+        if not skip_gpu:
+            self.app.print_colored("   • Install NVIDIA drivers and CUDA prerequisites when applicable", 'yellow')
+        self.app.print_colored("   • Not deploy or start any Edge Node instance", 'yellow')
+
+        if self.app.get_input(
+            f"\n🚀 Continue with preparation for {len(selected_machine_ids)} registered machine(s)? (y/n)",
+            "y",
+        ).lower() != 'y':
+            self.app.print_colored("Machine preparation cancelled.", 'yellow')
+            return
+
+        playbook_path = self.app.config_dir / 'playbooks/prepare_machine.yml'
+        if not playbook_path.exists():
+            self.app.print_colored(f"Playbook not found: {playbook_path}", 'red')
+            self.app.wait_for_enter()
+            return
+
+        extra_vars = {'skip_gpu': True} if skip_gpu else None
+        success, output, executed_machine_hosts, execution_inventory = self.app.run_registered_machine_playbook(
+            playbook_path,
+            selected_machine_ids,
+            extra_vars=extra_vars,
+            show_output=True,
+            timeout=self.app.connection_timeout,
+            fleet_state=self.app.get_fleet_state_copy(),
+        )
+
+        successful_execution_hosts = self._extract_successful_hosts_from_output(output, executed_machine_hosts)
+        successful_machine_ids = self._extract_successful_machine_ids(execution_inventory, successful_execution_hosts)
+        failed_machine_ids = [
+            machine_id
+            for machine_id in selected_machine_ids
+            if machine_id not in successful_machine_ids
+        ]
+
+        for machine_id in successful_machine_ids:
+            self._update_machine_deployment_state(machine_id, 'prepared')
+        for machine_id in failed_machine_ids:
+            self._update_machine_deployment_state(machine_id, 'error')
+
+        if success and successful_machine_ids:
+            self.app.print_colored(
+                f"\n✅ Machine preparation succeeded on {len(successful_machine_ids)} machine(s)",
+                'green',
+            )
+        elif successful_machine_ids:
+            self.app.print_colored(
+                f"\n⚠️  Machine preparation partially succeeded on {len(successful_machine_ids)} machine(s)",
+                'yellow',
+            )
+        else:
+            self.app.print_colored("\n❌ Machine preparation failed on all selected machines.", 'red')
+
+        self.app.print_colored("\n📊 Machine Preparation Results:", 'cyan', bold=True)
+        for machine_id in selected_machine_ids:
+            machine_record = machine_records.get(machine_id, {})
+            connection_display = self.app.config_manager._format_machine_connection_display(machine_record)
+            if machine_id in successful_machine_ids:
+                result_text = "✅ PREPARED"
+                color = 'green'
+            else:
+                result_text = "❌ ERROR"
+                color = 'red'
+            self.app.print_colored(f"   • {machine_id}: {connection_display} [{result_text}]", color)
+
+        self.app.wait_for_enter()
 
     def deploy_full(self) -> None:
         """Deploy full setup (Docker + NVIDIA + GPU)"""
@@ -5508,6 +5743,12 @@ class R1Setup:
             dedupe_by_machine=dedupe_by_machine,
         )
 
+    def build_registered_machine_execution_inventory(self, machine_ids, fleet_state=None):
+        return self.config_manager.build_registered_machine_execution_inventory(
+            machine_ids,
+            fleet_state=fleet_state,
+        )
+
     def group_host_names_by_machine(self, selected_host_names, inventory=None):
         inventory = inventory if inventory is not None else self.inventory
         return self.config_manager.group_host_names_by_machine(inventory, selected_host_names)
@@ -5618,6 +5859,9 @@ class R1Setup:
 
     def deploy_docker_only(self):
         return self.deployment_service.deploy_docker_only()
+
+    def prepare_registered_machines(self, skip_gpu=False):
+        return self.deployment_service.prepare_registered_machines(skip_gpu=skip_gpu)
 
     def delete_edge_node(self):
         return self.deployment_service.delete_edge_node()
@@ -5828,6 +6072,27 @@ class R1Setup:
             temp_path = Path(handle.name)
         return temp_path, execution_inventory
 
+    def _write_registered_machine_execution_inventory(
+        self,
+        machine_ids: List[str],
+        *,
+        fleet_state: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Path, Dict[str, Any]]:
+        """Write a generated machine-only execution inventory to a temp file."""
+        execution_inventory = self.build_registered_machine_execution_inventory(
+            machine_ids,
+            fleet_state=fleet_state,
+        )
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            suffix='.yml',
+            prefix='r1setup_exec_machine_inventory_',
+            delete=False,
+        ) as handle:
+            yaml.safe_dump(execution_inventory, handle, sort_keys=False)
+            temp_path = Path(handle.name)
+        return temp_path, execution_inventory
+
     def run_generated_playbook(
         self,
         playbook_path: Path,
@@ -5858,6 +6123,45 @@ class R1Setup:
         else:
             payload = self.build_instance_extra_vars(last_applied_action, extra_vars)
         cmd = self._append_ansible_extra_vars(cmd, payload)
+
+        try:
+            success, output = self.run_command(
+                cmd,
+                show_output=show_output,
+                timeout=timeout,
+            )
+        finally:
+            try:
+                inventory_path.unlink()
+            except FileNotFoundError:
+                pass
+
+        return success, output, execution_host_names, execution_inventory
+
+    def run_registered_machine_playbook(
+        self,
+        playbook_path: Path,
+        machine_ids: List[str],
+        *,
+        extra_vars: Optional[Dict[str, Any]] = None,
+        show_output: bool = False,
+        timeout: Optional[int] = None,
+        fleet_state: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, str, List[str], Dict[str, Any]]:
+        """Run a machine-scope playbook against registered fleet machines."""
+        inventory_path, execution_inventory = self._write_registered_machine_execution_inventory(
+            machine_ids,
+            fleet_state=fleet_state,
+        )
+        execution_host_names = self._get_execution_inventory_host_names(execution_inventory)
+
+        cmd = (
+            f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+            f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+            f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+            f"ansible-playbook -i {shlex.quote(str(inventory_path))} {shlex.quote(str(playbook_path))}"
+        )
+        cmd = self._append_ansible_extra_vars(cmd, self.build_machine_extra_vars(extra_vars))
 
         try:
             success, output = self.run_command(
@@ -6132,6 +6436,10 @@ class R1Setup:
         """Return (default_option, hint_text) based on current state."""
         has_config = self.check_hosts_config()
         if not has_config:
+            fleet_state = self.get_fleet_state_copy()
+            machines = fleet_state.get('fleet', {}).get('machines', {})
+            if machines:
+                return '2', '\U0001f4a1 Suggested: Prepare or review your registered machines'
             return '1', '\U0001f4a1 Suggested: Configure your nodes first'
         deployment_status = self.active_config.get('deployment_status', 'never_deployed')
         if deployment_status in ('never_deployed', 'deleted'):
@@ -6390,8 +6698,9 @@ class R1Setup:
             print()
             self.print_colored("  1) Deploy with GPU        - Deploy full Edge Node with GPU support")
             self.print_colored("  2) Deploy CPU Only        - Deploy Edge Node without GPU capabilities")
-            self.print_colored("  3) Delete Deployment      - Remove deployed Edge Node")
-            self.print_colored("  4) Deployment Status      - Check detailed deployment status")
+            self.print_colored("  3) Prepare Machines       - Prepare registered machines without deploying nodes")
+            self.print_colored("  4) Delete Deployment      - Remove deployed Edge Node")
+            self.print_colored("  5) Deployment Status      - Check detailed deployment status")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -6406,11 +6715,13 @@ class R1Setup:
             elif choice == '2':
                 self.deploy_docker_only()
             elif choice == '3':
-                self.delete_edge_node()
+                self.prepare_registered_machines(skip_gpu=False)
             elif choice == '4':
+                self.delete_edge_node()
+            elif choice == '5':
                 self.deployment_status()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-5.", 'red')
                 self.wait_for_enter()
 
     def operations_menu(self) -> None:
@@ -9327,6 +9638,119 @@ class R1Setup:
             time.sleep(0.8)
 
         return list(selected_hosts)
+
+    @staticmethod
+    def _get_machine_deployment_state_info(state: str) -> Tuple[str, str, str]:
+        """Get display info for machine deployment state."""
+        state_info = {
+            'empty': ('📭', 'yellow', 'Empty'),
+            'registered': ('📝', 'white', 'Registered'),
+            'prepared': ('🛠️', 'green', 'Prepared'),
+            'active': ('🚀', 'green', 'Active'),
+            'unreachable': ('🔌', 'red', 'Unreachable'),
+            'error': ('❌', 'red', 'Error'),
+            'unknown': ('❓', 'white', 'Unknown'),
+        }
+        return state_info.get(state, state_info['unknown'])
+
+    def select_registered_machines(
+        self,
+        machines: Dict[str, Dict[str, Any]],
+        operation_name: str,
+        preselect_mode: str = 'all',
+    ) -> List[str]:
+        """Select registered machines for a machine-scope operation."""
+        if not machines:
+            return []
+
+        if preselect_mode == 'none':
+            selected_machine_ids = set()
+        else:
+            selected_machine_ids = set(machines.keys())
+
+        machine_ids = list(machines.keys())
+        while True:
+            self.print_header(f"Select Machines for {operation_name.title()}")
+            self.print_colored("📋 Instructions:", 'cyan', bold=True)
+            self.print_colored("   • Enter numbers to toggle selection (e.g., 1, 2)", 'white')
+            self.print_colored("   • Use 'a' to select all machines", 'white')
+            self.print_colored("   • Use 'n' to deselect all machines", 'white')
+            self.print_colored("   • Use 'c' to cancel operation", 'white')
+            self.print_colored("   • Press Enter when ready to proceed", 'white')
+            print()
+
+            if not selected_machine_ids:
+                self.print_colored("⚠️  No machines selected!", 'red', bold=True)
+            elif len(selected_machine_ids) == len(machine_ids):
+                self.print_colored(f"✅ All {len(machine_ids)} machines selected", 'green', bold=True)
+            else:
+                self.print_colored(
+                    f"📊 Selected: {len(selected_machine_ids)}/{len(machine_ids)} machines",
+                    'cyan',
+                    bold=True,
+                )
+            print()
+
+            for index, machine_id in enumerate(machine_ids, start=1):
+                machine_record = machines[machine_id]
+                is_selected = machine_id in selected_machine_ids
+                marker = "✓" if is_selected else " "
+                topology_mode = machine_record.get('topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE)
+                deployment_state = machine_record.get('deployment_state', DEFAULT_MACHINE_DEPLOYMENT_STATE)
+                state_emoji, _, state_label = self._get_machine_deployment_state_info(deployment_state)
+                connection_display = self.config_manager._format_machine_connection_display(machine_record)
+                specs_summary = self.config_manager._format_machine_specs_summary(machine_record.get('machine_specs'))
+                color = 'green' if is_selected else 'white'
+                self.print_colored(
+                    f"  {index}) [{marker}] {machine_id} | {connection_display} | mode={topology_mode} | {state_emoji} {state_label}",
+                    color,
+                    bold=is_selected,
+                )
+                if specs_summary:
+                    self.print_colored(f"      specs: {specs_summary}", 'cyan')
+
+            print()
+            choice = self.get_input("Enter choice (number/a/n/c/Enter to proceed)", "").strip().lower()
+            if choice == "":
+                if not selected_machine_ids:
+                    self.print_colored("❌ Cannot proceed without selecting any machines!", 'red')
+                    self.wait_for_enter("Press Enter to continue selection...")
+                    continue
+                return list(selected_machine_ids)
+            if choice == "c":
+                return []
+            if choice == "a":
+                selected_machine_ids = set(machine_ids)
+                continue
+            if choice == "n":
+                selected_machine_ids = set()
+                continue
+
+            try:
+                choices = []
+                for part in choice.replace(',', ' ').split():
+                    try:
+                        choices.append(int(part))
+                    except ValueError:
+                        continue
+                if not choices:
+                    choices = [int(choice)]
+
+                for selection in choices:
+                    if selection < 1 or selection > len(machine_ids):
+                        self.print_colored(
+                            f"❌ Invalid choice: {selection} (valid range: 1-{len(machine_ids)})",
+                            'red',
+                        )
+                        continue
+                    machine_id = machine_ids[selection - 1]
+                    if machine_id in selected_machine_ids:
+                        selected_machine_ids.remove(machine_id)
+                    else:
+                        selected_machine_ids.add(machine_id)
+            except ValueError:
+                self.print_colored("❌ Invalid input. Please enter numbers, 'a', 'n', 'c', or press Enter.", 'red')
+                self.wait_for_enter("Press Enter to continue selection...")
 
     def _format_timestamp_ago(self, timestamp: str) -> str:
         """Helper method to format timestamp as 'X time ago' string"""

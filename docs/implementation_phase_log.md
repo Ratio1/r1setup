@@ -374,3 +374,62 @@ Make machine and instance relationships visible in the CLI so empty machines, st
   - expert-mode machines render as grouped instances
   - topology mode and capacity context are visible when known
   - mixed states on one machine no longer look like unrelated separate hosts
+
+## Phase 7
+
+Completed At: `2026-03-19T19:58:28+02:00`
+
+### Goal
+
+Allow useful machine-scope operations on registered machines that do not yet have any assigned instance, without creating placeholder nodes or reusing the instance deployment path incorrectly.
+
+### Scope Completed
+
+- added registered-machine execution inventory builders in `r1setup`
+- added a machine-only generated playbook runner for registered fleet machines
+- added machine-selection UX for registered empty machines
+- added `Prepare Registered Machines` in the deployment menu
+- implemented machine-only preparation against `prepare_machine.yml`
+- updated machine deployment-state persistence so machine-only operations can mark:
+  - `prepared`
+  - `error`
+- updated main-menu suggestion logic so configs with only registered machines no longer misleadingly suggest node configuration first
+- added focused modular test coverage for:
+  - registered machine execution inventory building
+  - machine-only generated playbook execution
+  - empty-machine preparation state updates
+
+### Files Changed
+
+- `mnl_factory/scripts/r1setup`
+- `mnl_factory/scripts/tests/test_inventory_builder.py`
+- `mnl_factory/scripts/tests/test_empty_machine_operations.py`
+- `mnl_factory/scripts/README_r1setup.md`
+- `docs/20260317_221254_multi_instance_migration_implementation_plan.md`
+- `docs/implementation_phase_log.md`
+- `AGENTS.md`
+
+### Verification Commands
+
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_inventory_builder`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_empty_machine_operations`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_r1setup_core`
+- `cd mnl_factory/scripts && python3 -m unittest discover tests`
+- `cd mnl_factory/scripts && python3 -m py_compile r1setup`
+
+### Verification Results
+
+- `tests.test_inventory_builder`: passed
+- `tests.test_empty_machine_operations`: passed
+- `tests.test_r1setup_core`: passed
+- `python3 -m unittest discover tests`: passed
+- `python3 -m py_compile r1setup`: passed
+
+### Notes
+
+- The machine-preparation flow is additive and does not change the default standard deployment path.
+- Registered machines can now be prepared without inventing instance hosts or mutating the stored node inventory.
+- Acceptance criteria for the empty-machine phase are met:
+  - registered empty machines can be selected and prepared without placeholder instances
+  - machine-only operations update machine state through fleet metadata
+  - the machine-scope execution path is test covered

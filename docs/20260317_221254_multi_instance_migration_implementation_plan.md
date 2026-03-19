@@ -24,57 +24,62 @@ Completed:
 - Phase 4: dispatcher-based helper strategy
 - Phase 5: generated inventory and operation split
 - Phase 6: visualization and fleet UX
+- Phase 7: empty-machine operations
 
 Not Started:
 
-- Phase 7: empty-machine operations
 - Phase 8: migration planning framework
 - Phase 9: migration execution
 - Phase 10: rollback and finalization
 
 ## Recommended Next Step
 
-The next best step is Phase 7: empty-machine operations.
+The next best step is Phase 8: migration planning framework.
 
 Reasoning:
 
-- grouped machine and instance rendering is now in place in the main fleet/status surfaces
-- the CLI now exposes empty machines and grouped expert-mode instances without flattening them into unrelated hosts
-- the next missing workflow is acting on registered machines that do not yet run an instance
+- grouped fleet views and machine-only preparation now exist
+- registered machines can now be prepared without inventing placeholder instances
+- the next missing major capability is planning a safe reassignment of a logical instance from one machine to another
 
 Practical goal for the next implementation slice:
 
-- let the operator do useful machine-level work on empty registered machines
-- keep machine preparation explicit and deduped from instance deployment
-- preserve the current default behavior where standard mode remains one machine to one edge node
+- define a first-class migration planning model before any destructive transfer logic is added
+- make source/target selection, naming decisions, collision checks, and rollback checkpoints explicit
+- prepare the later transfer workflow to use controller-side temp storage instead of direct machine-to-machine copy
 
-### Immediate Phase 7 Breakdown
+### Immediate Phase 8 Breakdown
 
 The next coding slice should be executed in this order:
 
-1. define the supported empty-machine operations and their machine-scope execution rules
-2. add machine-selection UX for registered machines with no assigned instance
-3. implement preparation-only flows against generated machine-scope inventories
-4. surface preparation results and machine state transitions in the grouped views
-5. add focused modular tests for empty-machine selection, prep, and machine-state updates
+1. define migration plan types and persisted migration-state metadata
+2. add source-instance and target-machine selection UX
+3. add naming/collision resolution for migration targets
+4. add preflight validation for:
+   - machine readiness
+   - target conflicts
+   - controller temp-space requirements
+   - source volume availability
+5. add focused modular tests for migration planning and validation
 6. after the phase is complete:
    - update `docs/implementation_phase_log.md`
    - run targeted tests plus broad CLI regression
    - create a dedicated phase commit before moving on
 
-### Immediate Deliverables For Phase 7
+### Immediate Deliverables For Phase 8
 
-- one operator flow for machine-only preparation or readiness actions
-- machine-scope status/state updates for empty registered machines
-- one focused test module for empty-machine operations
+- one migration planning model with explicit source/target intent
+- one operator flow that can assemble a migration plan without executing it
+- one focused test module for migration-planning validation
 
-### Exit Signal For Starting Phase 8
+### Exit Signal For Starting Phase 9
 
-Do not start empty-machine operations until all of the following are true:
+Do not start migration execution until all of the following are true:
 
-- registered empty machines can be selected and prepared without inventing placeholder instances
-- machine-only operations update grouped views and machine state correctly
-- the machine-scope execution path is test covered
+- a migration plan can be built and reviewed without mutating remote state
+- source/target conflicts are detected before execution
+- controller temp-folder requirements are visible in the plan
+- migration-planning behavior is test covered
 
 ## Implementation Principles
 

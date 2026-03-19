@@ -67,6 +67,37 @@ class TestInventoryBuilder(unittest.TestCase):
         self.assertEqual(sorted(node_1["r1setup_selected_instance_hosts"]), ["node-1", "node-2"])
         self.assertEqual(node_1["r1setup_machine_id"], "root@10.0.0.1:22")
 
+    def test_build_registered_machine_execution_inventory_uses_fleet_machine_records(self):
+        fleet_state = {
+            "config_schema_version": r1setup.CONFIG_SCHEMA_VERSION,
+            "fleet": {
+                "machines": {
+                    "machine-a": {
+                        "machine_id": "machine-a",
+                        "ansible_host": "10.0.0.10",
+                        "ansible_user": "root",
+                        "ansible_port": 22,
+                        "topology_mode": "standard",
+                        "deployment_state": "empty",
+                        "instance_names": [],
+                        "ansible_ssh_private_key_file": "~/.ssh/id_rsa",
+                    }
+                },
+                "instances": {},
+            },
+        }
+
+        inventory = self.cm.build_registered_machine_execution_inventory(["machine-a"], fleet_state=fleet_state)
+        hosts = inventory["all"]["children"]["gpu_nodes"]["hosts"]
+
+        self.assertEqual(list(hosts.keys()), ["machine_a"])
+        machine = hosts["machine_a"]
+        self.assertEqual(machine["ansible_host"], "10.0.0.10")
+        self.assertEqual(machine["r1setup_execution_scope"], "machine")
+        self.assertEqual(machine["r1setup_machine_id"], "machine-a")
+        self.assertEqual(machine["r1setup_topology_mode"], "standard")
+        self.assertEqual(machine["ansible_ssh_private_key_file"], "~/.ssh/id_rsa")
+
 
 class TestGeneratedPlaybookRunner(unittest.TestCase):
     """Verify generated playbook runner builds and cleans temporary inventory."""
@@ -112,6 +143,57 @@ class TestGeneratedPlaybookRunner(unittest.TestCase):
         self.assertTrue(success)
         self.assertEqual(output, "ok")
         self.assertEqual(host_names, ["node-1"])
+        cmd = app.run_command.call_args[0][0]
+        self.assertIn("ansible-playbook -i ", cmd)
+        self.assertIn(str(playbook_path), cmd)
+        inventory_arg = cmd.split("ansible-playbook -i ", 1)[1].split(" ", 1)[0]
+        self.assertFalse(Path(inventory_arg).exists())
+
+    def test_run_registered_machine_playbook_writes_and_removes_temp_inventory(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        fleet_state = {
+            "config_schema_version": r1setup.CONFIG_SCHEMA_VERSION,
+            "fleet": {
+                "machines": {
+                    "machine-a": {
+                        "machine_id": "machine-a",
+                        "ansible_host": "10.0.0.10",
+                        "ansible_user": "root",
+                        "ansible_port": 22,
+                        "topology_mode": "standard",
+                        "deployment_state": "empty",
+                        "instance_names": [],
+                    }
+                },
+                "instances": {},
+            },
+        }
+        app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {}}}}}
+        backing_app = MagicMock(inventory=app.inventory, print_debug=MagicMock())
+        app.config_manager = r1setup.ConfigurationManager(backing_app)
+        app.config_manager.fleet_state = fleet_state
+        app.run_command = MagicMock(return_value=(True, "ok"))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            playbook_path = Path(temp_dir) / "prepare_machine.yml"
+            playbook_path.write_text("---\n")
+
+            with patch.dict(os.environ, {
+                "ANSIBLE_CONFIG": "ansible.cfg",
+                "ANSIBLE_COLLECTIONS_PATH": "collections",
+                "ANSIBLE_HOME": "ansible-home",
+            }, clear=False):
+                success, output, host_names, _ = app.run_registered_machine_playbook(
+                    playbook_path,
+                    ["machine-a"],
+                    show_output=False,
+                    timeout=30,
+                    fleet_state=fleet_state,
+                )
+
+        self.assertTrue(success)
+        self.assertEqual(output, "ok")
+        self.assertEqual(host_names, ["machine_a"])
         cmd = app.run_command.call_args[0][0]
         self.assertIn("ansible-playbook -i ", cmd)
         self.assertIn(str(playbook_path), cmd)

@@ -222,3 +222,9 @@ Minimum required critic topics when relevant:
   - empty registered machines must remain visible in grouped views even when they have no assigned instance
   - standard topology remains the default and should still read concisely as one machine with one instance
   - expert topology should render multiple nested instances under one physical machine with per-instance runtime identity and status/version context
+
+- 2026-03-19T19:58:28+02:00 | Phase 7 empty-machine operations are implemented. The stable rule is:
+  - registered machines with no assigned instances can now be prepared through the deployment menu without creating placeholder node entries
+  - machine-only preparation must use a generated inventory built from fleet machine records, not from fake instance hosts
+  - successful machine-only preparation should move machine deployment state to `prepared`; failed preparation should move it to `error`
+  - standard mode remains the default behavior; machine-only preparation is additive and does not replace normal one-machine-one-node deployment
