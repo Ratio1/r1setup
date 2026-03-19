@@ -838,6 +838,38 @@ Result:
 - operators now get explicit timeout guidance before the long-running phases start
 - read-only and short operations still keep the smaller base timeout semantics
 
+### Phase 8
+
+Status:
+
+- completed
+
+Implemented:
+
+- grouped machine views now expose a readable `display_label`
+- derived machine ids now prefer the probed hostname in grouped displays instead of raw endpoint-style ids
+- migration helper stop/apply/start paths now suppress noisy successful-path playbook output and rely on the explicit progress markers from Phase 6
+- `wait_for_enter()` now flushes stdout/stderr before prompting, reducing redraw overlap after long-running flows
+
+Files changed:
+
+- [r1setup](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- [test_machine_grouping.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_machine_grouping.py)
+- [test_r1setup_core.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_r1setup_core.py)
+
+Verification:
+
+- `python3 -m unittest tests.test_machine_grouping tests.test_r1setup_core tests.test_migration_execution`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Result:
+
+- all verification commands passed
+- grouped views are more readable on machines that still have derived endpoint ids
+- successful migration paths emit less low-signal helper noise
+- prompt boundaries are now flushed explicitly before waiting for user input
+
 ## Phase 9: Real-Host Revalidation
 
 ### Objective

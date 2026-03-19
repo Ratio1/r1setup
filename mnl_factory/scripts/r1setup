@@ -2485,6 +2485,14 @@ class ConfigurationManager:
             return f"{user}@{host}"
         return f"{user}@{host}:{port}"
 
+    @classmethod
+    def _format_machine_display_label(cls, machine_id: str, machine_data: Dict[str, Any]) -> str:
+        """Return a readable machine label for grouped CLI views."""
+        hostname = str((machine_data.get('machine_specs') or {}).get('hostname') or '').strip()
+        if cls._is_derived_machine_id(machine_id, machine_data):
+            return hostname or cls._format_machine_connection_display(machine_data)
+        return machine_id
+
     @staticmethod
     def _format_machine_memory_gib(memory_total: Any) -> str:
         """Return a stable GiB display string for machine memory totals."""
@@ -2670,6 +2678,7 @@ class ConfigurationManager:
             group_status_info = self._summarize_machine_group_status(status_counts, len(instance_views))
             machine_views.append({
                 'machine_id': machine_id,
+                'display_label': self._format_machine_display_label(machine_id, machine_data),
                 'ansible_host': machine_data.get('ansible_host'),
                 'ansible_user': machine_data.get('ansible_user', 'root'),
                 'ansible_port': machine_data.get('ansible_port', 22),
@@ -5807,7 +5816,7 @@ class MigrationPlanner:
             [instance_name],
             machine_scope=False,
             last_applied_action='migration_source_stop',
-            show_output=True,
+            show_output=False,
             timeout=self.app.connection_timeout,
         )
         if success:
@@ -5949,7 +5958,7 @@ class MigrationPlanner:
             plan,
             'apply_instance.yml',
             last_applied_action='migration_apply_target',
-            show_output=True,
+            show_output=False,
         )
         if success:
             return {'status': 'success', 'output': output}
@@ -5961,7 +5970,7 @@ class MigrationPlanner:
             plan,
             'service_start.yml',
             last_applied_action='migration_start_target',
-            show_output=True,
+            show_output=False,
         )
         if success:
             return {'status': 'success', 'output': output}
@@ -6114,7 +6123,7 @@ class MigrationPlanner:
             [instance_name],
             machine_scope=False,
             last_applied_action='migration_source_restart',
-            show_output=True,
+            show_output=False,
             timeout=self.app.connection_timeout,
         )
         if success:
@@ -7647,6 +7656,11 @@ class R1Setup:
         os.environ['ANSIBLE_HOME'] = str(self.ansible_config_root)
 
     def wait_for_enter(self, message: str = "Press Enter to continue...") -> None:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
         input(f"\n{message}")
 
     def print_colored(self, text: str, color: str = 'white', bold: bool = False, end: str = '\n') -> None:
@@ -8585,7 +8599,7 @@ class R1Setup:
 
         for machine_view in machine_views:
             header = (
-                f"  • {machine_view['machine_id']}: {machine_view['connection_display']} | "
+                f"  • {machine_view.get('display_label', machine_view['machine_id'])}: {machine_view['connection_display']} | "
                 f"mode={machine_view['topology_mode']} | state={machine_view['deployment_state']} | "
                 f"{machine_view['group_status_emoji']} {machine_view['group_status']}"
             )

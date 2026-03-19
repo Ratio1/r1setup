@@ -107,6 +107,14 @@ class TestWaitForEnter(unittest.TestCase):
         arg = mock_input.call_args[0][0]
         self.assertTrue(arg.startswith("\n"))
 
+    @patch("sys.stderr.flush")
+    @patch("sys.stdout.flush")
+    @patch("builtins.input")
+    def test_wait_for_enter_flushes_output_streams(self, mock_input, mock_stdout_flush, mock_stderr_flush):
+        self.app.wait_for_enter()
+        mock_stdout_flush.assert_called_once()
+        mock_stderr_flush.assert_called_once()
+
 
 class TestPrintHeader(unittest.TestCase):
     """Tests for R1Setup.print_header()."""

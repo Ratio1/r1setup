@@ -88,6 +88,7 @@ class TestMachineGroupViews(unittest.TestCase):
         self.assertEqual([view["machine_id"] for view in views], ["machine-a", "machine-b"])
 
         expert_view = views[0]
+        self.assertEqual(expert_view["display_label"], "machine-a")
         self.assertEqual(expert_view["topology_mode"], "expert")
         self.assertEqual(expert_view["instance_count"], 2)
         self.assertEqual(expert_view["group_status"], "Mixed States")
@@ -102,6 +103,7 @@ class TestMachineGroupViews(unittest.TestCase):
         )
 
         empty_view = views[1]
+        self.assertEqual(empty_view["display_label"], "machine-b")
         self.assertEqual(empty_view["topology_mode"], "standard")
         self.assertEqual(empty_view["instance_count"], 0)
         self.assertEqual(empty_view["group_status"], "No Instances")
@@ -140,6 +142,33 @@ class TestMachineGroupViews(unittest.TestCase):
         self.assertEqual(view["instance_count"], 1)
         self.assertEqual(view["group_status"], "Running")
         self.assertEqual(view["instances"][0]["runtime"]["service_name"], "edge_node2")
+
+    def test_derived_machine_id_uses_hostname_as_display_label(self):
+        inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-solo": {
+                                "ansible_host": "10.0.0.9",
+                                "ansible_user": "root",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        fleet_state = self.cm.build_fleet_state(inventory)
+        derived_machine_id = "root@10.0.0.9:22"
+        fleet_state["fleet"]["machines"][derived_machine_id]["machine_specs"] = {
+            "hostname": "host-solo",
+            "cpu_total": 4,
+            "memory_gb_total": 15.6,
+        }
+
+        views = self.cm.build_machine_group_views(inventory=inventory, fleet_state=fleet_state)
+
+        self.assertEqual(views[0]["display_label"], "host-solo")
 
 
 class TestMachineGroupDisplayLines(unittest.TestCase):
