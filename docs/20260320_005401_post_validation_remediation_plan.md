@@ -633,6 +633,39 @@ Result:
 - duplicate machine endpoints now collapse to one canonical machine record in fleet metadata
 - same-endpoint hosts can now inherit the existing machine id during normalization and add-node flows
 
+### Phase 2
+
+Status:
+
+- completed
+
+Implemented:
+
+- explicit expert-mode gate in `Add New Node` when the target endpoint already belongs to an occupied machine
+- in-memory topology promotion helper that converts an existing machine and matching hosts to `expert`
+- cancel path that aborts same-machine second-instance creation without saving
+- accepted path that marks the new host for expert-mode runtime resolution
+
+Files changed:
+
+- [r1setup](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- [test_config_roundtrip.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_config_roundtrip.py)
+- [test_r1setup_core.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_r1setup_core.py)
+
+Verification:
+
+- `python3 -m unittest tests.test_config_roundtrip tests.test_r1setup_core`
+- `python3 -m unittest tests.test_fleet_model tests.test_machine_grouping tests.test_inventory_builder tests.test_r1setup_core`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Result:
+
+- all verification commands passed
+- same-machine second-instance add now requires explicit expert-mode confirmation
+- declining expert mode leaves configuration state unchanged
+- accepting expert mode promotes the existing machine/hosts to expert topology before save
+
 ## Phase 9: Real-Host Revalidation
 
 ### Objective

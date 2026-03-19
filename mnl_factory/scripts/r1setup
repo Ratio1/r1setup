@@ -1462,6 +1462,39 @@ class ConfigurationManager:
             bound_host['r1setup_machine_deployment_state'] = machine_record.get('deployment_state')
         return bound_host
 
+    def promote_machine_to_expert(
+        self,
+        machine_id: str,
+        inventory: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Promote an existing machine and its assigned hosts to expert topology in memory."""
+        inventory = inventory if inventory is not None else self.app.inventory
+        hosts = _get_gpu_hosts(inventory)
+
+        fleet_state = self._normalize_fleet_state(self.get_fleet_state_copy())
+        machine_record = dict(fleet_state.get('fleet', {}).get('machines', {}).get(machine_id, {}))
+        if not machine_record:
+            return {}
+
+        machine_record['topology_mode'] = 'expert'
+        fleet_state['fleet']['machines'][machine_id] = machine_record
+
+        machine_endpoint = self._machine_endpoint_from_record(machine_record)
+        for host_name, host_config in hosts.items():
+            host_machine_id = str(host_config.get('r1setup_machine_id') or '').strip()
+            host_endpoint = self._machine_endpoint_from_record(host_config, fallback_host_name=host_name)
+            if host_machine_id == machine_id or (machine_endpoint and host_endpoint == machine_endpoint):
+                host_config['r1setup_machine_id'] = machine_id
+                host_config['r1setup_topology_mode'] = 'expert'
+                host_config.setdefault('r1setup_runtime_name_policy', 'preserve')
+
+        for instance_name, instance_record in fleet_state.get('fleet', {}).get('instances', {}).items():
+            if str(instance_record.get('assigned_machine_id') or '').strip() == machine_id:
+                instance_record['assigned_machine_id'] = machine_id
+
+        self.fleet_state = fleet_state
+        return machine_record
+
     def _merge_fleet_state(self, fleet_state: Optional[Dict[str, Any]], inventory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Merge persisted fleet-state metadata with the legacy inventory-derived view."""
         normalized = self._normalize_fleet_state(fleet_state)
@@ -10002,6 +10035,48 @@ class R1Setup:
             last_node_config = hosts[last_node_name]
         new_host = self._configure_single_node(previous_config=last_node_config)
         new_host = self.config_manager.bind_host_to_existing_machine(name, new_host)
+
+        bound_machine_id = str(new_host.get('r1setup_machine_id') or '').strip()
+        if bound_machine_id:
+            fleet_state = self.config_manager.get_fleet_state_copy()
+            normalized_fleet = self.config_manager._normalize_fleet_state(fleet_state)
+            machine_record = dict(normalized_fleet.get('fleet', {}).get('machines', {}).get(bound_machine_id, {}))
+            existing_instances = list(machine_record.get('instance_names') or [])
+            topology_mode = str(machine_record.get('topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE)
+
+            if existing_instances:
+                connection_display = self.config_manager._format_machine_connection_display(machine_record)
+                if topology_mode != 'expert':
+                    self.print_section("Expert Mode Required")
+                    self.print_colored(
+                        f"This machine already has assigned instances in the current config: {', '.join(sorted(existing_instances))}",
+                        'yellow',
+                    )
+                    self.print_colored(
+                        f"Machine: {bound_machine_id} | {connection_display}",
+                        'white',
+                    )
+                    self.print_colored("Adding another node on the same machine is an expert-mode operation.", 'yellow')
+                    self.print_colored("Recommended minimum resources per node: 4 CPU / 16 GB RAM.", 'yellow')
+                    self.print_colored("Existing runtime names will be preserved for current instances.", 'cyan')
+                    self.print_colored("New expert-mode instances will use unique runtime names.", 'cyan')
+
+                    proceed_expert = self.get_input("Continue and convert this machine to expert mode? (y/n)", "n").lower() == 'y'
+                    if not proceed_expert:
+                        self.print_colored("Node addition cancelled. No changes were saved.", 'yellow')
+                        return
+
+                    machine_record = self.config_manager.promote_machine_to_expert(bound_machine_id, self.inventory)
+                    new_host['r1setup_topology_mode'] = 'expert'
+                    new_host['r1setup_runtime_name_policy'] = 'normalize_to_target'
+                else:
+                    self.print_colored(
+                        f"Detected existing expert-mode machine '{bound_machine_id}'. The new node will be added as another instance.",
+                        'cyan',
+                    )
+                    new_host['r1setup_topology_mode'] = 'expert'
+                    new_host['r1setup_runtime_name_policy'] = 'normalize_to_target'
+
         hosts[name] = new_host
         self._save_configuration()
         self.print_colored(f"Node '{name}' added successfully!", 'green')

@@ -278,6 +278,94 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
             self.assertEqual(app.run_generated_playbook.call_count, 2)
 
 
+class TestAddNodeExpertModeFlow(unittest.TestCase):
+    """Tests same-machine add-node expert-mode gating."""
+
+    def _make_app(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "nodea": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                                "r1setup_machine_id": "machine-a",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        app.print_section = MagicMock()
+        app.print_colored = MagicMock()
+        app._save_configuration = MagicMock()
+        app._get_valid_hostname = MagicMock(return_value="nodeb")
+        app._configure_single_node = MagicMock(return_value={
+            "ansible_host": "10.0.0.1",
+            "ansible_user": "root",
+        })
+        app.config_manager = MagicMock()
+        app.config_manager.bind_host_to_existing_machine.return_value = {
+            "ansible_host": "10.0.0.1",
+            "ansible_user": "root",
+            "r1setup_machine_id": "machine-a",
+        }
+        app.config_manager.get_fleet_state_copy.return_value = {
+            "config_schema_version": r1setup.CONFIG_SCHEMA_VERSION,
+            "fleet": {
+                "machines": {
+                    "machine-a": {
+                        "machine_id": "machine-a",
+                        "ansible_host": "10.0.0.1",
+                        "ansible_user": "root",
+                        "ansible_port": 22,
+                        "topology_mode": "standard",
+                        "deployment_state": "active",
+                        "instance_names": ["nodea"],
+                    }
+                },
+                "instances": {
+                    "nodea": {"assigned_machine_id": "machine-a"},
+                },
+            },
+        }
+        app.config_manager._normalize_fleet_state.side_effect = lambda fleet_state: fleet_state
+        app.config_manager._format_machine_connection_display.return_value = "root@10.0.0.1"
+        app.config_manager.promote_machine_to_expert.return_value = {
+            "machine_id": "machine-a",
+            "topology_mode": "expert",
+            "deployment_state": "active",
+            "instance_names": ["nodea"],
+        }
+        return app
+
+    def test_add_node_cancels_when_expert_mode_declined(self):
+        app = self._make_app()
+        app.get_input = MagicMock(return_value="n")
+
+        app._add_node()
+
+        hosts = app.inventory["all"]["children"]["gpu_nodes"]["hosts"]
+        self.assertEqual(sorted(hosts.keys()), ["nodea"])
+        app._save_configuration.assert_not_called()
+        app.config_manager.promote_machine_to_expert.assert_not_called()
+
+    def test_add_node_promotes_machine_when_expert_mode_accepted(self):
+        app = self._make_app()
+        app.get_input = MagicMock(return_value="y")
+
+        app._add_node()
+
+        hosts = app.inventory["all"]["children"]["gpu_nodes"]["hosts"]
+        self.assertIn("nodeb", hosts)
+        self.assertEqual(hosts["nodeb"]["r1setup_topology_mode"], "expert")
+        self.assertEqual(hosts["nodeb"]["r1setup_runtime_name_policy"], "normalize_to_target")
+        app.config_manager.promote_machine_to_expert.assert_called_once_with("machine-a", app.inventory)
+        app._save_configuration.assert_called_once()
+
+
 class TestNodeInfoDetails(unittest.TestCase):
     """Tests the optional detailed node info display."""
 

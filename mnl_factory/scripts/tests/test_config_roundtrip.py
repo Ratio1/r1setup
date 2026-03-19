@@ -214,3 +214,62 @@ class TestConfigurationSchemaMetadata(unittest.TestCase):
         self.assertEqual(bound["r1setup_machine_id"], "machine-b")
         self.assertEqual(bound["r1setup_topology_mode"], "standard")
         self.assertEqual(bound["r1setup_machine_deployment_state"], "prepared")
+
+    def test_promote_machine_to_expert_updates_matching_hosts(self):
+        inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {
+                                "ansible_host": "10.0.0.2",
+                                "ansible_user": "root",
+                                "r1setup_machine_id": "machine-b",
+                                "r1setup_topology_mode": "standard",
+                            },
+                            "node-2": {
+                                "ansible_host": "10.0.0.2",
+                                "ansible_user": "root",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+        self.cm.fleet_state = {
+            "config_schema_version": r1setup.CONFIG_SCHEMA_VERSION,
+            "fleet": {
+                "machines": {
+                    "machine-b": {
+                        "machine_id": "machine-b",
+                        "ansible_host": "10.0.0.2",
+                        "ansible_user": "root",
+                        "ansible_port": 22,
+                        "topology_mode": "standard",
+                        "deployment_state": "active",
+                        "instance_names": ["node-1"],
+                    }
+                },
+                "instances": {
+                    "node-1": {
+                        "assigned_machine_id": "machine-b",
+                    }
+                },
+            },
+        }
+
+        promoted = self.cm.promote_machine_to_expert("machine-b", inventory)
+
+        self.assertEqual(promoted["topology_mode"], "expert")
+        self.assertEqual(
+            inventory["all"]["children"]["gpu_nodes"]["hosts"]["node-1"]["r1setup_topology_mode"],
+            "expert",
+        )
+        self.assertEqual(
+            inventory["all"]["children"]["gpu_nodes"]["hosts"]["node-2"]["r1setup_machine_id"],
+            "machine-b",
+        )
+        self.assertEqual(
+            inventory["all"]["children"]["gpu_nodes"]["hosts"]["node-2"]["r1setup_topology_mode"],
+            "expert",
+        )
