@@ -23,10 +23,10 @@ Completed:
 - Phase 3: runtime naming engine and collision detection
 - Phase 4: dispatcher-based helper strategy
 - Phase 5: generated inventory and operation split
+- Phase 6: visualization and fleet UX
 
 Not Started:
 
-- Phase 6: visualization and fleet UX
 - Phase 7: empty-machine operations
 - Phase 8: migration planning framework
 - Phase 9: migration execution
@@ -34,54 +34,47 @@ Not Started:
 
 ## Recommended Next Step
 
-The next best step is Phase 6: visualization and fleet UX.
+The next best step is Phase 7: empty-machine operations.
 
 Reasoning:
 
-- runtime naming is centralized and now flows into generated execution inventories
-- helper behavior is explicit for standard vs expert machines
-- machine-level preparation and instance-level runtime application are now separated in the CLI execution path
-- the next missing operator-facing piece is representing that machine/instance split correctly in the CLI views
+- grouped machine and instance rendering is now in place in the main fleet/status surfaces
+- the CLI now exposes empty machines and grouped expert-mode instances without flattening them into unrelated hosts
+- the next missing workflow is acting on registered machines that do not yet run an instance
 
 Practical goal for the next implementation slice:
 
-- make machine and instance relationships visible in the CLI instead of still presenting a flat host list
-- surface empty machines, grouped expert-mode instances, and mixed per-machine instance states
-- keep standard-mode output simple while exposing machine-level context where it now matters operationally
+- let the operator do useful machine-level work on empty registered machines
+- keep machine preparation explicit and deduped from instance deployment
+- preserve the current default behavior where standard mode remains one machine to one edge node
 
-### Immediate Phase 6 Breakdown
+### Immediate Phase 7 Breakdown
 
 The next coding slice should be executed in this order:
 
-1. add grouped machine/instance view helpers driven by fleet state and generated-status results
-2. update fleet summary and node status screens to render:
-   - empty machines
-   - standard machines
-   - expert machines with grouped instances
-3. surface available machine specs and topology mode in grouped views when known
-4. keep standard mode concise so one-machine-one-node users do not get forced into expert-only UI noise
-5. make incomplete operation state, where available, visible enough for later migration flows
-6. add focused modular tests for grouped rendering and mixed per-machine state display
-7. after the phase is complete:
+1. define the supported empty-machine operations and their machine-scope execution rules
+2. add machine-selection UX for registered machines with no assigned instance
+3. implement preparation-only flows against generated machine-scope inventories
+4. surface preparation results and machine state transitions in the grouped views
+5. add focused modular tests for empty-machine selection, prep, and machine-state updates
+6. after the phase is complete:
    - update `docs/implementation_phase_log.md`
    - run targeted tests plus broad CLI regression
    - create a dedicated phase commit before moving on
 
-### Immediate Deliverables For Phase 6
+### Immediate Deliverables For Phase 7
 
-- one grouped machine/instance view model for CLI display
-- updated fleet summary rendering
-- updated status rendering that can show mixed states per physical machine
-- one focused test module for machine grouping and display behavior
+- one operator flow for machine-only preparation or readiness actions
+- machine-scope status/state updates for empty registered machines
+- one focused test module for empty-machine operations
 
-### Exit Signal For Starting Phase 7
+### Exit Signal For Starting Phase 8
 
 Do not start empty-machine operations until all of the following are true:
 
-- the CLI can render empty machines and grouped expert-mode instances clearly
-- the operator can see machine topology mode and capacity context in the display
-- mixed states on one machine no longer look like separate unrelated hosts
-- grouped-display behavior is test covered
+- registered empty machines can be selected and prepared without inventing placeholder instances
+- machine-only operations update grouped views and machine state correctly
+- the machine-scope execution path is test covered
 
 ## Implementation Principles
 

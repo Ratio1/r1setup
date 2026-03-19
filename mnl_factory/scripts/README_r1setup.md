@@ -57,6 +57,7 @@ Notes:
 
 ### Information
 - Get node information
+- `Fleet Summary` and `Node Status & Info` now group instances by physical machine, so expert-mode multi-instance hosts and empty registered machines are shown explicitly while standard one-machine-one-node setups remain concise
 - Display/export node addresses
 
 ### Settings

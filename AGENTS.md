@@ -216,3 +216,9 @@ Minimum required critic topics when relevant:
   - one deploy operation should prepare each unique machine at most once, then apply instance runtime only to instances whose machine preparation succeeded
 
 - 2026-03-17T23:15:42+02:00 | Local pre-release repo testing now has a supported helper at `scripts/run_r1setup_repo_local.sh`. It runs the repo `r1setup` against a workspace synced from the local collection, can reuse the real `~/.ratio1/r1_setup` configs when explicitly requested, and defaults to `R1SETUP_NO_CLEAR=1` so menu transitions do not wipe terminal history during dev runs.
+
+- 2026-03-19T19:49:56+02:00 | Phase 6 visualization is implemented. The stable rule is:
+  - `Fleet Summary`, `Deployment Status`, and `Node Status & Info` should render grouped machine/instance views instead of a flat host list
+  - empty registered machines must remain visible in grouped views even when they have no assigned instance
+  - standard topology remains the default and should still read concisely as one machine with one instance
+  - expert topology should render multiple nested instances under one physical machine with per-instance runtime identity and status/version context

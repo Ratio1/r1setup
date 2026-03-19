@@ -308,3 +308,69 @@ Introduce generated per-operation inventories and split machine-level preparatio
 - `site.yml` remains in the repo as the legacy one-shot collection playbook, but the CLI deployment path now prefers the explicit machine-prep plus instance-apply sequence.
 - Generated execution inventories now carry resolved runtime/helper values even when the legacy stored inventory does not yet persist all of them explicitly.
 - Deployment can now continue on machines that prepared successfully even if another selected machine fails during the preparation phase.
+
+## Phase 6
+
+Completed At: `2026-03-19T19:49:56+02:00`
+
+### Goal
+
+Make machine and instance relationships visible in the CLI so empty machines, standard machines, and expert-mode multi-instance machines no longer appear as one flat unrelated host list.
+
+### Scope Completed
+
+- added grouped machine/instance view builders in `r1setup`
+- added grouped machine status summarization for:
+  - empty machines
+  - single-instance standard machines
+  - multi-instance expert machines
+  - mixed per-machine instance states
+- updated `Fleet Summary` to render grouped machine views with:
+  - topology mode
+  - deployment state
+  - machine specs
+  - nested instance runtime identities
+- updated `Node Status & Info` to render grouped machine views with:
+  - machine-level grouping
+  - nested instance statuses
+  - inline service-version health
+  - last-update and SSH-auth details per instance
+- updated `Deployment Status` to render grouped machine views instead of a flat host list
+- added focused modular test coverage for:
+  - grouped fleet view derivation
+  - standard-mode compatibility when service names contain numeric suffixes
+  - grouped display-line formatting
+
+### Files Changed
+
+- `mnl_factory/scripts/r1setup`
+- `mnl_factory/scripts/tests/test_machine_grouping.py`
+- `mnl_factory/scripts/tests/test_r1setup_core.py`
+- `mnl_factory/scripts/README_r1setup.md`
+- `docs/20260317_221254_multi_instance_migration_implementation_plan.md`
+- `docs/implementation_phase_log.md`
+- `AGENTS.md`
+
+### Verification Commands
+
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_machine_grouping`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_r1setup_core`
+- `cd mnl_factory/scripts && python3 -m unittest discover tests`
+- `cd mnl_factory/scripts && python3 -m py_compile r1setup`
+
+### Verification Results
+
+- `tests.test_machine_grouping`: passed
+- `tests.test_r1setup_core`: passed
+- `python3 -m unittest discover tests`: passed
+- `python3 -m py_compile r1setup`: passed
+
+### Notes
+
+- Standard mode remains concise and unchanged in behavior; the new grouping only changes how machine and instance relationships are rendered.
+- Empty registered machines are now visible in the main grouped fleet/status views instead of disappearing behind host-only rendering.
+- Acceptance criteria for the visualization phase are met:
+  - empty machines render clearly
+  - expert-mode machines render as grouped instances
+  - topology mode and capacity context are visible when known
+  - mixed states on one machine no longer look like unrelated separate hosts

@@ -1952,6 +1952,171 @@ class ConfigurationManager:
 
         return fleet_state
 
+    @staticmethod
+    def _get_group_view_status_info(status: str) -> Dict[str, str]:
+        """Return compact display information for instance/machine group status."""
+        status_map = {
+            'running': {'emoji': '🟢', 'color': 'green', 'label': 'Running'},
+            'stopped': {'emoji': '🔴', 'color': 'red', 'label': 'Stopped'},
+            'pending_restart': {'emoji': '🟡', 'color': 'yellow', 'label': 'Pending Restart'},
+            'unknown': {'emoji': '❓', 'color': 'white', 'label': 'Unknown'},
+            'deploying': {'emoji': '🔄', 'color': 'cyan', 'label': 'Deploying'},
+            'error': {'emoji': '❌', 'color': 'red', 'label': 'Error'},
+            'never_deployed': {'emoji': '⚪', 'color': 'white', 'label': 'Never Deployed'},
+            'deleted': {'emoji': '🗑️', 'color': 'red', 'label': 'Deleted'},
+            'unreachable': {'emoji': '🔌', 'color': 'red', 'label': 'Unreachable'},
+            'not_deployed': {'emoji': '📦', 'color': 'yellow', 'label': 'Not Deployed'},
+            'empty': {'emoji': '📭', 'color': 'yellow', 'label': 'No Instances'},
+            'mixed': {'emoji': '🟡', 'color': 'yellow', 'label': 'Mixed States'},
+        }
+        return dict(status_map.get(status, status_map['unknown']))
+
+    @classmethod
+    def _summarize_machine_group_status(cls, status_counts: Dict[str, int], instance_count: int) -> Dict[str, str]:
+        """Summarize a machine group into one operator-facing status."""
+        if instance_count <= 0:
+            return cls._get_group_view_status_info('empty')
+
+        non_zero_statuses = [status for status, count in status_counts.items() if count > 0]
+        if len(non_zero_statuses) == 1:
+            return cls._get_group_view_status_info(non_zero_statuses[0])
+
+        return cls._get_group_view_status_info('mixed')
+
+    @staticmethod
+    def _format_machine_connection_display(machine_data: Dict[str, Any]) -> str:
+        """Return a concise machine connection string for CLI display."""
+        host = str(machine_data.get('ansible_host') or 'unknown').strip()
+        user = str(machine_data.get('ansible_user') or 'root').strip()
+        port = str(machine_data.get('ansible_port') or 22).strip()
+        if port == '22':
+            return f"{user}@{host}"
+        return f"{user}@{host}:{port}"
+
+    @staticmethod
+    def _format_machine_specs_summary(machine_specs: Optional[Dict[str, Any]]) -> str:
+        """Return a concise machine-spec string or an empty string."""
+        specs = machine_specs or {}
+        cpu_total = specs.get('cpu_total')
+        memory_total = specs.get('memory_gb_total')
+        if cpu_total is None and memory_total is None:
+            return ''
+        return f"{cpu_total if cpu_total is not None else '?'} CPU / {memory_total if memory_total is not None else '?'} GB RAM"
+
+    def build_machine_group_views(
+        self,
+        inventory: Optional[Dict[str, Any]] = None,
+        fleet_state: Optional[Dict[str, Any]] = None,
+        node_status_data: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Build grouped machine/instance views for fleet-aware CLI rendering."""
+        inventory = inventory if inventory is not None else self.app.inventory
+        hosts = _get_gpu_hosts(inventory)
+        normalized_fleet = self._normalize_fleet_state(fleet_state if fleet_state is not None else self.get_fleet_state_copy())
+        machines = copy.deepcopy(normalized_fleet['fleet']['machines'])
+        instances = copy.deepcopy(normalized_fleet['fleet']['instances'])
+        live_status = dict(node_status_data or {})
+
+        for host_name, host_config in hosts.items():
+            machine_id = self._derive_machine_id(host_name, host_config)
+            machines.setdefault(machine_id, {
+                'machine_id': machine_id,
+                'ansible_host': host_config.get('ansible_host'),
+                'ansible_user': host_config.get('ansible_user', 'root'),
+                'ansible_port': host_config.get('ansible_port', 22),
+                'topology_mode': host_config.get('r1setup_topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE),
+                'deployment_state': host_config.get('r1setup_machine_deployment_state', DEFAULT_MACHINE_DEPLOYMENT_STATE),
+                'instance_names': [],
+            })
+            if host_name not in machines[machine_id].setdefault('instance_names', []):
+                machines[machine_id]['instance_names'].append(host_name)
+
+        machine_to_instances: Dict[str, List[str]] = {}
+        for machine_id, machine_data in machines.items():
+            machine_to_instances[machine_id] = list(machine_data.get('instance_names') or [])
+
+        for instance_name, instance_data in instances.items():
+            machine_id = instance_data.get('assigned_machine_id')
+            if not machine_id:
+                continue
+            machine_to_instances.setdefault(machine_id, [])
+            if instance_name not in machine_to_instances[machine_id]:
+                machine_to_instances[machine_id].append(instance_name)
+
+        machine_views = []
+        for machine_id in sorted(set(list(machines.keys()) + list(machine_to_instances.keys()))):
+            machine_data = dict(machines.get(machine_id, {}))
+            instance_names = sorted(set(machine_to_instances.get(machine_id, [])))
+            topology_mode = str(machine_data.get('topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE)
+            deployment_state = str(machine_data.get('deployment_state') or DEFAULT_MACHINE_DEPLOYMENT_STATE)
+            machine_specs = dict(machine_data.get('machine_specs') or {})
+
+            instance_views = []
+            status_counts: Dict[str, int] = {}
+
+            for instance_name in instance_names:
+                instance_data = dict(instances.get(instance_name, {}))
+                host_config = dict(hosts.get(instance_name, {}))
+                runtime = dict(instance_data.get('runtime') or self._build_runtime_snapshot(instance_name, host_config))
+                live_entry = dict(live_status.get(instance_name, {}))
+                host_service_file_version = self.get_host_service_file_version(host_config)
+                app_get_host_service_file_version = getattr(self.app, 'get_host_service_file_version', None)
+                if callable(app_get_host_service_file_version):
+                    host_service_file_version = str(app_get_host_service_file_version(host_config))
+
+                status = str(
+                    live_entry.get('status')
+                    or instance_data.get('status', {}).get('node_status')
+                    or host_config.get('node_status')
+                    or 'unknown'
+                )
+                status_info = self._get_group_view_status_info(status)
+                service_file_version = str(
+                    live_entry.get('service_file_version')
+                    or instance_data.get('status', {}).get('service_file_version')
+                    or host_service_file_version
+                )
+                status_counts[status] = status_counts.get(status, 0) + 1
+
+                instance_views.append({
+                    'instance_name': instance_name,
+                    'logical_name': str(instance_data.get('logical_name') or host_config.get('r1setup_instance_logical_name') or instance_name),
+                    'assigned_machine_id': machine_id,
+                    'runtime_name_policy': str(instance_data.get('runtime_name_policy') or host_config.get('r1setup_runtime_name_policy') or 'preserve'),
+                    'runtime': runtime,
+                    'status': status,
+                    'status_emoji': status_info['emoji'],
+                    'status_color': status_info['color'],
+                    'status_label': status_info['label'],
+                    'service_file_version': service_file_version,
+                    'last_update': host_config.get('last_status_update', ''),
+                    'ssh_auth_mode': str(host_config.get('r1setup_ssh_auth_mode') or 'unknown'),
+                    'ansible_host': host_config.get('ansible_host'),
+                    'ansible_user': host_config.get('ansible_user'),
+                    'ansible_port': host_config.get('ansible_port'),
+                })
+
+            group_status_info = self._summarize_machine_group_status(status_counts, len(instance_views))
+            machine_views.append({
+                'machine_id': machine_id,
+                'ansible_host': machine_data.get('ansible_host'),
+                'ansible_user': machine_data.get('ansible_user', 'root'),
+                'ansible_port': machine_data.get('ansible_port', 22),
+                'connection_display': self._format_machine_connection_display(machine_data),
+                'topology_mode': topology_mode,
+                'deployment_state': deployment_state,
+                'instance_count': len(instance_views),
+                'machine_specs': machine_specs,
+                'machine_specs_summary': self._format_machine_specs_summary(machine_specs),
+                'instances': instance_views,
+                'status_counts': status_counts,
+                'group_status': group_status_info['label'],
+                'group_status_color': group_status_info['color'],
+                'group_status_emoji': group_status_info['emoji'],
+            })
+
+        return machine_views
+
     @classmethod
     def build_execution_host_config(cls, host_name: str, host_config: Dict[str, Any]) -> Dict[str, Any]:
         """Return a host config enriched with resolved runtime/helper fields."""
@@ -4042,25 +4207,21 @@ class DeploymentService:
             self.app.print_colored("📋 Status: Never deployed", 'yellow')
 
         # Individual node status - check in real-time
-        self.app.print_section(f"Node Status Overview ({len(hosts)} nodes)")
+        self.app.print_section(f"Machine Status Overview")
         self.app.print_colored(f"🔍 Checking current status (max {self.app.connection_timeout}s timeout)...", 'cyan')
 
         # Get real-time status for each node
         real_time_status = self.app._get_real_time_node_status()
+        machine_views = self.app.build_machine_group_views(node_status_data=real_time_status)
 
         print()  # Add a blank line after the checking message
 
-        for host_name in hosts.keys():
-            if host_name in real_time_status:
-                status = real_time_status[host_name]['status']
-                result = real_time_status[host_name]['result']
-                emoji, color, description = self.app._get_status_display_info(status)
-
-                self.app.print_colored(f"  • {host_name}: {emoji} {description}", color, end='')
-                self.app.print_colored(f" (Current status)", 'white')
-            else:
-                self.app.print_colored(f"  • {host_name}: ❓ Unable to check", 'yellow', end='')
-                self.app.print_colored(f" (Current status)", 'white')
+        self.app.print_colored(
+            f"Machines: {len(machine_views)} | Instances: {len(hosts)}",
+            'white',
+        )
+        lines, _ = self.app._build_machine_group_display_lines(machine_views)
+        self.app._print_machine_group_display_lines(lines)
 
         self.app.wait_for_enter()
 
@@ -5322,6 +5483,24 @@ class R1Setup:
     def build_fleet_state(self, inventory=None):
         return self.config_manager.build_fleet_state(inventory)
 
+    def build_machine_group_views(self, inventory=None, fleet_state=None, node_status_data=None):
+        config_manager = getattr(self, 'config_manager', None)
+        if config_manager and hasattr(config_manager, 'build_machine_group_views'):
+            result = config_manager.build_machine_group_views(
+                inventory=inventory,
+                fleet_state=fleet_state,
+                node_status_data=node_status_data,
+            )
+            if isinstance(result, list):
+                return result
+
+        fallback_manager = ConfigurationManager(self)
+        return fallback_manager.build_machine_group_views(
+            inventory=inventory,
+            fleet_state=fleet_state,
+            node_status_data=node_status_data,
+        )
+
     def build_execution_inventory(self, host_names, dedupe_by_machine=False, inventory=None):
         return self.config_manager.build_execution_inventory(
             host_names,
@@ -5708,6 +5887,68 @@ class R1Setup:
                 return 'expert'
             self.print_colored("Invalid choice. Please enter 1 or 2", 'red')
 
+    def _build_machine_group_display_lines(
+        self,
+        machine_views: List[Dict[str, Any]],
+        *,
+        target_service_version: Optional[str] = None,
+        include_last_update: bool = False,
+    ) -> Tuple[List[Tuple[str, str]], List[str]]:
+        """Build CLI-ready grouped machine display lines."""
+        lines: List[Tuple[str, str]] = []
+        outdated_service_nodes: List[str] = []
+
+        for machine_view in machine_views:
+            header = (
+                f"  • {machine_view['machine_id']}: {machine_view['connection_display']} | "
+                f"mode={machine_view['topology_mode']} | state={machine_view['deployment_state']} | "
+                f"{machine_view['group_status_emoji']} {machine_view['group_status']}"
+            )
+            lines.append((header, machine_view['group_status_color']))
+
+            if machine_view.get('machine_specs_summary'):
+                lines.append((f"      specs: {machine_view['machine_specs_summary']}", 'cyan'))
+
+            if not machine_view['instances']:
+                lines.append(("      no assigned instances in this config", 'yellow'))
+                continue
+
+            for instance_view in machine_view['instances']:
+                runtime = instance_view.get('runtime') or {}
+                instance_line = (
+                    f"      - {instance_view['status_emoji']} {instance_view['instance_name']} "
+                    f"[{instance_view['status_label'].upper()}] "
+                    f"service={runtime.get('service_name', '?')} "
+                    f"container={runtime.get('container_name', '?')}"
+                )
+
+                if target_service_version:
+                    applied_service_version = instance_view.get('service_file_version') or DEFAULT_SERVICE_FILE_VERSION
+                    if applied_service_version != target_service_version:
+                        outdated_service_nodes.append(instance_view['instance_name'])
+                        version_state = 'UPDATE'
+                    else:
+                        version_state = 'OK'
+                    instance_line += (
+                        f" | service {applied_service_version} / target {target_service_version} [{version_state}]"
+                    )
+
+                lines.append((instance_line, instance_view['status_color']))
+
+                if include_last_update:
+                    last_update_text = self._format_timestamp_ago(instance_view.get('last_update', ''))
+                    lines.append((
+                        f"          last update {last_update_text} | ssh auth {instance_view.get('ssh_auth_mode', 'unknown')}",
+                        'white',
+                    ))
+
+        return lines, sorted(set(outdated_service_nodes))
+
+    def _print_machine_group_display_lines(self, lines: List[Tuple[str, str]]) -> None:
+        """Print grouped machine display lines."""
+        for text, color in lines:
+            self.print_colored(text, color)
+
     @staticmethod
     def _extract_machine_access_config(host_config: Dict[str, Any]) -> Dict[str, Any]:
         """Extract machine-level SSH access fields from a node-style config dict."""
@@ -5874,40 +6115,16 @@ class R1Setup:
         self.load_configuration()
         fleet_state = self.get_fleet_state_copy()
         machines = fleet_state['fleet']['machines']
-        instances = fleet_state['fleet']['instances']
 
         if not machines:
             self.print_colored("No machines registered yet.", 'yellow')
             self.wait_for_enter()
             return
 
-        self.print_section(f"Machines ({len(machines)})")
-        for machine_id in sorted(machines.keys()):
-            machine = machines[machine_id]
-            host = machine.get('ansible_host', 'unknown')
-            user = machine.get('ansible_user', 'unknown')
-            topology = machine.get('topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE)
-            deployment_state = machine.get('deployment_state', DEFAULT_MACHINE_DEPLOYMENT_STATE)
-            instance_names = machine.get('instance_names', [])
-            self.print_colored(
-                f"  • {machine_id}: {user}@{host} | mode={topology} | state={deployment_state} | instances={len(instance_names)}",
-                'white',
-            )
-            machine_specs = machine.get('machine_specs') or {}
-            if machine_specs:
-                self.print_colored(
-                    f"      specs: {machine_specs.get('cpu_total', '?')} CPU / {machine_specs.get('memory_gb_total', '?')} GB RAM",
-                    'cyan',
-                )
-            if instance_names:
-                for instance_name in instance_names:
-                    instance = instances.get(instance_name, {})
-                    status = instance.get('status', {}).get('node_status', 'unknown')
-                    runtime = instance.get('runtime', {})
-                    self.print_colored(
-                        f"      - {instance_name} [{status}] service={runtime.get('service_name', '?')} container={runtime.get('container_name', '?')}",
-                        'white',
-                    )
+        machine_views = self.build_machine_group_views(fleet_state=fleet_state)
+        self.print_section(f"Machines ({len(machine_views)})")
+        lines, _ = self._build_machine_group_display_lines(machine_views)
+        self._print_machine_group_display_lines(lines)
 
         self.wait_for_enter()
 
@@ -9200,7 +9417,7 @@ class R1Setup:
         self.print_colored(f"🌐 {env_text} │ 🐳 {len(hosts)} containers", env_color, bold=True)
         print()
         target_service_version = self.get_mnl_service_version()
-        outdated_service_nodes = []
+        machine_views = self.build_machine_group_views(node_status_data=node_status_data)
 
         # Count status
         running = sum(1 for data in node_status_data.values() if data['status'] == 'running')
@@ -9237,92 +9454,13 @@ class R1Setup:
         self.print_colored("└" + "─" * 68 + "┘", 'cyan')
         print()
 
-        # Container list
-        self.print_colored("┌─ Containers " + "─" * 55 + "┐", 'cyan')
-        
-        for i, (name, config) in enumerate(hosts.items()):
-            ip = config.get('ansible_host', 'Unknown')
-            user = config.get('ansible_user', 'Unknown')
-            status_data = node_status_data[name]
-            status = status_data['status']
-            last_update = self._get_node_status_info(name).get('last_update', '')
-            last_update_text = self._format_timestamp_ago(last_update)
-            auth_mode = config.get('r1setup_ssh_auth_mode', 'unknown')
-            
-            # Status display
-            if status == 'running':
-                status_icon = "🟢"
-                status_text = "RUNNING"
-                status_color = 'green'
-            elif status == 'stopped':
-                status_icon = "🔴"
-                status_text = "STOPPED"
-                status_color = 'red'
-            elif status == 'not_deployed':
-                status_icon = "📦"
-                status_text = "NOT DEPLOYED"
-                status_color = 'yellow'
-            elif status == 'unreachable':
-                status_icon = "🔌"
-                status_text = "UNREACHABLE"
-                status_color = 'red'
-            else:
-                status_icon = "❓"
-                status_text = "UNKNOWN"
-                status_color = 'yellow'
-            
-            # Node name line
-            self.print_colored("│", 'cyan', end='')
-            self.print_colored(f" {status_icon} {name}", status_color, bold=True, end='')
-            self.print_colored(f" [{status_text}]", status_color, end='')
-            
-            # Calculate padding for node name line
-            line_text = f" {status_icon} {name} [{status_text}]"
-            padding = 67 - len(line_text)
-            self.print_colored(" " * padding + "│", 'cyan')
-            
-            # Connection info
-            self.print_colored("│", 'cyan', end='')
-            self.print_colored(f"   📡 {user}@{ip}", 'white', end='')
-            
-            display_text = f"   📡 {user}@{ip}"
-            padding = 67 - len(display_text)
-            self.print_colored(" " * padding + "│", 'cyan')
-
-            applied_service_version = self.get_host_service_file_version(config)
-            if applied_service_version != target_service_version:
-                outdated_service_nodes.append(name)
-                version_color = 'red'
-                version_state = 'UPDATE'
-            else:
-                version_color = 'green'
-                version_state = 'OK'
-
-            self.print_colored("│", 'cyan', end='')
-            self.print_colored(
-                f"   🧩 service {applied_service_version} / target {target_service_version} [{version_state}]",
-                version_color,
-                end=''
-            )
-            version_text = f"   🧩 service {applied_service_version} / target {target_service_version} [{version_state}]"
-            padding = 67 - len(version_text)
-            self.print_colored(" " * max(padding, 0) + "│", 'cyan')
-
-            self.print_colored("│", 'cyan', end='')
-            self.print_colored(
-                f"   🕒 last update {last_update_text} | ssh auth {auth_mode}",
-                'white',
-                end=''
-            )
-            detail_text = f"   🕒 last update {last_update_text} | ssh auth {auth_mode}"
-            padding = 67 - len(detail_text)
-            self.print_colored(" " * max(padding, 0) + "│", 'cyan')
-            
-            # Add separator between nodes (except last)
-            if i < len(hosts) - 1:
-                self.print_colored("├" + "─" * 68 + "┤", 'cyan')
-        
-        self.print_colored("└" + "─" * 68 + "┘", 'cyan')
+        self.print_section(f"Machine Groups ({len(machine_views)} machines / {len(hosts)} instances)")
+        grouped_lines, outdated_service_nodes = self._build_machine_group_display_lines(
+            machine_views,
+            target_service_version=target_service_version,
+            include_last_update=True,
+        )
+        self._print_machine_group_display_lines(grouped_lines)
         print()
 
         if outdated_service_nodes:
