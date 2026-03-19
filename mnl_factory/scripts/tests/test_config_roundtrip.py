@@ -325,3 +325,55 @@ class TestConfigurationSchemaMetadata(unittest.TestCase):
             host["mnl_r1setup_metadata_host_path"],
             "/var/cache/edge_node_node_2/_local_cache/_data/r1setup/metadata.json",
         )
+
+    def test_merge_fleet_state_prunes_instances_missing_from_inventory(self):
+        inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                                "r1setup_machine_id": "machine-a",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        persisted_fleet = {
+            "config_schema_version": r1setup.CONFIG_SCHEMA_VERSION,
+            "fleet": {
+                "machines": {
+                    "machine-a": {
+                        "machine_id": "machine-a",
+                        "ansible_host": "10.0.0.1",
+                        "ansible_user": "root",
+                        "ansible_port": 22,
+                        "topology_mode": "expert",
+                        "deployment_state": "active",
+                        "instance_names": ["node-1", "node-2"],
+                    }
+                },
+                "instances": {
+                    "node-1": {
+                        "assigned_machine_id": "machine-a",
+                    },
+                    "node-2": {
+                        "assigned_machine_id": "machine-a",
+                        "runtime": {
+                            "service_name": "edge_node_node_2",
+                        },
+                    },
+                },
+            },
+        }
+
+        merged = self.cm._merge_fleet_state(persisted_fleet, inventory)
+
+        self.assertEqual(sorted(merged["fleet"]["instances"].keys()), ["node-1"])
+        self.assertEqual(
+            merged["fleet"]["machines"]["machine-a"]["instance_names"],
+            ["node-1"],
+        )

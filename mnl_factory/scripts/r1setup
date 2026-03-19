@@ -1516,7 +1516,7 @@ class ConfigurationManager:
 
         merged = self._default_fleet_state()
         merged['fleet']['machines'] = copy.deepcopy(normalized['fleet']['machines'])
-        merged['fleet']['instances'] = copy.deepcopy(normalized['fleet']['instances'])
+        merged['fleet']['instances'] = {}
 
         for machine_id, machine_data in derived['fleet']['machines'].items():
             persisted_machine = merged['fleet']['machines'].get(machine_id, {})
@@ -1536,7 +1536,7 @@ class ConfigurationManager:
             merged['fleet']['machines'][machine_id] = merged_machine
 
         for instance_name, instance_data in derived['fleet']['instances'].items():
-            persisted_instance = merged['fleet']['instances'].get(instance_name, {})
+            persisted_instance = normalized['fleet']['instances'].get(instance_name, {})
             merged_instance = dict(persisted_instance)
             merged_instance.update(instance_data)
             merged['fleet']['instances'][instance_name] = merged_instance
@@ -1562,6 +1562,80 @@ class ConfigurationManager:
             machine['instance_names'] = sorted(machine.get('instance_names', []))
 
         return self._canonicalize_fleet_machine_records(merged)
+
+    def prepare_host_for_persistence(
+        self,
+        host_name: str,
+        host_config: Dict[str, Any],
+        *,
+        previous_host_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Prepare a host config for save after add/edit flows."""
+        prepared_host = dict(host_config or {})
+        previous_host = dict(previous_host_config or {})
+
+        preserved_fields = (
+            'r1setup_machine_id',
+            'r1setup_topology_mode',
+            'r1setup_machine_deployment_state',
+            'r1setup_runtime_name_policy',
+            'edge_node_service_name',
+            'mnl_docker_container_name',
+            'mnl_docker_volume_path',
+            'mnl_r1setup_metadata_host_path',
+            'r1setup_runtime_exit_status_path',
+            'r1setup_cpu_limit_cores',
+            'r1setup_memory_limit_gb',
+        )
+        for field in preserved_fields:
+            if field not in prepared_host and field in previous_host:
+                prepared_host[field] = previous_host.get(field)
+
+        prepared_host = self.bind_host_to_existing_machine(host_name, prepared_host)
+
+        if not prepared_host.get('r1setup_machine_id') and previous_host.get('r1setup_machine_id'):
+            prepared_host['r1setup_machine_id'] = previous_host.get('r1setup_machine_id')
+            prepared_host['r1setup_topology_mode'] = previous_host.get(
+                'r1setup_topology_mode',
+                DEFAULT_MACHINE_TOPOLOGY_MODE,
+            )
+            if previous_host.get('r1setup_machine_deployment_state'):
+                prepared_host['r1setup_machine_deployment_state'] = previous_host.get(
+                    'r1setup_machine_deployment_state'
+                )
+            if previous_host.get('r1setup_runtime_name_policy'):
+                prepared_host['r1setup_runtime_name_policy'] = previous_host.get(
+                    'r1setup_runtime_name_policy'
+                )
+
+        prepared_host['r1setup_instance_logical_name'] = host_name
+        self.apply_runtime_snapshot_to_host_config(host_name, prepared_host)
+        return prepared_host
+
+    def remove_instance_from_fleet_state(self, instance_name: str) -> Dict[str, Any]:
+        """Remove one instance from in-memory fleet state while retaining the machine record."""
+        fleet_state = self._normalize_fleet_state(self.get_fleet_state_copy())
+        machines = fleet_state['fleet']['machines']
+        instances = fleet_state['fleet']['instances']
+
+        instance_record = dict(instances.pop(instance_name, {}))
+        machine_id = str(instance_record.get('assigned_machine_id') or '').strip()
+        machine_record = dict(machines.get(machine_id, {}))
+
+        remaining_instances: List[str] = []
+        if machine_record:
+            remaining_instances = [name for name in machine_record.get('instance_names', []) if name != instance_name]
+            machine_record['instance_names'] = sorted(remaining_instances)
+            if not remaining_instances and machine_record.get('deployment_state') == 'active':
+                machine_record['deployment_state'] = 'prepared'
+            machines[machine_id] = machine_record
+
+        self.fleet_state = fleet_state
+        return {
+            'machine_id': machine_id,
+            'remaining_instance_names': sorted(remaining_instances),
+            'machine_retained': bool(machine_record),
+        }
 
     def get_fleet_state_copy(self) -> Dict[str, Any]:
         """Return a deep copy of the current fleet state."""
@@ -1731,10 +1805,7 @@ class ConfigurationManager:
             if not inventory_to_save['all']['vars']:
                 inventory_to_save['all'].pop('vars', None)
 
-        with open(config_path, 'w') as f:
-            yaml.safe_dump(inventory_to_save, f, default_flow_style=False)
-
-        os.chmod(config_path, 0o600)
+        inventory_yaml = yaml.safe_dump(inventory_to_save, default_flow_style=False)
 
         # Load existing metadata if it exists, otherwise create new
         if metadata_path.exists():
@@ -1777,9 +1848,10 @@ class ConfigurationManager:
         metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
         metadata['fleet_state'] = self._merge_fleet_state(self.fleet_state or metadata.get('fleet_state'), self.app.inventory)
 
+        metadata_json = json.dumps(metadata, indent=2)
 
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
+        self._atomic_write_text(config_path, inventory_yaml, mode=0o600)
+        self._atomic_write_text(metadata_path, metadata_json, mode=0o600)
 
         # Update active config
         self.active_config.update(metadata)
@@ -1789,6 +1861,30 @@ class ConfigurationManager:
         # Create/update symlink to active configuration only if requested
         if update_symlink:
             self._update_hosts_symlink(config_path)
+
+    @staticmethod
+    def _atomic_write_text(path: Path, content: str, *, mode: Optional[int] = None) -> None:
+        """Atomically replace a text file after fully writing it to a temp file."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                'w',
+                encoding='utf-8',
+                dir=path.parent,
+                delete=False,
+            ) as temp_file:
+                temp_file.write(content)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+                temp_path = Path(temp_file.name)
+
+            if mode is not None:
+                os.chmod(temp_path, mode)
+            os.replace(temp_path, path)
+        finally:
+            if temp_path and temp_path.exists():
+                temp_path.unlink(missing_ok=True)
 
     def _update_hosts_symlink(self, config_path: Path) -> None:
         """Update the hosts.yml symlink to point to the active configuration"""
@@ -10166,6 +10262,11 @@ class R1Setup:
         # Update node configuration
         existing_config = hosts[original_name].copy()
         updated_config = self._configure_single_node(existing_config)
+        updated_config = self.config_manager.prepare_host_for_persistence(
+            new_name,
+            updated_config,
+            previous_host_config=existing_config,
+        )
 
         # Handle name change
         name_changed = new_name != original_name
@@ -10219,10 +10320,27 @@ class R1Setup:
             except ValueError:
                 self.print_colored("Please enter a number", 'red')
 
-        ip = hosts[name].get('ansible_host', 'Unknown')
-        user = hosts[name].get('ansible_user', 'Unknown')
-        if self.get_input(f"Delete node '{name}' ({user}@{ip})? (y/n)", "n").lower() == 'y':
+        node_config = hosts[name]
+        ip = node_config.get('ansible_host', 'Unknown')
+        user = node_config.get('ansible_user', 'Unknown')
+        fleet_state = self.config_manager._normalize_fleet_state(self.config_manager.get_fleet_state_copy())
+        machine_id = str(node_config.get('r1setup_machine_id') or self.config_manager._derive_machine_id(name, node_config)).strip()
+        machine_record = dict(fleet_state.get('fleet', {}).get('machines', {}).get(machine_id, {}))
+        remaining_instances = [instance for instance in machine_record.get('instance_names', []) if instance != name]
+
+        if remaining_instances:
+            confirmation_prompt = (
+                f"Delete node '{name}' ({user}@{ip})? Remaining on this machine: {', '.join(sorted(remaining_instances))} (y/n)"
+            )
+        else:
+            confirmation_prompt = (
+                f"Delete node '{name}' ({user}@{ip})? This is the last instance on machine '{machine_id}'. "
+                "The machine will remain registered as prepared. (y/n)"
+            )
+
+        if self.get_input(confirmation_prompt, "n").lower() == 'y':
             del hosts[name]
+            self.config_manager.remove_instance_from_fleet_state(name)
             self._save_configuration()
             self.print_colored(f"Node '{name}' deleted successfully!", 'green')
 

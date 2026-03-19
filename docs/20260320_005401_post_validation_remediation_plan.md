@@ -699,6 +699,39 @@ Result:
 - generated YAML inventory is no longer left with missing runtime fields after same-machine add
 - existing standard instances retain their original runtime names when a machine is promoted to expert topology
 
+### Phase 4
+
+Status:
+
+- completed
+
+Implemented:
+
+- fleet-state merge now prunes stale instance records that no longer exist in inventory while retaining empty machine records
+- new host-preparation helper preserves machine binding, topology, resource, and runtime metadata across edit flows before save
+- delete flow now updates in-memory fleet state before save and keeps last-instance machines as prepared instead of silently leaving stale active metadata
+- configuration and metadata writes now use atomic temp-file replacement instead of direct in-place writes
+
+Files changed:
+
+- [r1setup](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- [test_config_roundtrip.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_config_roundtrip.py)
+- [test_instance_operations.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_instance_operations.py)
+
+Verification:
+
+- `python3 -m unittest tests.test_config_roundtrip tests.test_instance_operations`
+- `python3 -m unittest tests.test_r1setup_core tests.test_machine_grouping tests.test_inventory_builder tests.test_fleet_model`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Result:
+
+- all verification commands passed
+- delete operations now remove instances from both YAML and persisted fleet metadata
+- last-instance deletion keeps the machine record and marks it prepared instead of leaving stale active state
+- edit flows no longer drop shared-machine identity or runtime fields during persistence
+
 ## Phase 9: Real-Host Revalidation
 
 ### Objective
