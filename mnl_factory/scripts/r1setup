@@ -906,6 +906,11 @@ except Exception:
 
     def _auto_update_check(self) -> None:
         """Automatically check for and install updates on startup"""
+        if str(os.environ.get("R1SETUP_SKIP_AUTO_UPDATE", "")).strip() == "1":
+            if DEBUG:
+                self.app.print_debug("Skipping auto-update check because R1SETUP_SKIP_AUTO_UPDATE=1")
+            return
+
         print("  Checking for updates...", end='\r')
 
         # Check CLI version

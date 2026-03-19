@@ -35,7 +35,9 @@ bash /home/vi/work/ratio1/repos/multi_node_launcher/scripts/run_r1setup_repo_loc
 
 Notes:
 - By default, the helper keeps terminal output visible and does not clear the screen between menus.
+- By default, the helper also skips startup auto-update checks so local repo testing does not wipe the synced dev collection when offline.
 - Set `R1SETUP_NO_CLEAR=0` if you want the old clear-screen behavior during a dev run.
+- Set `R1SETUP_SKIP_AUTO_UPDATE=0` if you explicitly want startup auto-update behavior during a dev run.
 - `--use-real-configs` means changes to active config selection and saved configs will affect your real `~/.ratio1/r1_setup`.
 - Run `bash /home/vi/work/ratio1/repos/multi_node_launcher/scripts/run_r1setup_repo_local.sh --help` for all options.
 

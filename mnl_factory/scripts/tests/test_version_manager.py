@@ -2,8 +2,26 @@
 """Tests for VersionManager behavior."""
 
 import unittest
+from unittest.mock import MagicMock, patch
 
 from tests.support import r1setup
+
+
+class TestAutoUpdateCheck(unittest.TestCase):
+    """Tests for VersionManager._auto_update_check()."""
+
+    def test_skip_auto_update_via_environment(self):
+        app = MagicMock()
+        manager = r1setup.VersionManager(app)
+        manager._check_latest_version = MagicMock()
+        manager._check_ansible_collection_version = MagicMock()
+
+        with patch.dict("os.environ", {"R1SETUP_SKIP_AUTO_UPDATE": "1"}, clear=False):
+            manager._auto_update_check()
+
+        manager._check_latest_version.assert_not_called()
+        manager._check_ansible_collection_version.assert_not_called()
+
 
 
 class TestCompareVersions(unittest.TestCase):

@@ -20,6 +20,7 @@ Environment overrides:
   - dev
   - real
   - /absolute/path/to/r1_setup
+- R1SETUP_SKIP_AUTO_UPDATE: set to 0 to restore startup auto-update checks
 - R1SETUP_NO_CLEAR: set to 0 to restore screen clearing behavior
 
 Options:
@@ -204,6 +205,7 @@ echo "Dev HOME            : $DEV_HOME"
 echo "Dev collection      : $DEV_COLLECTION"
 echo "Config source       : $CONFIG_SOURCE_DIR"
 echo "Python              : $PYTHON_BIN"
+echo "Skip auto-update    : ${R1SETUP_SKIP_AUTO_UPDATE:-1}"
 echo "No-clear mode       : ${R1SETUP_NO_CLEAR:-1}"
 echo
 echo "This uses an isolated dev HOME and a workspace synced from the local repo."
@@ -216,6 +218,7 @@ echo
 
 export HOME="$DEV_HOME"
 export R1SETUP_NO_VENV=1
+export R1SETUP_SKIP_AUTO_UPDATE="${R1SETUP_SKIP_AUTO_UPDATE:-1}"
 export R1SETUP_NO_CLEAR="${R1SETUP_NO_CLEAR:-1}"
 
 exec "$PYTHON_BIN" "$REPO_R1SETUP" "${PASSTHROUGH_ARGS[@]}"
