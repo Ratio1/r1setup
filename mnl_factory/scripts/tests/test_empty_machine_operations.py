@@ -91,6 +91,7 @@ class TestPrepareRegisteredMachines(unittest.TestCase):
             service.prepare_registered_machines(skip_gpu=False)
 
             self.assertEqual(app.run_registered_machine_playbook.call_count, 1)
+            self.assertEqual(app.run_registered_machine_playbook.call_args.kwargs["timeout"], 600)
             self.assertEqual(app.upsert_machine_record.call_count, 2)
             app.upsert_machine_record.assert_any_call("machine-a", {
                 "machine_id": "machine-a",

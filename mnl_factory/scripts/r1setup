@@ -4371,6 +4371,19 @@ class DeploymentService:
     def __init__(self, app):
         self.app = app
 
+    @staticmethod
+    def _phase_timeout(base_timeout: int, minimum_timeout: int) -> int:
+        """Return a safe timeout floor for longer-running operations."""
+        return max(int(base_timeout), int(minimum_timeout))
+
+    def _machine_preparation_timeout(self) -> int:
+        """Timeout for fresh-machine preparation phases."""
+        return self._phase_timeout(self.app.connection_timeout, 600)
+
+    def _instance_apply_timeout(self) -> int:
+        """Timeout for instance runtime apply/start phases."""
+        return self._phase_timeout(self.app.connection_timeout, 180)
+
     def _extract_successful_hosts_from_output(
         self,
         output: str,
@@ -4478,6 +4491,11 @@ class DeploymentService:
         if not skip_gpu:
             self.app.print_colored("   • Install NVIDIA drivers and CUDA prerequisites when applicable", 'yellow')
         self.app.print_colored("   • Not deploy or start any Edge Node instance", 'yellow')
+        prep_timeout = self._machine_preparation_timeout()
+        self.app.print_colored(
+            f"\nℹ️  First-time machine preparation can take several minutes. Timeout for this phase: {prep_timeout}s (base setting: {self.app.connection_timeout}s).",
+            'cyan',
+        )
 
         if self.app.get_input(
             f"\n🚀 Continue with preparation for {len(selected_machine_ids)} registered machine(s)? (y/n)",
@@ -4498,7 +4516,7 @@ class DeploymentService:
             selected_machine_ids,
             extra_vars=extra_vars,
             show_output=True,
-            timeout=self.app.connection_timeout,
+            timeout=prep_timeout,
             fleet_state=self.app.get_fleet_state_copy(),
         )
 
@@ -4787,8 +4805,14 @@ class DeploymentService:
 
         machine_groups = self.app.group_host_names_by_machine(selected_host_names)
         machine_host_names = [detail['representative_host'] for detail in machine_groups.values()]
+        machine_prepare_timeout = self._machine_preparation_timeout()
+        instance_apply_timeout = self._instance_apply_timeout()
         self.app.print_colored(
             f"\nPreparing {len(machine_host_names)} machine(s) for {len(selected_host_names)} selected instance(s)...",
+            'cyan',
+        )
+        self.app.print_colored(
+            f"Fresh-machine preparation can take several minutes. Timeout for machine preparation: {machine_prepare_timeout}s (base setting: {self.app.connection_timeout}s).",
             'cyan',
         )
 
@@ -4799,7 +4823,7 @@ class DeploymentService:
             extra_vars=extra_vars,
             last_applied_action=f"{last_applied_action}_machine_prepare",
             show_output=True,
-            timeout=self.app.connection_timeout,
+            timeout=machine_prepare_timeout,
         )
         successful_machine_hosts = self._extract_successful_hosts_from_output(machine_output, executed_machine_hosts)
         successful_machine_ids = {
@@ -4834,6 +4858,10 @@ class DeploymentService:
             f"\nApplying instance runtime on {len(deployable_host_names)} selected node(s)...",
             'cyan',
         )
+        self.app.print_colored(
+            f"Instance apply and startup can take longer than a status check. Timeout for this phase: {instance_apply_timeout}s (base setting: {self.app.connection_timeout}s).",
+            'cyan',
+        )
         success, instance_output, _, _ = self.app.run_generated_playbook(
             instance_apply_path,
             deployable_host_names,
@@ -4841,7 +4869,7 @@ class DeploymentService:
             extra_vars=extra_vars,
             last_applied_action=last_applied_action,
             show_output=True,
-            timeout=self.app.connection_timeout,
+            timeout=instance_apply_timeout,
         )
         successful_instance_hosts = self._extract_successful_hosts_from_output(instance_output, deployable_host_names)
         failed_instance_hosts = [host_name for host_name in deployable_host_names if host_name not in successful_instance_hosts]
@@ -5753,11 +5781,16 @@ class MigrationPlanner:
         if not plan.get('preflight', {}).get('requires_target_preparation'):
             return {'status': 'success', 'prepared': False}
         playbook_path = self.app.config_dir / 'playbooks/prepare_machine.yml'
+        prep_timeout = DeploymentService._phase_timeout(self.app.connection_timeout, 600)
+        self.app.print_colored(
+            f"Target machine preparation can take several minutes. Timeout for this phase: {prep_timeout}s (base setting: {self.app.connection_timeout}s).",
+            'cyan',
+        )
         success, output, executed_hosts, execution_inventory = self.app.run_registered_machine_playbook(
             playbook_path,
             [plan['target_machine_id']],
             show_output=True,
-            timeout=self.app.connection_timeout,
+            timeout=prep_timeout,
             fleet_state=self.app.get_fleet_state_copy(),
         )
         successful_hosts = DeploymentService(self.app)._extract_successful_hosts_from_output(output, executed_hosts)

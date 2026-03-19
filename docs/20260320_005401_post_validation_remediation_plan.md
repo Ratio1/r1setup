@@ -803,6 +803,41 @@ Result:
 - migration progress is now operator-visible phase by phase
 - explicit app-probe failures now stop the migration instead of being silently reported as generic success
 
+### Phase 7
+
+Status:
+
+- completed
+
+Implemented:
+
+- added phase-specific timeout floors instead of reusing the base connection timeout for every long-running action
+- registered-machine preparation now uses a 600s floor and tells the user that fresh-machine prep can take several minutes
+- deploy machine-preparation now uses a 600s floor and instance apply/start now uses a 180s floor
+- migration target preparation now also uses the longer preparation timeout guidance
+- operator-facing preambles now show both:
+  - the phase timeout in effect
+  - the base configured timeout
+
+Files changed:
+
+- [r1setup](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- [test_empty_machine_operations.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_empty_machine_operations.py)
+- [test_r1setup_core.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_r1setup_core.py)
+
+Verification:
+
+- `python3 -m unittest tests.test_empty_machine_operations tests.test_r1setup_core tests.test_migration_execution tests.test_version_manager`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Result:
+
+- all verification commands passed
+- first-run preparation/deploy phases no longer inherit the too-short 30s base timeout
+- operators now get explicit timeout guidance before the long-running phases start
+- read-only and short operations still keep the smaller base timeout semantics
+
 ## Phase 9: Real-Host Revalidation
 
 ### Objective

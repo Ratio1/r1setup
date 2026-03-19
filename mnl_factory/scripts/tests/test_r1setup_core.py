@@ -276,6 +276,8 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
             update_metadata.assert_called_once_with("full")
             app.record_service_file_version.assert_called_once_with(["node-1"])
             self.assertEqual(app.run_generated_playbook.call_count, 2)
+            self.assertEqual(app.run_generated_playbook.call_args_list[0].kwargs["timeout"], 600)
+            self.assertEqual(app.run_generated_playbook.call_args_list[1].kwargs["timeout"], 180)
 
 
 class TestAddNodeExpertModeFlow(unittest.TestCase):
