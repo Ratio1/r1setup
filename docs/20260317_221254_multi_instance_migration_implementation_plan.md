@@ -27,55 +27,23 @@ Completed:
 - Phase 7: empty-machine operations
 - Phase 8: migration planning framework
 - Phase 9: migration execution
-
-Not Started:
-
 - Phase 10: rollback and finalization
 
 ## Recommended Next Step
 
-The next best step is Phase 10: rollback and finalization.
+The core multi-instance and migration implementation phases are complete.
+
+Recommended follow-up work:
+
+1. real-host migration testing on representative machines
+2. discovery/import of existing remote services into selected configs
+3. resumable-operation polish and richer operator status surfaces if needed
 
 Reasoning:
 
-- migration execution now prepares the target, stops the source, transfers through the controller temp folder, and finalizes assignment only after target verification
-- the remaining safety gap is explicit rollback/finalization behavior after partial or successful execution
-- source cleanup and rollback affordances should remain separate from the initial execution path
-
-Practical goal for the next implementation slice:
-
-- keep source runtime/data recoverable after failed or partially completed execution
-- make rollback and operator-visible finalize/cleanup explicit
-- clean temporary controller artifacts only after finalize or rollback
-
-### Immediate Phase 10 Breakdown
-
-The next coding slice should be executed in this order:
-
-1. persist resumable migration execution state after each step
-2. add rollback support for failed execution after source stop or transfer
-3. add explicit finalize/cleanup support after successful execution
-4. clean local temp artifacts only during explicit rollback/finalize
-5. add focused modular tests for rollback and cleanup guards
-6. after the phase is complete:
-   - update `docs/implementation_phase_log.md`
-   - run targeted tests plus broad CLI regression
-   - create a dedicated phase commit before moving on
-
-### Immediate Deliverables For Phase 10
-
-- one rollback/finalization workflow driven by the saved execution state
-- explicit operator-facing cleanup controls
-- one focused test module for rollback/finalization safeguards
-
-### Exit Signal For Completing Phase 10
-
-Do not mark rollback/finalization complete until all of the following are true:
-
-- failed migrations can be rolled back without reconstructing instance state manually
-- source cleanup stays explicit and deferred until after successful verification
-- controller-temp artifacts are cleaned only during explicit finalize or rollback
-- rollback/finalization behavior is test covered
+- the backend and CLI flows for registration, grouped views, planning, execution, rollback, and finalization are now in place
+- the next highest-value work is validating the migration flow on real machines and extending adoption paths for already-running services
+- discovery/import already has a dedicated planning note in `docs/20260317_235148_discovery_import_existing_nodes_todo.md`
 
 ## Implementation Principles
 

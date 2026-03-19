@@ -137,6 +137,7 @@ class TestMigrationExecution(unittest.TestCase):
             finalize_kwargs = app.finalize_instance_migration.call_args.kwargs
             self.assertEqual(finalize_kwargs["runtime_name_policy"], "preserve")
             self.assertEqual(finalize_kwargs["migration_plan_state"]["status"], "executed")
+            self.assertEqual(finalize_kwargs["migration_plan_state"]["last_step"], "target_verified")
             app.record_service_file_version.assert_called_once_with(["node-1"])
             self.assertEqual(
                 [call.args for call in app._update_node_status.call_args_list],
@@ -174,7 +175,7 @@ class TestMigrationExecution(unittest.TestCase):
                 [call.args for call in app._update_node_status.call_args_list],
                 [("node-1", "stopped")],
             )
-            self.assertEqual(app.set_migration_plan_state.call_count, 2)
+            self.assertGreaterEqual(app.set_migration_plan_state.call_count, 4)
             self.assertEqual(app.set_migration_plan_state.call_args_list[0].args[0]["status"], "executing")
-            self.assertEqual(app.set_migration_plan_state.call_args_list[1].args[0]["status"], "failed")
-
+            self.assertEqual(app.set_migration_plan_state.call_args_list[-1].args[0]["status"], "failed")
+            self.assertEqual(app.set_migration_plan_state.call_args_list[-1].args[0]["last_step"], "source_archived")

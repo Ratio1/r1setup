@@ -240,3 +240,9 @@ Minimum required critic topics when relevant:
   - target preparation must happen before data transfer when the saved plan requires it
   - the source runtime must be stopped before source archiving, and assignment must not be finalized until target verification succeeds
   - migration execution results must be recorded in the local operation log, and source cleanup/rollback remain separate Phase 10 concerns
+
+- 2026-03-19T22:55:35+02:00 | Phase 10 rollback/finalization is implemented. The stable rule is:
+  - failed or interrupted migrations are recovered through `Rollback Migration`, which must keep the source assignment authoritative and restart the source runtime after conservative target cleanup
+  - verified migrations are cleaned up through `Finalize Migration`, which must keep source cleanup explicit and optionally remove source volume data only after the operator confirms
+  - saved `migration_plan_state` now tracks `last_step` so recovery logic can reason about how far execution progressed
+  - rollback/finalization must clean controller-temp archive artifacts explicitly; do not silently delete them during uncertain execution state

@@ -566,3 +566,67 @@ Execute a saved migration plan safely through the controller temp folder and fin
   - checksums are verified across the transfer stages
   - target verification succeeds before assignment finalization
   - migration execution behavior is test covered
+
+## Phase 10
+
+Completed At: `2026-03-19T22:55:35+02:00`
+
+### Goal
+
+Make migration recoverable under failure and make source cleanup explicit after verified success.
+
+### Scope Completed
+
+- added persisted migration execution step tracking through the saved plan state
+- added `Rollback Migration` in the deployment menu for failed or interrupted plans
+- added `Finalize Migration` in the deployment menu for executed plans
+- added rollback flow that:
+  - cleans target-side runtime artifacts conservatively
+  - removes source/target/local archive artifacts
+  - restarts the source runtime
+  - keeps source assignment authoritative
+- added finalization flow that:
+  - cleans source-side runtime artifacts conservatively
+  - optionally removes source volume data
+  - removes source/target/local archive artifacts
+  - keeps cleanup explicit after verified execution
+- added local operation-log entries for rollback and finalization start, failure, and success
+- added focused modular test coverage for:
+  - successful rollback behavior
+  - successful finalization behavior
+  - persisted step/state transitions used by failure recovery
+
+### Files Changed
+
+- `mnl_factory/scripts/r1setup`
+- `mnl_factory/scripts/tests/test_migration_execution.py`
+- `mnl_factory/scripts/tests/test_migration_finalization.py`
+- `mnl_factory/scripts/README_r1setup.md`
+- `docs/20260317_221254_multi_instance_migration_implementation_plan.md`
+- `docs/implementation_phase_log.md`
+- `AGENTS.md`
+
+### Verification Commands
+
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_migration_execution tests.test_migration_finalization tests.test_migration_planning`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_r1setup_core`
+- `cd mnl_factory/scripts && python3 -m unittest discover tests`
+- `cd mnl_factory/scripts && python3 -m py_compile r1setup`
+
+### Verification Results
+
+- migration-focused suite: passed
+- `tests.test_r1setup_core`: passed
+- `python3 -m unittest discover tests`: passed
+- `python3 -m py_compile r1setup`: passed
+
+### Notes
+
+- Rollback/finalization intentionally avoid the machine-destructive `delete_edge_node.yml` path and only clean per-instance runtime artifacts plus temp archives.
+- Controller-temp artifacts are now cleaned only during explicit rollback or finalization, not during uncertain execution state.
+- Acceptance criteria for the rollback/finalization phase are met:
+  - failed migration remains recoverable without manual reconstruction
+  - source cleanup stays explicit and deferred until after verified success
+  - migration state is visible enough through saved plan status and last-step tracking
+  - local temp artifacts are cleaned explicitly after rollback/finalization
+  - rollback/finalization behavior is test covered

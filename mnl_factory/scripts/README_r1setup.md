@@ -113,6 +113,8 @@ Current migration support lives under `Deployment Menu`:
 
 - `Plan Migration`: build and save a non-mutating migration plan
 - `Execute Migration`: run the saved plan through the controller temp folder
+- `Rollback Migration`: recover a failed or interrupted migration back to the source machine
+- `Finalize Migration`: clean up source-side artifacts after a verified migration
 
 Execution currently follows:
 
@@ -121,4 +123,10 @@ Execution currently follows:
 - source stop before archive creation
 - assignment finalization only after target verification succeeds
 
-Rollback and source-cleanup finalization remain separate follow-up work. Existing configurations remain compatible.
+Rollback/finalization currently follow these rules:
+
+- rollback is only for failed or interrupted plans and keeps the source assignment authoritative
+- finalization is only for executed plans and keeps source cleanup explicit
+- local temp artifacts are cleaned only during rollback or finalization, not during uncertain execution state
+
+Existing configurations remain compatible.
