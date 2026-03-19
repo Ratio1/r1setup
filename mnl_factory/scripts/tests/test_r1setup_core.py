@@ -355,6 +355,13 @@ class TestAddNodeExpertModeFlow(unittest.TestCase):
     def test_add_node_promotes_machine_when_expert_mode_accepted(self):
         app = self._make_app()
         app.get_input = MagicMock(return_value="y")
+        app.config_manager.apply_runtime_snapshot_to_host_config.side_effect = lambda host_name, host_config: host_config.update({
+            "edge_node_service_name": "edge_node_nodeb",
+            "mnl_docker_container_name": "edge_node_nodeb",
+            "mnl_docker_volume_path": "/var/cache/edge_node_nodeb/_local_cache",
+            "mnl_r1setup_metadata_host_path": "/var/cache/edge_node_nodeb/_local_cache/_data/r1setup/metadata.json",
+            "r1setup_runtime_exit_status_path": "/tmp/edge_node_nodeb.exit",
+        }) or True
 
         app._add_node()
 
@@ -362,7 +369,10 @@ class TestAddNodeExpertModeFlow(unittest.TestCase):
         self.assertIn("nodeb", hosts)
         self.assertEqual(hosts["nodeb"]["r1setup_topology_mode"], "expert")
         self.assertEqual(hosts["nodeb"]["r1setup_runtime_name_policy"], "normalize_to_target")
+        self.assertEqual(hosts["nodeb"]["edge_node_service_name"], "edge_node_nodeb")
+        self.assertEqual(hosts["nodeb"]["mnl_docker_container_name"], "edge_node_nodeb")
         app.config_manager.promote_machine_to_expert.assert_called_once_with("machine-a", app.inventory)
+        app.config_manager.apply_runtime_snapshot_to_host_config.assert_called_once_with("nodeb", hosts["nodeb"])
         app._save_configuration.assert_called_once()
 
 

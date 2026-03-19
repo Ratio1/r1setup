@@ -1484,6 +1484,20 @@ class ConfigurationManager:
             host_machine_id = str(host_config.get('r1setup_machine_id') or '').strip()
             host_endpoint = self._machine_endpoint_from_record(host_config, fallback_host_name=host_name)
             if host_machine_id == machine_id or (machine_endpoint and host_endpoint == machine_endpoint):
+                if not host_config.get('edge_node_service_name'):
+                    standard_runtime_host = dict(host_config)
+                    standard_runtime_host.setdefault('r1setup_runtime_name_policy', 'preserve')
+                    standard_runtime_host['r1setup_topology_mode'] = DEFAULT_MACHINE_TOPOLOGY_MODE
+                    self.apply_runtime_snapshot_to_host_config(host_name, standard_runtime_host)
+                    for field in (
+                        'edge_node_service_name',
+                        'mnl_docker_container_name',
+                        'mnl_docker_volume_path',
+                        'mnl_r1setup_metadata_host_path',
+                        'r1setup_runtime_exit_status_path',
+                    ):
+                        if standard_runtime_host.get(field):
+                            host_config[field] = standard_runtime_host.get(field)
                 host_config['r1setup_machine_id'] = machine_id
                 host_config['r1setup_topology_mode'] = 'expert'
                 host_config.setdefault('r1setup_runtime_name_policy', 'preserve')
@@ -2041,6 +2055,8 @@ class ConfigurationManager:
                 if machine_record.get('deployment_state') and host_config.get('r1setup_machine_deployment_state') != machine_record.get('deployment_state'):
                     host_config['r1setup_machine_deployment_state'] = machine_record.get('deployment_state')
                     needs_update = True
+            if self.apply_runtime_snapshot_to_host_config(host_name, host_config):
+                needs_update = True
             if needs_update:
                 updated = True
                 self.app.print_debug(f"Initialized missing status fields for node: {host_name}")
@@ -2222,6 +2238,30 @@ class ConfigurationManager:
                 'exit_status_path': host_config.get('r1setup_runtime_exit_status_path'),
             },
         )
+
+    @classmethod
+    def apply_runtime_snapshot_to_host_config(cls, host_name: str, host_config: Dict[str, Any]) -> bool:
+        """Persist the resolved runtime snapshot onto a host config."""
+        changed = False
+        host_config.setdefault('r1setup_instance_logical_name', host_name)
+        host_config.setdefault('r1setup_topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE)
+        host_config.setdefault('r1setup_runtime_name_policy', 'preserve')
+
+        runtime = cls._build_runtime_snapshot(host_name, host_config)
+        runtime_field_map = {
+            'edge_node_service_name': runtime['service_name'],
+            'mnl_docker_container_name': runtime['container_name'],
+            'mnl_docker_volume_path': runtime['volume_path'],
+            'mnl_r1setup_metadata_host_path': runtime['metadata_path'],
+            'r1setup_runtime_exit_status_path': runtime['exit_status_path'],
+        }
+
+        for field, value in runtime_field_map.items():
+            if host_config.get(field) != value:
+                host_config[field] = value
+                changed = True
+
+        return changed
 
     def detect_helper_mode_conflicts(
         self,
@@ -10077,6 +10117,7 @@ class R1Setup:
                     new_host['r1setup_topology_mode'] = 'expert'
                     new_host['r1setup_runtime_name_policy'] = 'normalize_to_target'
 
+        self.config_manager.apply_runtime_snapshot_to_host_config(name, new_host)
         hosts[name] = new_host
         self._save_configuration()
         self.print_colored(f"Node '{name}' added successfully!", 'green')

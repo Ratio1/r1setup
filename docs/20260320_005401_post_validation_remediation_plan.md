@@ -666,6 +666,39 @@ Result:
 - declining expert mode leaves configuration state unchanged
 - accepting expert mode promotes the existing machine/hosts to expert topology before save
 
+### Phase 3
+
+Status:
+
+- completed
+
+Implemented:
+
+- runtime snapshot persistence helper that writes resolved service/container/volume/metadata fields back onto host config state
+- inventory normalization now backfills missing runtime identity for persisted expert-mode hosts
+- same-machine add-node flow now persists resolved runtime fields before save
+- expert-mode promotion preserves the existing standard runtime identity for already deployed instances before switching topology
+
+Files changed:
+
+- [r1setup](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- [test_config_roundtrip.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_config_roundtrip.py)
+- [test_r1setup_core.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_r1setup_core.py)
+
+Verification:
+
+- `python3 -m unittest tests.test_config_roundtrip tests.test_r1setup_core`
+- `python3 -m unittest tests.test_fleet_model tests.test_machine_grouping tests.test_inventory_builder tests.test_r1setup_core`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Result:
+
+- all verification commands passed
+- newly added expert-mode instances now persist complete runtime identity immediately
+- generated YAML inventory is no longer left with missing runtime fields after same-machine add
+- existing standard instances retain their original runtime names when a machine is promoted to expert topology
+
 ## Phase 9: Real-Host Revalidation
 
 ### Objective

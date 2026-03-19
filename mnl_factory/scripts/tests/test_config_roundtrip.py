@@ -273,3 +273,55 @@ class TestConfigurationSchemaMetadata(unittest.TestCase):
             inventory["all"]["children"]["gpu_nodes"]["hosts"]["node-2"]["r1setup_topology_mode"],
             "expert",
         )
+
+    def test_normalize_inventory_backfills_runtime_fields_for_expert_host(self):
+        inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-2": {
+                                "ansible_host": "10.0.0.2",
+                                "ansible_user": "root",
+                                "r1setup_machine_id": "machine-b",
+                                "r1setup_topology_mode": "expert",
+                                "r1setup_runtime_name_policy": "normalize_to_target",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.cm.fleet_state = {
+            "config_schema_version": r1setup.CONFIG_SCHEMA_VERSION,
+            "fleet": {
+                "machines": {
+                    "machine-b": {
+                        "machine_id": "machine-b",
+                        "ansible_host": "10.0.0.2",
+                        "ansible_user": "root",
+                        "ansible_port": 22,
+                        "topology_mode": "expert",
+                        "deployment_state": "active",
+                        "instance_names": ["node-2"],
+                    }
+                },
+                "instances": {
+                    "node-2": {
+                        "assigned_machine_id": "machine-b",
+                    }
+                },
+            },
+        }
+
+        changed = self.cm._normalize_inventory(inventory)
+        host = inventory["all"]["children"]["gpu_nodes"]["hosts"]["node-2"]
+
+        self.assertTrue(changed)
+        self.assertEqual(host["edge_node_service_name"], "edge_node_node_2")
+        self.assertEqual(host["mnl_docker_container_name"], "edge_node_node_2")
+        self.assertEqual(host["mnl_docker_volume_path"], "/var/cache/edge_node_node_2/_local_cache")
+        self.assertEqual(
+            host["mnl_r1setup_metadata_host_path"],
+            "/var/cache/edge_node_node_2/_local_cache/_data/r1setup/metadata.json",
+        )
