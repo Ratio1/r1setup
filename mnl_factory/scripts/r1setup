@@ -1287,7 +1287,180 @@ class ConfigurationManager:
         fleet['machines'] = machines if isinstance(machines, dict) else {}
         fleet['instances'] = instances if isinstance(instances, dict) else {}
         normalized['fleet'] = fleet
+        normalized = self._canonicalize_fleet_machine_records(normalized)
         return normalized
+
+    @staticmethod
+    def _normalize_machine_endpoint(ansible_host: Any, ansible_user: Any = 'root', ansible_port: Any = 22) -> str:
+        """Return a stable endpoint key for a machine connection identity."""
+        host = str(ansible_host or '').strip()
+        if not host:
+            return ''
+        user = str(ansible_user or 'root').strip() or 'root'
+        port = str(ansible_port or 22).strip() or '22'
+        return f"{user}@{host}:{port}"
+
+    @classmethod
+    def _machine_endpoint_from_record(
+        cls,
+        record: Dict[str, Any],
+        *,
+        fallback_host_name: Optional[str] = None,
+    ) -> str:
+        """Return the normalized endpoint for a machine or host record."""
+        return cls._normalize_machine_endpoint(
+            record.get('ansible_host') or fallback_host_name,
+            record.get('ansible_user') or 'root',
+            record.get('ansible_port') or 22,
+        )
+
+    @classmethod
+    def _is_derived_machine_id(cls, machine_id: str, machine_record: Dict[str, Any]) -> bool:
+        """Return True when the machine id is just the derived endpoint form."""
+        return str(machine_id or '').strip() == cls._machine_endpoint_from_record(machine_record)
+
+    @classmethod
+    def _select_canonical_machine_id(cls, machine_ids: List[str], machines: Dict[str, Dict[str, Any]]) -> str:
+        """Choose the preferred machine id for a duplicate-endpoint machine group."""
+        candidates = sorted(set(str(machine_id) for machine_id in machine_ids if str(machine_id).strip()))
+        if not candidates:
+            return ''
+
+        explicit_candidates = [
+            machine_id
+            for machine_id in candidates
+            if not cls._is_derived_machine_id(machine_id, machines.get(machine_id, {}))
+        ]
+        if explicit_candidates:
+            return sorted(explicit_candidates)[0]
+        return candidates[0]
+
+    @classmethod
+    def _canonicalize_fleet_machine_records(cls, fleet_state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Collapse duplicate machine records that describe the same endpoint."""
+        normalized = copy.deepcopy(fleet_state) if isinstance(fleet_state, dict) else cls._default_fleet_state()
+        fleet = normalized.setdefault('fleet', {})
+        machines = dict(fleet.get('machines') or {})
+        instances = dict(fleet.get('instances') or {})
+
+        endpoint_to_machine_ids: Dict[str, List[str]] = {}
+        for machine_id, machine_record in machines.items():
+            endpoint = cls._machine_endpoint_from_record(machine_record)
+            if not endpoint:
+                continue
+            endpoint_to_machine_ids.setdefault(endpoint, []).append(machine_id)
+
+        canonical_machine_map: Dict[str, str] = {}
+        rebuilt_machines: Dict[str, Dict[str, Any]] = {}
+        for machine_id, machine_record in machines.items():
+            endpoint = cls._machine_endpoint_from_record(machine_record)
+            if endpoint:
+                canonical_machine_id = cls._select_canonical_machine_id(endpoint_to_machine_ids.get(endpoint, [machine_id]), machines)
+            else:
+                canonical_machine_id = machine_id
+            canonical_machine_map[machine_id] = canonical_machine_id
+
+        for machine_id, machine_record in machines.items():
+            canonical_machine_id = canonical_machine_map.get(machine_id, machine_id)
+            canonical_record = rebuilt_machines.setdefault(canonical_machine_id, {})
+            current_record = dict(machine_record)
+            current_record['machine_id'] = canonical_machine_id
+
+            if not canonical_record:
+                canonical_record.update(current_record)
+                canonical_record['machine_id'] = canonical_machine_id
+                canonical_record['instance_names'] = []
+                continue
+
+            for field in ('ansible_host', 'ansible_user', 'ansible_port', 'machine_specs'):
+                if canonical_record.get(field) in (None, '', {}):
+                    value = current_record.get(field)
+                    if value not in (None, '', {}):
+                        canonical_record[field] = value
+
+            if canonical_record.get('topology_mode') != 'expert' and current_record.get('topology_mode') == 'expert':
+                canonical_record['topology_mode'] = 'expert'
+
+            if canonical_record.get('deployment_state') in (None, '', DEFAULT_MACHINE_DEPLOYMENT_STATE):
+                deployment_state = current_record.get('deployment_state')
+                if deployment_state not in (None, ''):
+                    canonical_record['deployment_state'] = deployment_state
+
+            current_specs = dict(current_record.get('machine_specs') or {})
+            if current_specs:
+                merged_specs = dict(canonical_record.get('machine_specs') or {})
+                merged_specs.update({key: value for key, value in current_specs.items() if value not in (None, '')})
+                canonical_record['machine_specs'] = merged_specs
+
+        for instance_name, instance_record in instances.items():
+            assigned_machine_id = str(instance_record.get('assigned_machine_id') or '').strip()
+            if not assigned_machine_id:
+                continue
+            instance_record['assigned_machine_id'] = canonical_machine_map.get(assigned_machine_id, assigned_machine_id)
+
+        for machine_record in rebuilt_machines.values():
+            machine_record['instance_names'] = []
+
+        for instance_name, instance_record in instances.items():
+            assigned_machine_id = str(instance_record.get('assigned_machine_id') or '').strip()
+            if not assigned_machine_id:
+                continue
+            machine_record = rebuilt_machines.setdefault(assigned_machine_id, {
+                'machine_id': assigned_machine_id,
+                'topology_mode': DEFAULT_MACHINE_TOPOLOGY_MODE,
+                'deployment_state': DEFAULT_MACHINE_DEPLOYMENT_STATE,
+                'instance_names': [],
+            })
+            instance_names = machine_record.setdefault('instance_names', [])
+            if instance_name not in instance_names:
+                instance_names.append(instance_name)
+
+        for machine_record in rebuilt_machines.values():
+            machine_record['instance_names'] = sorted(set(machine_record.get('instance_names') or []))
+
+        fleet['machines'] = rebuilt_machines
+        fleet['instances'] = instances
+        normalized['fleet'] = fleet
+        return normalized
+
+    def find_machine_record_by_endpoint(
+        self,
+        host_config: Dict[str, Any],
+        *,
+        fleet_state: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """Return the canonical machine record for a host endpoint, if any."""
+        normalized_fleet = self._normalize_fleet_state(fleet_state if fleet_state is not None else self.get_fleet_state_copy())
+        endpoint = self._machine_endpoint_from_record(host_config)
+        if not endpoint:
+            return '', {}
+
+        for machine_id, machine_record in normalized_fleet.get('fleet', {}).get('machines', {}).items():
+            if self._machine_endpoint_from_record(machine_record) == endpoint:
+                return machine_id, dict(machine_record)
+
+        return '', {}
+
+    def bind_host_to_existing_machine(
+        self,
+        host_name: str,
+        host_config: Dict[str, Any],
+        *,
+        fleet_state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Attach a host config to an existing canonical machine record when endpoints match."""
+        bound_host = dict(host_config or {})
+        machine_id, machine_record = self.find_machine_record_by_endpoint(bound_host, fleet_state=fleet_state)
+        if not machine_id:
+            return bound_host
+
+        bound_host['r1setup_machine_id'] = machine_id
+        bound_host.setdefault('r1setup_instance_logical_name', host_name)
+        if machine_record.get('topology_mode'):
+            bound_host['r1setup_topology_mode'] = machine_record.get('topology_mode')
+        if machine_record.get('deployment_state'):
+            bound_host['r1setup_machine_deployment_state'] = machine_record.get('deployment_state')
+        return bound_host
 
     def _merge_fleet_state(self, fleet_state: Optional[Dict[str, Any]], inventory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Merge persisted fleet-state metadata with the legacy inventory-derived view."""
@@ -1341,7 +1514,7 @@ class ConfigurationManager:
         for machine in merged['fleet']['machines'].values():
             machine['instance_names'] = sorted(machine.get('instance_names', []))
 
-        return merged
+        return self._canonicalize_fleet_machine_records(merged)
 
     def get_fleet_state_copy(self) -> Dict[str, Any]:
         """Return a deep copy of the current fleet state."""
@@ -1810,9 +1983,31 @@ class ConfigurationManager:
         updated = False
         timestamp = datetime.now().isoformat()
         self.app.print_debug(f"Checking status field initialization for {len(hosts)} nodes")
+        normalized_fleet = self._normalize_fleet_state(self.get_fleet_state_copy())
+        endpoint_to_machine: Dict[str, Dict[str, Any]] = {}
+        for machine_id, machine_record in normalized_fleet.get('fleet', {}).get('machines', {}).items():
+            endpoint = self._machine_endpoint_from_record(machine_record)
+            if endpoint:
+                endpoint_to_machine[endpoint] = {
+                    'machine_id': machine_id,
+                    'machine_record': dict(machine_record),
+                }
 
         for host_name, host_config in hosts.items():
             needs_update = self._normalize_host_config(host_config, timestamp)
+            endpoint = self._machine_endpoint_from_record(host_config, fallback_host_name=host_name)
+            if endpoint and endpoint in endpoint_to_machine:
+                machine_id = endpoint_to_machine[endpoint]['machine_id']
+                machine_record = endpoint_to_machine[endpoint]['machine_record']
+                if str(host_config.get('r1setup_machine_id') or '').strip() != machine_id:
+                    host_config['r1setup_machine_id'] = machine_id
+                    needs_update = True
+                if machine_record.get('topology_mode') and host_config.get('r1setup_topology_mode') != machine_record.get('topology_mode'):
+                    host_config['r1setup_topology_mode'] = machine_record.get('topology_mode')
+                    needs_update = True
+                if machine_record.get('deployment_state') and host_config.get('r1setup_machine_deployment_state') != machine_record.get('deployment_state'):
+                    host_config['r1setup_machine_deployment_state'] = machine_record.get('deployment_state')
+                    needs_update = True
             if needs_update:
                 updated = True
                 self.app.print_debug(f"Initialized missing status fields for node: {host_name}")
@@ -9805,7 +10000,9 @@ class R1Setup:
         if hosts:
             last_node_name = list(hosts.keys())[-1]
             last_node_config = hosts[last_node_name]
-        hosts[name] = self._configure_single_node(previous_config=last_node_config)
+        new_host = self._configure_single_node(previous_config=last_node_config)
+        new_host = self.config_manager.bind_host_to_existing_machine(name, new_host)
+        hosts[name] = new_host
         self._save_configuration()
         self.print_colored(f"Node '{name}' added successfully!", 'green')
         self.print_colored("\n💡 Next: Deploy your updated configuration from Main Menu → Deployment Menu", 'cyan')

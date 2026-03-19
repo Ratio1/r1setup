@@ -125,3 +125,92 @@ class TestConfigurationSchemaMetadata(unittest.TestCase):
         self.assertIn("machine-b", self.cm.fleet_state["fleet"]["machines"])
         self.assertIn("root@10.0.0.1:22", self.cm.fleet_state["fleet"]["machines"])
         self.assertIn("node-1", self.cm.fleet_state["fleet"]["instances"])
+
+    def test_normalize_inventory_reuses_existing_machine_id_for_same_endpoint(self):
+        inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                                "r1setup_machine_id": "machine-a",
+                            },
+                            "node-2": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+        self.cm.fleet_state = {
+            "config_schema_version": r1setup.CONFIG_SCHEMA_VERSION,
+            "fleet": {
+                "machines": {
+                    "machine-a": {
+                        "machine_id": "machine-a",
+                        "ansible_host": "10.0.0.1",
+                        "ansible_user": "root",
+                        "ansible_port": 22,
+                        "topology_mode": "standard",
+                        "deployment_state": "active",
+                        "instance_names": ["node-1"],
+                    }
+                },
+                "instances": {
+                    "node-1": {
+                        "assigned_machine_id": "machine-a",
+                    }
+                },
+            },
+        }
+
+        changed = self.cm._normalize_inventory(inventory)
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            inventory["all"]["children"]["gpu_nodes"]["hosts"]["node-2"]["r1setup_machine_id"],
+            "machine-a",
+        )
+        self.assertEqual(
+            inventory["all"]["children"]["gpu_nodes"]["hosts"]["node-2"]["r1setup_topology_mode"],
+            "standard",
+        )
+        self.assertEqual(
+            inventory["all"]["children"]["gpu_nodes"]["hosts"]["node-2"]["r1setup_machine_deployment_state"],
+            "active",
+        )
+
+    def test_bind_host_to_existing_machine_uses_canonical_machine_id(self):
+        self.cm.fleet_state = {
+            "config_schema_version": r1setup.CONFIG_SCHEMA_VERSION,
+            "fleet": {
+                "machines": {
+                    "machine-b": {
+                        "machine_id": "machine-b",
+                        "ansible_host": "10.0.0.2",
+                        "ansible_user": "root",
+                        "ansible_port": 22,
+                        "topology_mode": "standard",
+                        "deployment_state": "prepared",
+                        "instance_names": [],
+                    }
+                },
+                "instances": {},
+            },
+        }
+
+        bound = self.cm.bind_host_to_existing_machine(
+            "node-2",
+            {
+                "ansible_host": "10.0.0.2",
+                "ansible_user": "root",
+            },
+        )
+
+        self.assertEqual(bound["r1setup_machine_id"], "machine-b")
+        self.assertEqual(bound["r1setup_topology_mode"], "standard")
+        self.assertEqual(bound["r1setup_machine_deployment_state"], "prepared")

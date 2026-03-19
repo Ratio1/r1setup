@@ -84,3 +84,64 @@ class TestFleetStateDerivation(unittest.TestCase):
             "machine-a",
         )
 
+    def test_merge_fleet_state_collapses_duplicate_machine_endpoints(self):
+        inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-a": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                                "r1setup_machine_id": "machine-a",
+                            },
+                            "node-b": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+        persisted_fleet = {
+            "config_schema_version": r1setup.CONFIG_SCHEMA_VERSION,
+            "fleet": {
+                "machines": {
+                    "machine-a": {
+                        "machine_id": "machine-a",
+                        "ansible_host": "10.0.0.1",
+                        "ansible_user": "root",
+                        "ansible_port": 22,
+                        "topology_mode": "standard",
+                        "deployment_state": "active",
+                        "instance_names": ["node-a"],
+                    },
+                    "root@10.0.0.1:22": {
+                        "machine_id": "root@10.0.0.1:22",
+                        "ansible_host": "10.0.0.1",
+                        "ansible_user": "root",
+                        "ansible_port": 22,
+                        "topology_mode": "standard",
+                        "deployment_state": "unknown",
+                        "instance_names": ["node-b"],
+                    },
+                },
+                "instances": {
+                    "node-a": {"assigned_machine_id": "machine-a"},
+                    "node-b": {"assigned_machine_id": "root@10.0.0.1:22"},
+                },
+            },
+        }
+
+        merged = self.cm._merge_fleet_state(persisted_fleet, inventory)
+
+        self.assertEqual(sorted(merged["fleet"]["machines"].keys()), ["machine-a"])
+        self.assertEqual(
+            merged["fleet"]["machines"]["machine-a"]["instance_names"],
+            ["node-a", "node-b"],
+        )
+        self.assertEqual(
+            merged["fleet"]["instances"]["node-b"]["assigned_machine_id"],
+            "machine-a",
+        )

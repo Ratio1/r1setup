@@ -599,6 +599,40 @@ This remediation track is complete when:
 - the updated flows pass targeted automated tests
 - a second real-host validation run confirms the fixes
 
+## Implementation Results
+
+### Phase 1
+
+Status:
+
+- completed
+
+Implemented:
+
+- canonical endpoint normalization for machine identity reuse
+- fleet-state canonicalization that collapses duplicate machine records for the same endpoint
+- inventory normalization that assigns canonical `r1setup_machine_id` values back onto matching hosts
+- add-node reuse hook so newly added hosts bind to an existing machine record when the endpoint already exists
+
+Files changed:
+
+- [r1setup](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- [test_fleet_model.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_fleet_model.py)
+- [test_config_roundtrip.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_config_roundtrip.py)
+
+Verification:
+
+- `python3 -m unittest tests.test_fleet_model tests.test_config_roundtrip`
+- `python3 -m unittest tests.test_machine_grouping tests.test_inventory_builder tests.test_r1setup_core`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Result:
+
+- all verification commands passed
+- duplicate machine endpoints now collapse to one canonical machine record in fleet metadata
+- same-endpoint hosts can now inherit the existing machine id during normalization and add-node flows
+
 ## Phase 9: Real-Host Revalidation
 
 ### Objective
