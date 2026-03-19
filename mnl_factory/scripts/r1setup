@@ -1398,6 +1398,96 @@ class ConfigurationManager:
 
         self._save_active_config()
 
+    def finalize_instance_migration(
+        self,
+        instance_name: str,
+        target_machine_id: str,
+        target_runtime: Dict[str, Any],
+        *,
+        runtime_name_policy: str,
+        migration_plan_state: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Finalize a migrated instance assignment in inventory and fleet state."""
+        hosts = _get_gpu_hosts(self.app.inventory)
+        host_config = hosts.get(instance_name)
+        if host_config is None:
+            raise ValueError(f"Instance host '{instance_name}' is not present in the active inventory")
+
+        fleet_state = self.get_fleet_state_copy()
+        fleet_state = self._normalize_fleet_state(fleet_state)
+        machines = fleet_state['fleet']['machines']
+        instances = fleet_state['fleet']['instances']
+
+        instance_record = dict(instances.get(instance_name, {}))
+        if not instance_record:
+            raise ValueError(f"Instance '{instance_name}' is not present in the active fleet state")
+
+        source_machine_id = str(instance_record.get('assigned_machine_id') or '').strip()
+        source_machine = dict(machines.get(source_machine_id, {}))
+        target_machine = dict(machines.get(target_machine_id, {}))
+        if not target_machine:
+            raise ValueError(f"Target machine '{target_machine_id}' is not present in the active fleet state")
+
+        for key in (
+            'ansible_host',
+            'ansible_user',
+            'ansible_port',
+            'ansible_ssh_common_args',
+            'ansible_ssh_pass',
+            'ansible_become_password',
+            'ansible_ssh_private_key_file',
+        ):
+            if key in target_machine:
+                host_config[key] = target_machine[key]
+            else:
+                host_config.pop(key, None)
+
+        host_config['r1setup_machine_id'] = target_machine_id
+        host_config['r1setup_topology_mode'] = target_machine.get('topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE)
+        host_config['r1setup_machine_deployment_state'] = 'active'
+        host_config['r1setup_runtime_name_policy'] = runtime_name_policy
+        host_config['edge_node_service_name'] = target_runtime.get('service_name', DEFAULT_RUNTIME_SERVICE_NAME)
+        host_config['mnl_docker_container_name'] = target_runtime.get('container_name', DEFAULT_RUNTIME_CONTAINER_NAME)
+        host_config['mnl_docker_volume_path'] = target_runtime.get('volume_path', DEFAULT_RUNTIME_VOLUME_PATH)
+        host_config['mnl_r1setup_metadata_host_path'] = target_runtime.get(
+            'metadata_path',
+            f"{host_config['mnl_docker_volume_path']}/_data/r1setup/metadata.json",
+        )
+        host_config['r1setup_runtime_exit_status_path'] = target_runtime.get(
+            'exit_status_path',
+            f"/tmp/{host_config['mnl_docker_container_name']}.exit",
+        )
+
+        instance_record['assigned_machine_id'] = target_machine_id
+        instance_record['runtime_name_policy'] = runtime_name_policy
+        instance_record['runtime'] = dict(target_runtime)
+        status_record = dict(instance_record.get('status', {}))
+        status_record['node_status'] = host_config.get('node_status', 'running')
+        instance_record['status'] = status_record
+        instances[instance_name] = instance_record
+
+        if source_machine:
+            source_instances = [name for name in source_machine.get('instance_names', []) if name != instance_name]
+            source_machine['instance_names'] = sorted(source_instances)
+            source_machine['deployment_state'] = 'active' if source_instances else 'prepared'
+            machines[source_machine_id] = source_machine
+
+        target_instances = sorted(set(list(target_machine.get('instance_names', [])) + [instance_name]))
+        target_machine['instance_names'] = target_instances
+        target_machine['deployment_state'] = 'active'
+        machines[target_machine_id] = target_machine
+
+        self.fleet_state = fleet_state
+        env = self.get_mnl_app_env() or self.active_config.get('environment') or 'mainnet'
+        self._save_config_with_metadata(
+            self.active_config['config_name'],
+            env,
+            len(hosts),
+            update_symlink=False,
+        )
+        if migration_plan_state is not None:
+            self.set_migration_plan_state(migration_plan_state)
+
     @staticmethod
     def _metadata_path_for_config(configs_dir: Path, config_name: str) -> Path:
         """Return the metadata path for a named configuration."""
@@ -5026,6 +5116,639 @@ class MigrationPlanner:
 
         self.app.wait_for_enter()
 
+    @staticmethod
+    def _update_plan_fields(plan: Dict[str, Any], **updates: Any) -> Dict[str, Any]:
+        """Return a shallow-updated copy of a migration plan."""
+        updated = copy.deepcopy(plan)
+        updated.update(updates)
+        return updated
+
+    def _build_remote_root_shell_command(self, machine_record: Dict[str, Any], command: str) -> str:
+        """Build a root-capable remote shell command string."""
+        wrapped = self._build_remote_shell_probe(command)
+        user = str(machine_record.get('ansible_user') or 'root').strip()
+        if user == 'root':
+            return wrapped
+        become_password = machine_record.get('ansible_become_password')
+        if become_password:
+            return f"printf %s {shlex.quote(str(become_password))} | sudo -S -p '' {wrapped}"
+        return f"sudo -n {wrapped}"
+
+    def _run_machine_command(
+        self,
+        machine_record: Dict[str, Any],
+        remote_command: str,
+        *,
+        timeout: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Run a remote machine command over SSH."""
+        try:
+            ssh_cmd = self.app._build_machine_ssh_command(machine_record, remote_command)
+        except ValueError as e:
+            return {'status': 'error', 'message': str(e)}
+
+        try:
+            result = subprocess.run(
+                ssh_cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout or self.app.connection_timeout,
+                check=False,
+            )
+        except FileNotFoundError as e:
+            return {'status': 'error', 'message': str(e)}
+        except subprocess.TimeoutExpired:
+            return {'status': 'error', 'message': f'Command timed out after {timeout or self.app.connection_timeout} seconds'}
+
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip() or 'Remote command failed'
+            return {'status': 'error', 'message': message, 'stdout': result.stdout, 'stderr': result.stderr}
+        return {'status': 'success', 'stdout': result.stdout, 'stderr': result.stderr}
+
+    def _build_scp_command(
+        self,
+        machine_record: Dict[str, Any],
+        source: str,
+        destination: str,
+        *,
+        download: bool,
+    ) -> List[str]:
+        """Build an scp command for upload or download."""
+        host = machine_record.get('ansible_host')
+        user = machine_record.get('ansible_user')
+        if not host or not user:
+            raise ValueError("Machine record is missing ansible_host or ansible_user")
+
+        scp_cmd = ['scp']
+        ssh_port = machine_record.get('ansible_port')
+        if ssh_port and str(ssh_port) != '22':
+            scp_cmd.extend(['-P', str(ssh_port)])
+
+        if 'ansible_ssh_private_key_file' in machine_record:
+            key_file = machine_record['ansible_ssh_private_key_file']
+            if str(key_file).startswith('~'):
+                key_file = os.path.expanduser(key_file)
+            scp_cmd.extend(['-i', str(key_file)])
+
+        scp_cmd.extend(['-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null'])
+        remote_spec = f"{user}@{host}:{source if download else destination}"
+        if download:
+            scp_cmd.extend([remote_spec, destination])
+        else:
+            scp_cmd.extend([source, remote_spec])
+
+        if 'ansible_ssh_pass' in machine_record:
+            return ['sshpass', '-p', machine_record['ansible_ssh_pass']] + scp_cmd
+        return scp_cmd
+
+    def _copy_from_machine(self, machine_record: Dict[str, Any], remote_path: str, local_path: str) -> Dict[str, Any]:
+        """Copy a file from a machine to the controller."""
+        try:
+            scp_cmd = self._build_scp_command(machine_record, remote_path, local_path, download=True)
+        except ValueError as e:
+            return {'status': 'error', 'message': str(e)}
+        try:
+            result = subprocess.run(
+                scp_cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.app.connection_timeout * 4,
+                check=False,
+            )
+        except FileNotFoundError as e:
+            return {'status': 'error', 'message': str(e)}
+        except subprocess.TimeoutExpired:
+            return {'status': 'error', 'message': f'SCP download timed out after {self.app.connection_timeout * 4} seconds'}
+
+        if result.returncode != 0:
+            return {'status': 'error', 'message': result.stderr.strip() or result.stdout.strip() or 'SCP download failed'}
+        return {'status': 'success'}
+
+    def _copy_to_machine(self, machine_record: Dict[str, Any], local_path: str, remote_path: str) -> Dict[str, Any]:
+        """Copy a file from the controller to a machine."""
+        try:
+            scp_cmd = self._build_scp_command(machine_record, local_path, remote_path, download=False)
+        except ValueError as e:
+            return {'status': 'error', 'message': str(e)}
+        try:
+            result = subprocess.run(
+                scp_cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.app.connection_timeout * 4,
+                check=False,
+            )
+        except FileNotFoundError as e:
+            return {'status': 'error', 'message': str(e)}
+        except subprocess.TimeoutExpired:
+            return {'status': 'error', 'message': f'SCP upload timed out after {self.app.connection_timeout * 4} seconds'}
+
+        if result.returncode != 0:
+            return {'status': 'error', 'message': result.stderr.strip() or result.stdout.strip() or 'SCP upload failed'}
+        return {'status': 'success'}
+
+    def _compute_local_checksum(self, path: Path) -> str:
+        """Compute a SHA-256 checksum for a local file."""
+        import hashlib
+
+        hasher = hashlib.sha256()
+        with open(path, 'rb') as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def _compute_remote_checksum(self, machine_record: Dict[str, Any], remote_path: str) -> Dict[str, Any]:
+        """Compute a SHA-256 checksum for a remote file."""
+        remote_command = self._build_remote_root_shell_command(
+            machine_record,
+            f"sha256sum {shlex.quote(remote_path)} | awk '{{print $1}}'",
+        )
+        result = self._run_machine_command(machine_record, remote_command, timeout=self.app.connection_timeout * 2)
+        if result.get('status') != 'success':
+            return result
+        checksum = (result.get('stdout') or '').strip().splitlines()
+        if not checksum:
+            return {'status': 'error', 'message': 'Unable to parse remote checksum output'}
+        return {'status': 'success', 'checksum': checksum[0]}
+
+    def _probe_remote_path_stat(self, machine_record: Dict[str, Any], remote_path: str) -> Dict[str, Any]:
+        """Probe uid/gid/mode for a remote path."""
+        remote_command = self._build_remote_root_shell_command(
+            machine_record,
+            f"stat -c '%u:%g:%a' {shlex.quote(remote_path)}",
+        )
+        result = self._run_machine_command(machine_record, remote_command)
+        if result.get('status') != 'success':
+            return result
+        stat_lines = (result.get('stdout') or '').strip().splitlines()
+        if not stat_lines:
+            return {'status': 'error', 'message': 'Unable to parse remote stat output'}
+        try:
+            uid, gid, mode = stat_lines[0].split(':', 2)
+            return {'status': 'success', 'uid': uid, 'gid': gid, 'mode': mode}
+        except ValueError:
+            return {'status': 'error', 'message': 'Unexpected remote stat format'}
+
+    def _ensure_local_temp_dir(self, path: Path) -> None:
+        """Ensure controller temp directory exists with restricted permissions."""
+        path.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+
+    def _prepare_target_machine_for_migration(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Prepare the target machine if the saved plan requires it."""
+        if not plan.get('preflight', {}).get('requires_target_preparation'):
+            return {'status': 'success', 'prepared': False}
+        playbook_path = self.app.config_dir / 'playbooks/prepare_machine.yml'
+        success, output, executed_hosts, execution_inventory = self.app.run_registered_machine_playbook(
+            playbook_path,
+            [plan['target_machine_id']],
+            show_output=True,
+            timeout=self.app.connection_timeout,
+            fleet_state=self.app.get_fleet_state_copy(),
+        )
+        successful_hosts = DeploymentService(self.app)._extract_successful_hosts_from_output(output, executed_hosts)
+        successful_machine_ids = DeploymentService._extract_successful_machine_ids(execution_inventory, successful_hosts)
+        if success and plan['target_machine_id'] in successful_machine_ids:
+            return {'status': 'success', 'prepared': True}
+        return {'status': 'error', 'message': 'Target machine preparation failed'}
+
+    def _stop_source_instance_for_migration(self, instance_name: str) -> Dict[str, Any]:
+        """Stop the source instance before archiving its data."""
+        playbook_path = self.app.config_dir / 'playbooks/service_stop.yml'
+        success, output, _, _ = self.app.run_generated_playbook(
+            playbook_path,
+            [instance_name],
+            machine_scope=False,
+            last_applied_action='migration_source_stop',
+            show_output=True,
+            timeout=self.app.connection_timeout,
+        )
+        if success:
+            return {'status': 'success', 'output': output}
+        return {'status': 'error', 'message': output or 'Source stop failed'}
+
+    def _create_source_archive(self, machine_record: Dict[str, Any], source_volume_path: str, archive_path: str) -> Dict[str, Any]:
+        """Create a source archive on the source machine."""
+        remote_command = self._build_remote_root_shell_command(
+            machine_record,
+            (
+                f"rm -f {shlex.quote(archive_path)} && "
+                f"test -d {shlex.quote(source_volume_path)} && "
+                f"tar -C {shlex.quote(source_volume_path)} -czf {shlex.quote(archive_path)} ."
+            ),
+        )
+        return self._run_machine_command(machine_record, remote_command, timeout=self.app.connection_timeout * 6)
+
+    def _prepare_target_volume_root(
+        self,
+        source_machine_record: Dict[str, Any],
+        target_machine_record: Dict[str, Any],
+        source_volume_path: str,
+        target_volume_path: str,
+    ) -> Dict[str, Any]:
+        """Create the target volume root with source ownership and permissions."""
+        source_stat = self._probe_remote_path_stat(source_machine_record, source_volume_path)
+        if source_stat.get('status') != 'success':
+            return source_stat
+        remote_command = self._build_remote_root_shell_command(
+            target_machine_record,
+            (
+                f"mkdir -p {shlex.quote(target_volume_path)} && "
+                f"chown {source_stat['uid']}:{source_stat['gid']} {shlex.quote(target_volume_path)} && "
+                f"chmod {source_stat['mode']} {shlex.quote(target_volume_path)}"
+            ),
+        )
+        result = self._run_machine_command(target_machine_record, remote_command)
+        if result.get('status') != 'success':
+            return result
+
+        target_stat = self._probe_remote_path_stat(target_machine_record, target_volume_path)
+        if target_stat.get('status') != 'success':
+            return target_stat
+        if (
+            target_stat.get('uid') != source_stat.get('uid')
+            or target_stat.get('gid') != source_stat.get('gid')
+            or target_stat.get('mode') != source_stat.get('mode')
+        ):
+            return {'status': 'error', 'message': 'Target ownership or permissions do not match the source volume root'}
+        return {'status': 'success'}
+
+    def _extract_archive_on_target(self, machine_record: Dict[str, Any], archive_path: str, target_volume_path: str) -> Dict[str, Any]:
+        """Extract the uploaded archive onto the target machine."""
+        remote_command = self._build_remote_root_shell_command(
+            machine_record,
+            f"mkdir -p {shlex.quote(target_volume_path)} && tar -xzf {shlex.quote(archive_path)} -C {shlex.quote(target_volume_path)}",
+        )
+        return self._run_machine_command(machine_record, remote_command, timeout=self.app.connection_timeout * 6)
+
+    def _build_target_execution_inventory(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Build an explicit execution inventory for the migrated target instance."""
+        hosts = _get_gpu_hosts(self.app.inventory)
+        base_config = copy.deepcopy(hosts.get(plan['instance_name'], {}))
+        fleet_state = self.app.get_fleet_state_copy()
+        target_machine = dict(fleet_state.get('fleet', {}).get('machines', {}).get(plan['target_machine_id'], {}))
+        target_runtime = dict(plan.get('target_runtime') or {})
+
+        for key in (
+            'ansible_host',
+            'ansible_user',
+            'ansible_port',
+            'ansible_ssh_common_args',
+            'ansible_ssh_pass',
+            'ansible_become_password',
+            'ansible_ssh_private_key_file',
+        ):
+            if key in target_machine:
+                base_config[key] = target_machine[key]
+            else:
+                base_config.pop(key, None)
+
+        base_config.update({
+            'r1setup_machine_id': plan['target_machine_id'],
+            'r1setup_topology_mode': target_machine.get('topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE),
+            'r1setup_machine_deployment_state': target_machine.get('deployment_state', DEFAULT_MACHINE_DEPLOYMENT_STATE),
+            'r1setup_runtime_name_policy': plan.get('runtime_name_policy', 'preserve'),
+            'edge_node_service_name': target_runtime.get('service_name', DEFAULT_RUNTIME_SERVICE_NAME),
+            'mnl_docker_container_name': target_runtime.get('container_name', DEFAULT_RUNTIME_CONTAINER_NAME),
+            'mnl_docker_volume_path': target_runtime.get('volume_path', DEFAULT_RUNTIME_VOLUME_PATH),
+            'mnl_r1setup_metadata_host_path': target_runtime.get(
+                'metadata_path',
+                f"{target_runtime.get('volume_path', DEFAULT_RUNTIME_VOLUME_PATH)}/_data/r1setup/metadata.json",
+            ),
+            'r1setup_runtime_exit_status_path': target_runtime.get(
+                'exit_status_path',
+                f"/tmp/{target_runtime.get('container_name', DEFAULT_RUNTIME_CONTAINER_NAME)}.exit",
+            ),
+        })
+
+        execution_host = self.app.config_manager.build_execution_host_config(plan['instance_name'], base_config)
+        execution_host['r1setup_execution_scope'] = 'instance'
+        return {
+            'all': {
+                'children': {
+                    'gpu_nodes': {
+                        'hosts': {
+                            plan['instance_name']: execution_host,
+                        }
+                    }
+                }
+            }
+        }
+
+    def _run_target_instance_playbook(
+        self,
+        plan: Dict[str, Any],
+        playbook_name: str,
+        *,
+        last_applied_action: str,
+        show_output: bool = False,
+    ) -> Tuple[bool, str]:
+        """Run an instance-scoped playbook against the target inventory override."""
+        playbook_path = self.app.config_dir / f'playbooks/{playbook_name}'
+        execution_inventory = self._build_target_execution_inventory(plan)
+        success, output, _, _ = self.app.run_custom_inventory_playbook(
+            playbook_path,
+            execution_inventory,
+            machine_scope=False,
+            last_applied_action=last_applied_action,
+            show_output=show_output,
+            timeout=self.app.connection_timeout * 2,
+        )
+        return success, output
+
+    def _apply_target_runtime_definition(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply the target runtime definition to the migrated instance."""
+        success, output = self._run_target_instance_playbook(
+            plan,
+            'apply_instance.yml',
+            last_applied_action='migration_apply_target',
+            show_output=True,
+        )
+        if success:
+            return {'status': 'success', 'output': output}
+        return {'status': 'error', 'message': output or 'Target runtime apply failed'}
+
+    def _start_target_instance(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Start the migrated instance on the target machine."""
+        success, output = self._run_target_instance_playbook(
+            plan,
+            'service_start.yml',
+            last_applied_action='migration_start_target',
+            show_output=True,
+        )
+        if success:
+            return {'status': 'success', 'output': output}
+        return {'status': 'error', 'message': output or 'Target start failed'}
+
+    def _verify_target_migration_health(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Verify target runtime health after startup."""
+        success, output = self._run_target_instance_playbook(
+            plan,
+            'service_status.yml',
+            last_applied_action='migration_verify_target',
+            show_output=False,
+        )
+        if not success:
+            return {'status': 'error', 'message': output or 'Target status check failed'}
+
+        lines = output.splitlines()
+        status_data = self.app.status_tracker._parse_ansible_status_lines(lines)
+        host_status = status_data.get(plan['instance_name'], {})
+        if host_status.get('status') != 'running':
+            return {'status': 'error', 'message': f"Target status is {host_status.get('status', 'unknown')} instead of running"}
+
+        node_info_success, node_info_output = self._run_target_instance_playbook(
+            plan,
+            'get_node_info.yml',
+            last_applied_action='migration_get_node_info',
+            show_output=False,
+        )
+        app_health = None
+        if node_info_success:
+            node_results = self.app._parse_node_info_output(node_info_output)
+            app_health = node_results.get(plan['instance_name'], {}).get('status') == 'success'
+
+        return {'status': 'success', 'app_health': app_health}
+
+    def _mark_migration_failure(self, plan: Dict[str, Any], message: str) -> None:
+        """Persist and log a migration execution failure."""
+        failed_plan = self._update_plan_fields(
+            plan,
+            status='failed',
+            last_error=message,
+            last_updated_at=datetime.now().isoformat(),
+        )
+        self.app.set_migration_plan_state(failed_plan)
+        self.app.log_operation_event(
+            'migration_execution',
+            'failed',
+            {
+                'plan_id': failed_plan.get('plan_id'),
+                'instance_name': failed_plan.get('instance_name'),
+                'source_machine_id': failed_plan.get('source_machine_id'),
+                'target_machine_id': failed_plan.get('target_machine_id'),
+                'message': message,
+            },
+        )
+
+    def execute_saved_migration_plan(self) -> None:
+        """Execute the saved migration plan using controller-temp archive transfer."""
+        plan = copy.deepcopy(self.app.active_config.get('migration_plan_state') or {})
+        if not plan:
+            self.app.print_colored("No saved migration plan found. Build a plan first.", 'yellow')
+            self.app.wait_for_enter()
+            return
+        if plan.get('status') != 'planned':
+            self.app.print_colored(
+                f"Saved migration plan is not executable in status '{plan.get('status', 'unknown')}'.",
+                'red',
+            )
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_header("Execute Saved Migration Plan")
+        self._display_migration_plan(plan)
+        if self.app.get_input("\n🚚 Execute this migration plan now? (y/N)", "N").lower() != 'y':
+            self.app.print_colored("Migration execution cancelled.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        fleet_state = self.app.get_fleet_state_copy()
+        machines = fleet_state.get('fleet', {}).get('machines', {})
+        source_machine = dict(machines.get(plan['source_machine_id'], {}))
+        target_machine = dict(machines.get(plan['target_machine_id'], {}))
+        if not source_machine or not target_machine:
+            self._mark_migration_failure(plan, 'Saved migration plan no longer matches registered source/target machines')
+            self.app.print_colored(
+                "Saved migration plan no longer matches the registered source/target machines.",
+                'red',
+            )
+            self.app.wait_for_enter()
+            return
+        transfer = plan.get('transfer') or {}
+        source_runtime = plan.get('source_runtime') or {}
+        target_runtime = plan.get('target_runtime') or {}
+
+        local_temp_dir = Path(transfer.get('local_temp_dir') or self.app._default_migration_temp_dir())
+        local_archive_path = Path(transfer.get('local_archive_path') or (local_temp_dir / f"{plan['instance_name']}.tar.gz"))
+        self._ensure_local_temp_dir(local_temp_dir)
+        if local_archive_path.exists():
+            try:
+                local_archive_path.unlink()
+            except OSError as e:
+                self._mark_migration_failure(plan, f'Unable to reset local archive path: {e}')
+                self.app.print_colored(f"Unable to reset local archive path: {e}", 'red')
+                self.app.wait_for_enter()
+                return
+
+        executing_plan = self._update_plan_fields(
+            plan,
+            status='executing',
+            started_at=datetime.now().isoformat(),
+            last_updated_at=datetime.now().isoformat(),
+        )
+        self.app.set_migration_plan_state(executing_plan)
+        self.app.log_operation_event(
+            'migration_execution',
+            'started',
+            {
+                'plan_id': executing_plan.get('plan_id'),
+                'instance_name': executing_plan.get('instance_name'),
+                'source_machine_id': executing_plan.get('source_machine_id'),
+                'target_machine_id': executing_plan.get('target_machine_id'),
+            },
+        )
+
+        prep_result = self._prepare_target_machine_for_migration(executing_plan)
+        if prep_result.get('status') != 'success':
+            self._mark_migration_failure(executing_plan, prep_result.get('message', 'Target preparation failed'))
+            self.app.print_colored(prep_result.get('message', 'Target preparation failed'), 'red')
+            self.app.wait_for_enter()
+            return
+
+        stop_result = self._stop_source_instance_for_migration(executing_plan['instance_name'])
+        if stop_result.get('status') != 'success':
+            self._mark_migration_failure(executing_plan, stop_result.get('message', 'Source stop failed'))
+            self.app.print_colored(stop_result.get('message', 'Source stop failed'), 'red')
+            self.app.wait_for_enter()
+            return
+        self.app._update_node_status(executing_plan['instance_name'], 'stopped')
+
+        archive_result = self._create_source_archive(
+            source_machine,
+            source_runtime.get('volume_path', ''),
+            transfer.get('source_archive_path', ''),
+        )
+        if archive_result.get('status') != 'success':
+            self._mark_migration_failure(executing_plan, archive_result.get('message', 'Source archive failed'))
+            self.app.print_colored(archive_result.get('message', 'Source archive failed'), 'red')
+            self.app.wait_for_enter()
+            return
+
+        source_checksum_result = self._compute_remote_checksum(source_machine, transfer.get('source_archive_path', ''))
+        if source_checksum_result.get('status') != 'success':
+            self._mark_migration_failure(executing_plan, source_checksum_result.get('message', 'Source checksum failed'))
+            self.app.print_colored(source_checksum_result.get('message', 'Source checksum failed'), 'red')
+            self.app.wait_for_enter()
+            return
+        source_checksum = source_checksum_result['checksum']
+
+        download_result = self._copy_from_machine(source_machine, transfer.get('source_archive_path', ''), str(local_archive_path))
+        if download_result.get('status') != 'success':
+            self._mark_migration_failure(executing_plan, download_result.get('message', 'Archive download failed'))
+            self.app.print_colored(download_result.get('message', 'Archive download failed'), 'red')
+            self.app.wait_for_enter()
+            return
+
+        local_checksum = self._compute_local_checksum(local_archive_path)
+        if local_checksum != source_checksum:
+            self._mark_migration_failure(executing_plan, 'Local checksum does not match source checksum')
+            self.app.print_colored("Local checksum does not match source checksum.", 'red')
+            self.app.wait_for_enter()
+            return
+
+        upload_result = self._copy_to_machine(target_machine, str(local_archive_path), transfer.get('target_archive_path', ''))
+        if upload_result.get('status') != 'success':
+            self._mark_migration_failure(executing_plan, upload_result.get('message', 'Archive upload failed'))
+            self.app.print_colored(upload_result.get('message', 'Archive upload failed'), 'red')
+            self.app.wait_for_enter()
+            return
+
+        target_checksum_result = self._compute_remote_checksum(target_machine, transfer.get('target_archive_path', ''))
+        if target_checksum_result.get('status') != 'success':
+            self._mark_migration_failure(executing_plan, target_checksum_result.get('message', 'Target checksum failed'))
+            self.app.print_colored(target_checksum_result.get('message', 'Target checksum failed'), 'red')
+            self.app.wait_for_enter()
+            return
+        if target_checksum_result['checksum'] != source_checksum:
+            self._mark_migration_failure(executing_plan, 'Target checksum does not match source checksum')
+            self.app.print_colored("Target checksum does not match source checksum.", 'red')
+            self.app.wait_for_enter()
+            return
+
+        prepare_volume_result = self._prepare_target_volume_root(
+            source_machine,
+            target_machine,
+            source_runtime.get('volume_path', ''),
+            target_runtime.get('volume_path', ''),
+        )
+        if prepare_volume_result.get('status') != 'success':
+            self._mark_migration_failure(executing_plan, prepare_volume_result.get('message', 'Target volume preparation failed'))
+            self.app.print_colored(prepare_volume_result.get('message', 'Target volume preparation failed'), 'red')
+            self.app.wait_for_enter()
+            return
+
+        extract_result = self._extract_archive_on_target(
+            target_machine,
+            transfer.get('target_archive_path', ''),
+            target_runtime.get('volume_path', ''),
+        )
+        if extract_result.get('status') != 'success':
+            self._mark_migration_failure(executing_plan, extract_result.get('message', 'Target extract failed'))
+            self.app.print_colored(extract_result.get('message', 'Target extract failed'), 'red')
+            self.app.wait_for_enter()
+            return
+
+        apply_result = self._apply_target_runtime_definition(executing_plan)
+        if apply_result.get('status') != 'success':
+            self._mark_migration_failure(executing_plan, apply_result.get('message', 'Target apply failed'))
+            self.app.print_colored(apply_result.get('message', 'Target apply failed'), 'red')
+            self.app.wait_for_enter()
+            return
+
+        start_result = self._start_target_instance(executing_plan)
+        if start_result.get('status') != 'success':
+            self._mark_migration_failure(executing_plan, start_result.get('message', 'Target start failed'))
+            self.app.print_colored(start_result.get('message', 'Target start failed'), 'red')
+            self.app.wait_for_enter()
+            return
+
+        verify_result = self._verify_target_migration_health(executing_plan)
+        if verify_result.get('status') != 'success':
+            self._mark_migration_failure(executing_plan, verify_result.get('message', 'Target verification failed'))
+            self.app.print_colored(verify_result.get('message', 'Target verification failed'), 'red')
+            self.app.wait_for_enter()
+            return
+
+        finalized_plan = self._update_plan_fields(
+            executing_plan,
+            status='executed',
+            finalized_assignment=True,
+            verified_target=True,
+            app_health=verify_result.get('app_health'),
+            finished_at=datetime.now().isoformat(),
+            last_updated_at=datetime.now().isoformat(),
+        )
+        self.app.finalize_instance_migration(
+            executing_plan['instance_name'],
+            executing_plan['target_machine_id'],
+            target_runtime,
+            runtime_name_policy=executing_plan.get('runtime_name_policy', 'preserve'),
+            migration_plan_state=finalized_plan,
+        )
+        self.app.record_service_file_version([executing_plan['instance_name']])
+        self.app._update_node_status(executing_plan['instance_name'], 'running')
+        self.app.log_operation_event(
+            'migration_execution',
+            'success',
+            {
+                'plan_id': finalized_plan.get('plan_id'),
+                'instance_name': finalized_plan.get('instance_name'),
+                'source_machine_id': finalized_plan.get('source_machine_id'),
+                'target_machine_id': finalized_plan.get('target_machine_id'),
+                'local_archive_path': transfer.get('local_archive_path'),
+            },
+        )
+        self.app.print_colored("Migration execution completed successfully.", 'green')
+        self.app.print_colored(
+            "Assignment has been updated to the target machine. Source cleanup remains deferred for rollback/finalization.",
+            'yellow',
+        )
+        self.app.wait_for_enter()
+
 
 class SSHKeyManager:
     """Handles SSH key management workflows and metadata migration."""
@@ -6247,6 +6970,62 @@ class R1Setup:
         except Exception:
             return False
 
+    def _get_operation_log_dir(self) -> Path:
+        """Return the local operation-log directory."""
+        return self.r1_setup_dir / 'logs'
+
+    def _get_operation_log_path(self) -> Path:
+        """Return the active local operation-log path."""
+        return self._get_operation_log_dir() / 'operations.log'
+
+    def _rotate_operation_log_if_needed(self, max_bytes: int = 1_000_000, retention_days: int = 30) -> None:
+        """Rotate and clean up the local operation log when it grows too large."""
+        log_dir = self._get_operation_log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(log_dir, 0o700)
+        except OSError:
+            pass
+
+        log_path = self._get_operation_log_path()
+        if log_path.exists() and log_path.stat().st_size >= max_bytes:
+            rotated = log_dir / f"operations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            log_path.rename(rotated)
+            try:
+                os.chmod(rotated, 0o600)
+            except OSError:
+                pass
+
+        cutoff = datetime.now().timestamp() - (retention_days * 86400)
+        for rotated_log in log_dir.glob("operations_*.log"):
+            try:
+                if rotated_log.stat().st_mtime < cutoff:
+                    rotated_log.unlink()
+            except OSError:
+                continue
+
+    def log_operation_event(
+        self,
+        operation_type: str,
+        status: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Append a local operation-log event."""
+        self._rotate_operation_log_if_needed()
+        log_path = self._get_operation_log_path()
+        entry = {
+            'logged_at': datetime.now().isoformat(),
+            'operation_type': operation_type,
+            'status': status,
+            'details': details or {},
+        }
+        with open(log_path, 'a') as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+        try:
+            os.chmod(log_path, 0o600)
+        except OSError:
+            pass
+
     # -- ConfigurationManager delegation stubs --
     def _load_active_config(self):
         return self.config_manager._load_active_config()
@@ -6330,6 +7109,23 @@ class R1Setup:
 
     def set_migration_plan_state(self, plan_state):
         return self.config_manager.set_migration_plan_state(plan_state)
+
+    def finalize_instance_migration(
+        self,
+        instance_name,
+        target_machine_id,
+        target_runtime,
+        *,
+        runtime_name_policy,
+        migration_plan_state=None,
+    ):
+        return self.config_manager.finalize_instance_migration(
+            instance_name,
+            target_machine_id,
+            target_runtime,
+            runtime_name_policy=runtime_name_policy,
+            migration_plan_state=migration_plan_state,
+        )
 
     @property
     def fleet_state(self):
@@ -6434,6 +7230,9 @@ class R1Setup:
 
     def plan_instance_migration(self):
         return self.migration_planner.plan_instance_migration()
+
+    def execute_saved_migration_plan(self):
+        return self.migration_planner.execute_saved_migration_plan()
 
     def delete_edge_node(self):
         return self.deployment_service.delete_edge_node()
@@ -6665,6 +7464,19 @@ class R1Setup:
             temp_path = Path(handle.name)
         return temp_path, execution_inventory
 
+    @staticmethod
+    def _write_provided_execution_inventory(execution_inventory: Dict[str, Any]) -> Tuple[Path, Dict[str, Any]]:
+        """Write a caller-provided execution inventory to a temp file."""
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            suffix='.yml',
+            prefix='r1setup_exec_custom_inventory_',
+            delete=False,
+        ) as handle:
+            yaml.safe_dump(execution_inventory, handle, sort_keys=False)
+            temp_path = Path(handle.name)
+        return temp_path, execution_inventory
+
     def run_generated_playbook(
         self,
         playbook_path: Path,
@@ -6690,6 +7502,47 @@ class R1Setup:
             f"ansible-playbook -i {shlex.quote(str(inventory_path))} {shlex.quote(str(playbook_path))}"
         )
 
+        if machine_scope:
+            payload = self.build_machine_extra_vars(extra_vars)
+        else:
+            payload = self.build_instance_extra_vars(last_applied_action, extra_vars)
+        cmd = self._append_ansible_extra_vars(cmd, payload)
+
+        try:
+            success, output = self.run_command(
+                cmd,
+                show_output=show_output,
+                timeout=timeout,
+            )
+        finally:
+            try:
+                inventory_path.unlink()
+            except FileNotFoundError:
+                pass
+
+        return success, output, execution_host_names, execution_inventory
+
+    def run_custom_inventory_playbook(
+        self,
+        playbook_path: Path,
+        execution_inventory: Dict[str, Any],
+        *,
+        machine_scope: bool = False,
+        extra_vars: Optional[Dict[str, Any]] = None,
+        last_applied_action: str = 'operation',
+        show_output: bool = False,
+        timeout: Optional[int] = None,
+    ) -> Tuple[bool, str, List[str], Dict[str, Any]]:
+        """Run a playbook against an explicit execution inventory."""
+        inventory_path, execution_inventory = self._write_provided_execution_inventory(execution_inventory)
+        execution_host_names = self._get_execution_inventory_host_names(execution_inventory)
+
+        cmd = (
+            f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+            f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+            f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+            f"ansible-playbook -i {shlex.quote(str(inventory_path))} {shlex.quote(str(playbook_path))}"
+        )
         if machine_scope:
             payload = self.build_machine_extra_vars(extra_vars)
         else:
@@ -7340,8 +8193,9 @@ class R1Setup:
             self.print_colored("  2) Deploy CPU Only        - Deploy Edge Node without GPU capabilities")
             self.print_colored("  3) Prepare Machines       - Prepare registered machines without deploying nodes")
             self.print_colored("  4) Plan Migration        - Build and save a migration plan without executing it")
-            self.print_colored("  5) Delete Deployment      - Remove deployed Edge Node")
-            self.print_colored("  6) Deployment Status      - Check detailed deployment status")
+            self.print_colored("  5) Execute Migration    - Run the saved migration plan")
+            self.print_colored("  6) Delete Deployment      - Remove deployed Edge Node")
+            self.print_colored("  7) Deployment Status      - Check detailed deployment status")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -7360,11 +8214,13 @@ class R1Setup:
             elif choice == '4':
                 self.plan_instance_migration()
             elif choice == '5':
-                self.delete_edge_node()
+                self.execute_saved_migration_plan()
             elif choice == '6':
+                self.delete_edge_node()
+            elif choice == '7':
                 self.deployment_status()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-6.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-7.", 'red')
                 self.wait_for_enter()
 
     def operations_menu(self) -> None:

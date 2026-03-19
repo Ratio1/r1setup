@@ -109,8 +109,16 @@ Available actions:
 ```
 
 ## Migration
-Old script functionality is preserved:
-- 3_configure.py → "Configure nodes" menu
-- 4_run_setup.sh → "Deploy" options
+Current migration support lives under `Deployment Menu`:
 
-All existing configurations remain compatible. 
+- `Plan Migration`: build and save a non-mutating migration plan
+- `Execute Migration`: run the saved plan through the controller temp folder
+
+Execution currently follows:
+
+- source machine -> local controller temp folder -> target machine
+- target preparation before transfer when needed
+- source stop before archive creation
+- assignment finalization only after target verification succeeds
+
+Rollback and source-cleanup finalization remain separate follow-up work. Existing configurations remain compatible.

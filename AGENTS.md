@@ -234,3 +234,9 @@ Minimum required critic topics when relevant:
   - plans must explicitly show the transfer route as `source machine -> local temp -> target machine`
   - target runtime naming must be resolved during planning and checked for collisions before execution
   - saved migration plans now persist locally in config metadata as `migration_plan_state`
+
+- 2026-03-19T22:48:16+02:00 | Phase 9 migration execution is implemented. The stable rule is:
+  - migration execution must use the controller-routed path `source machine -> local temp -> target machine`; do not introduce direct machine-to-machine copy as the default path
+  - target preparation must happen before data transfer when the saved plan requires it
+  - the source runtime must be stopped before source archiving, and assignment must not be finalized until target verification succeeds
+  - migration execution results must be recorded in the local operation log, and source cleanup/rollback remain separate Phase 10 concerns

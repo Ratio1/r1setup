@@ -26,58 +26,56 @@ Completed:
 - Phase 6: visualization and fleet UX
 - Phase 7: empty-machine operations
 - Phase 8: migration planning framework
+- Phase 9: migration execution
 
 Not Started:
 
-- Phase 9: migration execution
 - Phase 10: rollback and finalization
 
 ## Recommended Next Step
 
-The next best step is Phase 9: migration execution.
+The next best step is Phase 10: rollback and finalization.
 
 Reasoning:
 
-- migration plans can now be built, reviewed, and saved locally without remote mutation
-- source/target validation, target naming resolution, and controller-temp transfer routing are now explicit
-- the next missing capability is executing the planned transfer safely and resumably
+- migration execution now prepares the target, stops the source, transfers through the controller temp folder, and finalizes assignment only after target verification
+- the remaining safety gap is explicit rollback/finalization behavior after partial or successful execution
+- source cleanup and rollback affordances should remain separate from the initial execution path
 
 Practical goal for the next implementation slice:
 
-- stop the source runtime at the correct moment, archive the source volume, and move it through the controller temp folder to the target machine
-- keep assignment changes deferred until target verification succeeds
-- make rollback/finalization explicit instead of implicit cleanup
+- keep source runtime/data recoverable after failed or partially completed execution
+- make rollback and operator-visible finalize/cleanup explicit
+- clean temporary controller artifacts only after finalize or rollback
 
-### Immediate Phase 9 Breakdown
+### Immediate Phase 10 Breakdown
 
 The next coding slice should be executed in this order:
 
-1. execute the planned source shutdown and archive creation
-2. transfer the archive via:
-   - source machine -> controller temp folder
-   - controller temp folder -> target machine
-3. restore the target volume to the resolved target runtime path
-4. start and verify the target runtime before any final assignment switch
-5. add focused modular tests for execution sequencing, transfer routing, and verification guards
+1. persist resumable migration execution state after each step
+2. add rollback support for failed execution after source stop or transfer
+3. add explicit finalize/cleanup support after successful execution
+4. clean local temp artifacts only during explicit rollback/finalize
+5. add focused modular tests for rollback and cleanup guards
 6. after the phase is complete:
    - update `docs/implementation_phase_log.md`
    - run targeted tests plus broad CLI regression
    - create a dedicated phase commit before moving on
 
-### Immediate Deliverables For Phase 9
+### Immediate Deliverables For Phase 10
 
-- one migration execution workflow driven by the saved or newly built plan
-- explicit controller-temp transfer routing
-- one focused test module for migration execution safeguards
+- one rollback/finalization workflow driven by the saved execution state
+- explicit operator-facing cleanup controls
+- one focused test module for rollback/finalization safeguards
 
-### Exit Signal For Starting Phase 10
+### Exit Signal For Completing Phase 10
 
-Do not start rollback/finalization work until all of the following are true:
+Do not mark rollback/finalization complete until all of the following are true:
 
-- source data is not finalized away until target verification succeeds
-- controller-temp transfer routing is used instead of direct machine-to-machine copy
-- assignment switch happens only after target verification
-- migration execution behavior is test covered
+- failed migrations can be rolled back without reconstructing instance state manually
+- source cleanup stays explicit and deferred until after successful verification
+- controller-temp artifacts are cleaned only during explicit finalize or rollback
+- rollback/finalization behavior is test covered
 
 ## Implementation Principles
 

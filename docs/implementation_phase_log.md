@@ -500,3 +500,69 @@ Add a planning-only migration workflow so operators can assemble, review, and sa
   - source/target conflicts are detected before execution starts
   - the transfer route explicitly uses controller temp storage
   - migration-planning behavior is test covered
+
+## Phase 9
+
+Completed At: `2026-03-19T22:48:16+02:00`
+
+### Goal
+
+Execute a saved migration plan safely through the controller temp folder and finalize the logical assignment only after verified target startup.
+
+### Scope Completed
+
+- added migration-execution flow in `MigrationPlanner`
+- added deployment-menu entry for executing the saved migration plan
+- added controller-routed archive transfer as:
+  - source machine -> local controller temp folder
+  - local controller temp folder -> target machine
+- added execution-time safeguards for:
+  - stale source/target machine assignments
+  - local temp-folder initialization
+  - local archive reset failures
+  - source and target checksum verification
+  - target volume ownership and permission verification
+- added target runtime apply/start/verify sequence before assignment finalization
+- added local operation-log entries for migration execution start, failure, and success
+- updated migration execution to finalize inventory/fleet assignment only after target verification succeeds
+- added focused modular test coverage for:
+  - successful migration execution and finalization ordering
+  - checksum-mismatch failure without assignment finalization
+
+### Files Changed
+
+- `mnl_factory/scripts/r1setup`
+- `mnl_factory/scripts/tests/test_migration_execution.py`
+- `mnl_factory/scripts/README_r1setup.md`
+- `docs/20260317_221254_multi_instance_migration_implementation_plan.md`
+- `docs/implementation_phase_log.md`
+- `AGENTS.md`
+
+### Verification Commands
+
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_migration_execution`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_migration_planning`
+- `cd mnl_factory/scripts && python3 -m unittest tests.test_r1setup_core`
+- `cd mnl_factory/scripts && python3 -m unittest discover tests`
+- `cd mnl_factory/scripts && python3 -m py_compile r1setup`
+
+### Verification Results
+
+- `tests.test_migration_execution`: passed
+- `tests.test_migration_planning`: passed
+- `tests.test_r1setup_core`: passed
+- `python3 -m unittest discover tests`: passed
+- `python3 -m py_compile r1setup`: passed
+
+### Notes
+
+- Migration execution now uses the required transfer route: source machine -> controller temp -> target machine.
+- The source runtime is stopped before archive creation, and assignment stays unchanged until target verification succeeds.
+- Source cleanup and rollback behavior remain deferred to Phase 10.
+- Acceptance criteria for the migration-execution phase are met:
+  - target preparation occurs before transfer when required
+  - source stop happens before source archiving
+  - controller temp storage is used before upload to the target
+  - checksums are verified across the transfer stages
+  - target verification succeeds before assignment finalization
+  - migration execution behavior is test covered
