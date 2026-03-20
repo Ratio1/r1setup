@@ -444,3 +444,47 @@ Result:
 - the next recommended action now matches the operator intent better for preserved/live-tracked nodes
 - machine-preparation completion now ends with an explicit scope reminder
 - no-clear dev runs stay readable through the status workflow because those screens no longer force raw terminal clears
+
+### Phase F
+
+Status:
+
+- completed
+
+Implemented:
+
+- reran the remaining live scenarios on the real test machines:
+  - prepare registered machine
+  - forward migration planning
+  - forward migration execution
+  - same-machine second-instance add
+  - shared-machine status refresh with one deployed and one undeployed sibling
+  - remove extra sibling
+  - intentionally interrupted reverse migration followed by rollback
+- captured the detailed results in:
+  - [20260320_030000_phase_f_live_revalidation_report.md](/home/vi/work/ratio1/repos/multi_node_launcher/docs/20260320_030000_phase_f_live_revalidation_report.md)
+
+Files changed:
+
+- [20260320_020829_second_revalidation_fix_plan.md](/home/vi/work/ratio1/repos/multi_node_launcher/docs/20260320_020829_second_revalidation_fix_plan.md)
+- [20260320_030000_phase_f_live_revalidation_report.md](/home/vi/work/ratio1/repos/multi_node_launcher/docs/20260320_030000_phase_f_live_revalidation_report.md)
+
+Verification:
+
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+- live repo-local `r1setup` validation against:
+  - `35.228.69.214`
+  - `34.88.90.109`
+
+Result:
+
+- accepted:
+  - migration no longer fails only because of the old `30s` lifecycle timeout
+  - rollback successfully restored the real interrupted migration path
+  - undeployed sibling instances now stay undeployed instead of inheriting running state
+  - remove-node behavior matches the documented expert-topology policy
+- remaining follow-ups:
+  - the compact main-menu deployment label can still be stale on first render before status refresh
+  - `Node Status & Info` still recommends service-file update for an undeployed sibling
+  - old pre-fix `rollback_failed` saved plans are not auto-repaired
