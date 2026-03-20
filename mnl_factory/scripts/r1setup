@@ -5544,6 +5544,14 @@ class MigrationPlanner:
             'cyan',
         )
 
+    def _migration_runtime_timeout(self) -> int:
+        """Timeout for migration lifecycle steps that can take as long as deploy/apply."""
+        return DeploymentService._phase_timeout(self.app.connection_timeout, 180)
+
+    def _migration_probe_timeout(self) -> int:
+        """Timeout for shorter migration verification probes."""
+        return self.app.connection_timeout * 2
+
     def plan_instance_migration(self) -> None:
         """Interactively build and optionally persist a migration plan."""
         if not self.app.active_config.get('config_name'):
@@ -5811,13 +5819,14 @@ class MigrationPlanner:
     def _stop_source_instance_for_migration(self, instance_name: str) -> Dict[str, Any]:
         """Stop the source instance before archiving its data."""
         playbook_path = self.app.config_dir / 'playbooks/service_stop.yml'
+        lifecycle_timeout = self._migration_runtime_timeout()
         success, output, _, _ = self.app.run_generated_playbook(
             playbook_path,
             [instance_name],
             machine_scope=False,
             last_applied_action='migration_source_stop',
             show_output=False,
-            timeout=self.app.connection_timeout,
+            timeout=lifecycle_timeout,
         )
         if success:
             return {'status': 'success', 'output': output}
@@ -5942,13 +5951,16 @@ class MigrationPlanner:
         """Run an instance-scoped playbook against the target inventory override."""
         playbook_path = self.app.config_dir / f'playbooks/{playbook_name}'
         execution_inventory = self._build_target_execution_inventory(plan)
+        timeout = self._migration_probe_timeout()
+        if playbook_name in {'apply_instance.yml', 'service_start.yml'}:
+            timeout = self._migration_runtime_timeout()
         success, output, _, _ = self.app.run_custom_inventory_playbook(
             playbook_path,
             execution_inventory,
             machine_scope=False,
             last_applied_action=last_applied_action,
             show_output=show_output,
-            timeout=self.app.connection_timeout * 2,
+            timeout=timeout,
         )
         return success, output
 
@@ -6118,13 +6130,14 @@ class MigrationPlanner:
     def _start_source_instance_after_rollback(self, instance_name: str) -> Dict[str, Any]:
         """Restart the source instance after rollback cleanup."""
         playbook_path = self.app.config_dir / 'playbooks/service_start.yml'
+        lifecycle_timeout = self._migration_runtime_timeout()
         success, output, _, _ = self.app.run_generated_playbook(
             playbook_path,
             [instance_name],
             machine_scope=False,
             last_applied_action='migration_source_restart',
             show_output=False,
-            timeout=self.app.connection_timeout,
+            timeout=lifecycle_timeout,
         )
         if success:
             return {'status': 'success', 'output': output}

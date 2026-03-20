@@ -244,3 +244,39 @@ class TestMigrationExecution(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertIn("Application health check returned status 'unreachable'", result["message"])
+
+    def test_stop_source_instance_for_migration_uses_runtime_timeout_floor(self):
+        plan = self._build_plan("/tmp")
+        app = self._build_app(plan)
+        planner = r1setup.MigrationPlanner(app)
+        app.run_generated_playbook = MagicMock(return_value=(True, "ok", [], {}))
+
+        result = planner._stop_source_instance_for_migration("node-1")
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(app.run_generated_playbook.call_args.kwargs["timeout"], 180)
+
+    def test_target_apply_and_start_use_runtime_timeout_floor_but_probes_do_not(self):
+        plan = self._build_plan("/tmp")
+        app = self._build_app(plan)
+        planner = r1setup.MigrationPlanner(app)
+        app.run_custom_inventory_playbook = MagicMock(return_value=(True, "ok", [], {}))
+
+        planner._run_target_instance_playbook(
+            plan,
+            "apply_instance.yml",
+            last_applied_action="migration_apply_target",
+        )
+        planner._run_target_instance_playbook(
+            plan,
+            "service_start.yml",
+            last_applied_action="migration_start_target",
+        )
+        planner._run_target_instance_playbook(
+            plan,
+            "service_status.yml",
+            last_applied_action="migration_verify_target",
+        )
+
+        timeout_values = [call.kwargs["timeout"] for call in app.run_custom_inventory_playbook.call_args_list]
+        self.assertEqual(timeout_values, [180, 180, 60])

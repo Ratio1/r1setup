@@ -135,3 +135,13 @@ class TestMigrationRollbackAndFinalization(unittest.TestCase):
                 [("migration_finalization", "started"), ("migration_finalization", "success")],
             )
 
+    def test_start_source_instance_after_rollback_uses_runtime_timeout_floor(self):
+        plan = self._build_plan("/tmp", status="failed")
+        app = self._build_app(plan, input_side_effect=["y"])
+        planner = r1setup.MigrationPlanner(app)
+        app.run_generated_playbook = MagicMock(return_value=(True, "ok", [], {}))
+
+        result = planner._start_source_instance_after_rollback("node-1")
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(app.run_generated_playbook.call_args.kwargs["timeout"], 180)

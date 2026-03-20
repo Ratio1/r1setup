@@ -248,3 +248,38 @@ After these phases:
 - shared-machine expert mode should feel safe and intelligible
 - the UI should stop overstating health for undeployed sibling instances
 - operators should see clearer completion and recovery messaging
+
+## Implementation Results
+
+### Phase A
+
+Status:
+
+- completed
+
+Implemented:
+
+- added a dedicated migration runtime timeout helper with the same `180s` minimum floor used for longer deploy/apply work
+- migrated source stop and rollback source restart to that shared lifecycle timeout instead of the raw base timeout
+- updated target migration runtime playbooks so:
+  - `apply_instance.yml` uses the migration runtime timeout
+  - `service_start.yml` uses the migration runtime timeout
+  - verification probes such as `service_status.yml` keep the shorter probe timeout
+
+Files changed:
+
+- [r1setup](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- [test_migration_execution.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_migration_execution.py)
+- [test_migration_finalization.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_migration_finalization.py)
+
+Verification:
+
+- `python3 -m unittest tests.test_migration_execution`
+- `python3 -m unittest tests.test_migration_finalization`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Result:
+
+- migration lifecycle steps no longer inherit the raw `30s` base timeout by default
+- target verification probes remain shorter than apply/start lifecycle phases
