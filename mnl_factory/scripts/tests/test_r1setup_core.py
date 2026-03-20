@@ -1043,7 +1043,8 @@ class TestTrackedLiveNodeMessaging(unittest.TestCase):
 
         self.assertEqual(display["state_key"], "tracking_live_nodes")
         self.assertEqual(display["main_menu_text"], "📡 tracking 1 live node(s)")
-        self.assertIn("no completed r1setup deployment record", display["status_note"])
+        self.assertIn("actively tracking live runtimes", display["status_note"])
+        self.assertIn("imported from discovery or moved via migration", display["status_note"])
 
     def test_combined_status_and_info_describes_tracked_live_nodes(self):
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)
@@ -1088,7 +1089,8 @@ class TestTrackedLiveNodeMessaging(unittest.TestCase):
 
         rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
         self.assertIn("Deployment: 📡 Tracking 1 live node(s)", rendered_text)
-        self.assertIn("no completed r1setup deployment record", rendered_text)
+        self.assertIn("actively tracking live runtimes", rendered_text)
+        self.assertIn("imported from discovery or moved via migration", rendered_text)
 
     def test_clear_screen_respects_no_clear_env(self):
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)

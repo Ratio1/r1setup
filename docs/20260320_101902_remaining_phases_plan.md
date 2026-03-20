@@ -258,6 +258,51 @@ Acceptance criteria:
 
 - one commit per phase
 - update this file after each phase with an `Implementation Results` subsection
+
+## Post-Release UX Remediation
+
+Timestamp: `2026-03-20T11:27:38+02:00`
+
+This follow-up slice addresses the remaining UX issues found in the complete E2E rerun:
+
+1. misleading tracked-live deployment messaging
+2. planning-time wording reused in execute / rollback / finalize screens
+3. long quiet periods during migration
+4. unclear cancellation recovery guidance for interrupted migration
+5. stale-looking discovery rows after finalized migration
+
+### UX Phase 1: Deployment And Migration Copy Cleanup
+
+Objective:
+- make deployment and migration review wording match the actual operator state
+
+Implementation:
+- replace the misleading `no completed deployment record` note with wording that acknowledges discovery-import and migration-tracked runtimes
+- make migration review screens context-aware for:
+  - planning
+  - execution
+  - rollback
+  - finalization
+- stop showing pre-execution warnings like target-preparation reminders during finalize / rollback review
+
+Tests:
+- extend `test_r1setup_core.py`
+- extend `test_migration_finalization.py`
+
+Acceptance criteria:
+- tracked-live configs no longer imply something is incomplete or broken when the runtime is intentionally tracked
+- finalize / rollback review screens no longer say `Planning only`
+- execute review still clearly communicates the destructive transition that will occur
+
+Non-goals:
+- changing actual migration state semantics
+
+#### Implementation Results
+
+- completed on `2026-03-20`
+- tracked-live deployment messaging now explains that runtimes may come from discovery or migration
+- migration review copy is now context-specific for execution, rollback, and finalization
+- finalize / rollback review no longer repeats the pre-execution target-preparation warning
 - run targeted tests for the phase plus full suite before each phase commit
 
 ## Implementation Results

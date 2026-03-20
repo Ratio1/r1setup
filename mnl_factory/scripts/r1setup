@@ -5682,13 +5682,26 @@ class MigrationPlanner:
             return f"{value / 1024:.2f} KB"
         return f"{value} B"
 
-    def _display_migration_plan(self, plan: Dict[str, Any]) -> None:
+    def _display_migration_plan(self, plan: Dict[str, Any], *, context: str = 'planning') -> None:
         """Render a migration plan review summary."""
         self.app.print_header("Migration Plan Review")
+        status = str(plan.get('status') or 'unknown')
+        status_color = {
+            'planned': 'green',
+            'executed': 'green',
+            'finalized': 'green',
+            'rolled_back': 'green',
+            'executing': 'yellow',
+            'rolling_back': 'yellow',
+            'finalizing': 'yellow',
+            'failed': 'red',
+            'rollback_failed': 'red',
+            'finalization_failed': 'red',
+        }.get(status, 'red')
         self.app.print_colored(f"Plan ID: {plan['plan_id']}", 'cyan')
         self.app.print_colored(
-            f"Status: {plan['status']}",
-            'green' if plan['status'] == 'planned' else 'red',
+            f"Status: {status}",
+            status_color,
         )
         self.app.print_colored(
             f"Instance: {plan['instance_name']} | source={plan['source_machine_id']} | target={plan['target_machine_id']}",
@@ -5731,7 +5744,7 @@ class MigrationPlanner:
             f"Target deployment state: {preflight.get('target_deployment_state', 'unknown')}",
             'white',
         )
-        if preflight.get('requires_target_preparation'):
+        if context in ('planning', 'execution') and preflight.get('requires_target_preparation'):
             self.app.print_colored("Target preparation required before execution.", 'yellow')
         print()
 
@@ -5751,10 +5764,14 @@ class MigrationPlanner:
                 self.app.print_colored(f"  • {warning}", 'yellow')
             print()
 
-        self.app.print_colored(
-            "Planning only: no source shutdown, assignment change, or data transfer has occurred.",
-            'cyan',
-        )
+        context_note = {
+            'planning': "Planning only: no source shutdown, assignment change, or data transfer has occurred.",
+            'execution': "Execution review: running this plan will stop the source service, transfer the volume, and update assignment on success.",
+            'rollback': "Rollback review: this will clean partial target artifacts, remove transfer archives, and restore the source runtime.",
+            'finalization': "Finalization review: this will clean deferred source-side artifacts after a verified migration.",
+        }.get(context)
+        if context_note:
+            self.app.print_colored(context_note, 'cyan')
 
     def _migration_runtime_timeout(self) -> int:
         """Timeout for migration lifecycle steps that can take as long as deploy/apply."""
@@ -5814,7 +5831,7 @@ class MigrationPlanner:
             runtime_name_policy=runtime_name_policy,
             custom_runtime=custom_runtime,
         )
-        self._display_migration_plan(plan)
+        self._display_migration_plan(plan, context='planning')
 
         if self.app.get_input("\nSave this migration plan locally? (Y/n)", "Y").lower() == 'y':
             self.app.set_migration_plan_state(plan)
@@ -6401,7 +6418,7 @@ class MigrationPlanner:
             return
 
         self.app.print_header("Rollback Saved Migration Plan")
-        self._display_migration_plan(plan)
+        self._display_migration_plan(plan, context='rollback')
         if self.app.get_input("\n↩️  Roll back this migration plan now? (y/N)", "N").lower() != 'y':
             self.app.print_colored("Migration rollback cancelled.", 'yellow')
             self.app.wait_for_enter()
@@ -6589,7 +6606,7 @@ class MigrationPlanner:
             return
 
         self.app.print_header("Finalize Saved Migration Plan")
-        self._display_migration_plan(plan)
+        self._display_migration_plan(plan, context='finalization')
         remove_source_volume = self.app.get_input(
             "Remove source volume data after finalization? (y/N)",
             "N",
@@ -6743,7 +6760,7 @@ class MigrationPlanner:
             return
 
         self.app.print_header("Execute Saved Migration Plan")
-        self._display_migration_plan(plan)
+        self._display_migration_plan(plan, context='execution')
         if self.app.get_input("\n🚚 Execute this migration plan now? (y/N)", "N").lower() != 'y':
             self.app.print_colored("Migration execution cancelled.", 'yellow')
             self.app.wait_for_enter()
@@ -10001,8 +10018,9 @@ PY"""
                 'config_summary': f"📡 Tracking {live_label}",
                 'status_line': f"📡 Status: Tracking {live_label}",
                 'status_note': (
-                    "Live runtimes were detected for this configuration, but there is no completed "
-                    "r1setup deployment record in the current config yet."
+                    "This configuration is actively tracking live runtimes. They may have been "
+                    "imported from discovery or moved via migration, so a local deploy record may "
+                    "not exist yet."
                 ),
                 'main_menu_text': f"📡 tracking {live_label}",
                 'deployment_line': f"Deployment: 📡 Tracking {live_label}",

@@ -172,6 +172,38 @@ class TestMigrationRollbackAndFinalization(unittest.TestCase):
                 [("migration_rollback", "started"), ("migration_rollback", "failed"), ("migration_rollback", "success")],
             )
 
+    def test_display_migration_plan_uses_execution_context_copy(self):
+        plan = self._build_plan("/tmp", status="planned")
+        app = self._build_app(plan, input_side_effect=["n"])
+        planner = r1setup.MigrationPlanner(app)
+
+        planner._display_migration_plan(plan, context="execution")
+
+        printed_messages = [call.args[0] for call in app.print_colored.call_args_list]
+        self.assertIn(
+            "Execution review: running this plan will stop the source service, transfer the volume, and update assignment on success.",
+            printed_messages,
+        )
+        self.assertNotIn(
+            "Planning only: no source shutdown, assignment change, or data transfer has occurred.",
+            printed_messages,
+        )
+
+    def test_display_migration_plan_hides_pre_execution_warning_in_finalization_context(self):
+        plan = self._build_plan("/tmp", status="executed")
+        plan["preflight"] = {"requires_target_preparation": True}
+        app = self._build_app(plan, input_side_effect=["n", "n"])
+        planner = r1setup.MigrationPlanner(app)
+
+        planner._display_migration_plan(plan, context="finalization")
+
+        printed_messages = [call.args[0] for call in app.print_colored.call_args_list]
+        self.assertIn(
+            "Finalization review: this will clean deferred source-side artifacts after a verified migration.",
+            printed_messages,
+        )
+        self.assertNotIn("Target preparation required before execution.", printed_messages)
+
     def test_verify_source_instance_after_rollback_returns_error_when_runtime_is_not_running(self):
         plan = self._build_plan("/tmp", status="failed")
         app = self._build_app(plan, input_side_effect=["y"])
