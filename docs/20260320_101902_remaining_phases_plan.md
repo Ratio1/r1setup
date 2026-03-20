@@ -421,3 +421,28 @@ Results:
 
 Follow-up for next phase:
 - run the final live validation gate against real hosts with discovery/import included in the matrix
+
+### Phase 6
+
+Status:
+- completed on `2026-03-20`
+
+What was validated live:
+- clean repo-local startup from reset state
+- initial config creation
+- machine registration on a real host
+- post-registration discovery offer
+- selective discovery/import on a host with an already running `edge_node`
+- preserved runtime naming on import
+- standard-mode retention when importing one discovered service
+- grouped fleet rendering after import
+- compact main-menu state after returning from the workflow
+
+Live report:
+- [20260320_104610_phase6_live_validation_report.md](/home/vi/work/ratio1/repos/multi_node_launcher/docs/20260320_104610_phase6_live_validation_report.md)
+
+Results:
+- the real-host discovery/import workflow passed
+- no blocking issues were found in the final live slice
+- one minor UX friction remains:
+  - after accepting the post-registration discovery prompt, the user still reselects the same machine instead of having it preselected automatically
