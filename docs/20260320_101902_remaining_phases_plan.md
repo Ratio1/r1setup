@@ -446,3 +446,21 @@ Results:
 - no blocking issues were found in the final live slice
 - one minor UX friction remains:
   - after accepting the post-registration discovery prompt, the user still reselects the same machine instead of having it preselected automatically
+
+### Post-Phase Polish
+
+Status:
+- completed on `2026-03-20`
+
+What landed:
+- the post-registration discovery handoff now passes the newly registered machine id directly into the discovery flow
+- users no longer have to reselect the same machine immediately after answering `yes` to the follow-up discovery prompt
+
+Verification:
+- `python3 -m unittest tests.test_machine_registration tests.test_machine_specs tests.test_r1setup_core`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Results:
+- `233` tests passed
+- `py_compile` passed

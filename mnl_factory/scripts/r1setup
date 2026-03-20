@@ -9678,7 +9678,7 @@ PY"""
             'topology_mode': final_topology_mode,
         }
 
-    def discover_and_import_existing_services(self) -> None:
+    def discover_and_import_existing_services(self, preselected_machine_id: Optional[str] = None) -> None:
         """Discover existing remote edge-node services and import a selected subset into the current config."""
         if not self._ensure_configuration_shell_for_machine_registration():
             return
@@ -9691,7 +9691,11 @@ PY"""
             self.wait_for_enter()
             return
 
-        machine_id = self._select_single_registered_machine(machines, title="Select Machine For Discovery")
+        machine_id = str(preselected_machine_id or '').strip()
+        if machine_id and machine_id not in machines:
+            machine_id = ''
+        if not machine_id:
+            machine_id = self._select_single_registered_machine(machines, title="Select Machine For Discovery")
         if not machine_id:
             return
 
@@ -9888,7 +9892,7 @@ PY"""
         self.upsert_machine_record(machine_id, machine_record)
         self.print_colored(f"Machine '{machine_id}' registered successfully.", 'green')
         if self.get_input("Discover existing edge-node services on this machine now? (y/n)", "n").lower() == 'y':
-            self.discover_and_import_existing_services()
+            self.discover_and_import_existing_services(machine_id)
             return
         self.wait_for_enter()
 

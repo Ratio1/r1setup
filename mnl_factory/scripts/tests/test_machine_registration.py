@@ -97,7 +97,7 @@ class TestMachineRegistrationPersistence(unittest.TestCase):
             "ansible_user": "root",
         })
         app._probe_machine_specs = MagicMock(return_value={"status": "error", "message": "skipped"})
-        app.get_input = MagicMock(side_effect=["machine-discovery", "n", "y", "y", "y", "y"])
+        app.get_input = MagicMock(side_effect=["machdisc", "n", "y", "y", "y", "y"])
         app.discover_and_import_existing_services = MagicMock()
         app.config_manager = r1setup.ConfigurationManager(app)
         app.config_manager._save_active_config = MagicMock()
@@ -110,4 +110,4 @@ class TestMachineRegistrationPersistence(unittest.TestCase):
 
         app.register_machine_without_deployment()
 
-        app.discover_and_import_existing_services.assert_called_once()
+        app.discover_and_import_existing_services.assert_called_once_with("machdisc")
