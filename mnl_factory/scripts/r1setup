@@ -1828,6 +1828,61 @@ class ConfigurationManager:
 
         self._save_active_config()
 
+    def reconcile_legacy_migration_plan_state(
+        self,
+        inventory: Optional[Dict[str, Any]] = None,
+        *,
+        persist: bool = False,
+    ) -> Dict[str, Any]:
+        """Repair clearly recoverable pre-fix migration-plan states without guessing."""
+        plan = copy.deepcopy(self.active_config.get('migration_plan_state') or {})
+        if not plan or str(plan.get('status') or '').strip() != 'rollback_failed':
+            return {'changed': False, 'plan': plan}
+
+        instance_name = str(plan.get('instance_name') or '').strip()
+        source_machine_id = str(plan.get('source_machine_id') or '').strip()
+        if not instance_name or not source_machine_id:
+            return {'changed': False, 'plan': plan, 'reason': 'plan_missing_identity'}
+
+        inventory = inventory if inventory is not None else self.app.inventory
+        hosts = _get_gpu_hosts(inventory)
+        host_config = dict(hosts.get(instance_name, {}))
+        fleet_state = self._normalize_fleet_state(self.get_fleet_state_copy())
+        instance_record = dict(fleet_state.get('fleet', {}).get('instances', {}).get(instance_name, {}))
+
+        assigned_machine_id = str(
+            host_config.get('r1setup_machine_id')
+            or instance_record.get('assigned_machine_id')
+            or ''
+        ).strip()
+        if assigned_machine_id != source_machine_id:
+            return {'changed': False, 'plan': plan, 'reason': 'instance_not_on_source_machine'}
+
+        node_status = str(
+            host_config.get('node_status')
+            or (instance_record.get('status') or {}).get('node_status')
+            or ''
+        ).strip().lower()
+        if node_status != 'running':
+            return {'changed': False, 'plan': plan, 'reason': 'source_runtime_not_running'}
+
+        repaired_plan = copy.deepcopy(plan)
+        repaired_plan['status'] = 'rolled_back'
+        repaired_plan['last_step'] = 'rollback_completed'
+        repaired_plan['legacy_repair'] = {
+            'repaired_at': datetime.now().isoformat(),
+            'previous_status': str(plan.get('status') or 'rollback_failed'),
+            'reason': 'source_runtime_already_running',
+        }
+        rollback_recovery = dict(repaired_plan.get('rollback_recovery') or {})
+        rollback_recovery.setdefault('reconciled_after_error', True)
+        repaired_plan['rollback_recovery'] = rollback_recovery
+
+        self.active_config['migration_plan_state'] = copy.deepcopy(repaired_plan)
+        if persist:
+            self.set_migration_plan_state(repaired_plan)
+        return {'changed': True, 'plan': repaired_plan}
+
     def finalize_instance_migration(
         self,
         instance_name: str,
@@ -2053,6 +2108,7 @@ class ConfigurationManager:
                 metadata['fleet_state'] = self._merge_fleet_state(metadata.get('fleet_state'), self.app.inventory)
                 self.active_config.update(metadata)
                 self.fleet_state = copy.deepcopy(metadata['fleet_state'])
+                self.reconcile_legacy_migration_plan_state(self.app.inventory, persist=True)
                 self._save_active_config()
             else:
                 self.fleet_state = self.build_fleet_state(self.app.inventory)
@@ -2095,6 +2151,7 @@ class ConfigurationManager:
                         metadata['fleet_state'] = self._merge_fleet_state(metadata.get('fleet_state'), self.app.inventory)
                         self.active_config.update(metadata)
                         self.fleet_state = copy.deepcopy(metadata['fleet_state'])
+                        self.reconcile_legacy_migration_plan_state(self.app.inventory, persist=True)
                     except Exception as e:
                         self.app.print_debug(f"Unable to load config metadata for {config_name}: {e}")
                         self.fleet_state = self.build_fleet_state(self.app.inventory)

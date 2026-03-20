@@ -367,3 +367,32 @@ Results:
 
 Follow-up for next phase:
 - add one-time repair/normalization for clearly recoverable legacy `rollback_failed` migration plans
+
+### Phase 4
+
+Status:
+- completed on `2026-03-20`
+
+What landed:
+- added a narrow legacy migration-plan reconciler in [`r1setup`](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- clearly recoverable stale plans now normalize from `rollback_failed` to `rolled_back` when:
+  - the tracked instance still belongs to the original source machine
+  - the saved node status is already `running`
+- ambiguous states are left untouched
+- config loading paths now run this repair logic after inventory + fleet-state are loaded
+
+Tests added:
+- [test_migration_plan_repair.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_migration_plan_repair.py)
+
+Verification:
+- `python3 -m unittest tests.test_migration_plan_repair tests.test_migration_finalization tests.test_migration_planning`
+- `python3 -m unittest tests.test_migration_plan_repair tests.test_migration_finalization tests.test_migration_planning tests.test_r1setup_core`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Results:
+- `233` tests passed
+- `py_compile` passed
+
+Follow-up for next phase:
+- update operator docs/release surfaces and prepare the final validation gate
