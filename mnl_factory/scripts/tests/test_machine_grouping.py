@@ -295,3 +295,60 @@ class TestMachineGroupDisplayLines(unittest.TestCase):
             "      expert mode retained with 1 instance; normalize back to standard only via an explicit future action",
             texts,
         )
+
+    def test_build_machine_group_display_lines_skips_update_flag_for_not_deployed_instance(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app._format_timestamp_ago = MagicMock(return_value="Just now")
+
+        machine_views = [
+            {
+                "machine_id": "machine-a",
+                "display_label": "machine-a",
+                "connection_display": "root@10.0.0.1",
+                "topology_mode": "expert",
+                "deployment_state": "active",
+                "group_status": "Mixed States",
+                "group_status_color": "yellow",
+                "group_status_emoji": "🟡",
+                "machine_specs_summary": "",
+                "instances": [
+                    {
+                        "instance_name": "node-1",
+                        "status": "running",
+                        "status_emoji": "🟢",
+                        "status_label": "Running",
+                        "status_color": "green",
+                        "runtime": {
+                            "service_name": "edge_node",
+                            "container_name": "edge_node",
+                        },
+                        "service_file_version": "v1",
+                        "last_update": "",
+                        "ssh_auth_mode": "key_only",
+                    },
+                    {
+                        "instance_name": "node-2",
+                        "status": "not_deployed",
+                        "status_emoji": "📦",
+                        "status_label": "Not Deployed",
+                        "status_color": "yellow",
+                        "runtime": {
+                            "service_name": "edge_node_node2",
+                            "container_name": "edge_node_node2",
+                        },
+                        "service_file_version": "NOT",
+                        "last_update": "",
+                        "ssh_auth_mode": "key_only",
+                    },
+                ],
+            }
+        ]
+
+        lines, outdated = app._build_machine_group_display_lines(machine_views, target_service_version="v1")
+
+        texts = [text for text, _ in lines]
+        self.assertIn(
+            "      - 📦 node-2 [NOT DEPLOYED] service=edge_node_node2 container=edge_node_node2 | service NOT / target v1 [N/A]",
+            texts,
+        )
+        self.assertEqual(outdated, [])

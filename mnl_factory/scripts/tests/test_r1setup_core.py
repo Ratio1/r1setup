@@ -439,6 +439,86 @@ class TestNodeInfoDetails(unittest.TestCase):
         self.assertTrue(matching_calls)
         self.assertEqual(matching_calls[0].args[1], "red")
 
+    def test_display_node_info_details_skips_update_recommendation_for_not_deployed_node(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                                r1setup.SERVICE_FILE_VERSION_FIELD: "NOT",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        app.load_configuration = MagicMock()
+        app.get_mnl_service_version = MagicMock(return_value="v5")
+        app.get_host_service_file_version = MagicMock(return_value="NOT")
+        app._get_node_status_info = MagicMock(return_value={"status": "not_deployed"})
+        app._get_status_display_info = MagicMock(return_value=("📦", "yellow", "Not Deployed"))
+        app.print_header = MagicMock()
+        app.print_section = MagicMock()
+        app.print_colored = MagicMock()
+
+        app._display_node_info_details({
+            "node-1": {
+                "status": "unreachable",
+                "data": {},
+            }
+        })
+
+        rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
+        self.assertIn("Service File Version: NOT (not applicable)", rendered_text)
+        self.assertNotIn("Update service for: node-1", rendered_text)
+
+
+class TestMainMenuDeploymentDisplay(unittest.TestCase):
+    """Tests compact main-menu deployment wording."""
+
+    def test_show_main_menu_loads_configuration_before_tracking_live_label(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {
+            "config_name": "cfg",
+            "deployment_status": "never_deployed",
+        }
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        def _load_configuration():
+            app.inventory["all"]["children"]["gpu_nodes"]["hosts"]["node-1"]["node_status"] = "running"
+        app.load_configuration = MagicMock(side_effect=_load_configuration)
+        app._load_active_config = MagicMock()
+        app.check_hosts_config = MagicMock(return_value=True)
+        app.get_mnl_app_env = MagicMock(return_value="devnet")
+        app._get_node_status_info = MagicMock(return_value={"status": "running", "last_update": ""})
+        app._get_status_display_info = MagicMock(return_value=("🟢", "green", "Running"))
+        app._format_timestamp_ago = MagicMock(return_value="Just now")
+        app.print_header = MagicMock()
+        app.print_colored = MagicMock()
+        app.get_input = MagicMock(return_value="0")
+
+        app.show_main_menu()
+
+        rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
+        self.assertIn("cfg | devnet | 📡 tracking 1 live node(s)", rendered_text)
+
     def test_combined_status_and_info_shows_inline_details(self):
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)
         app.check_hosts_config = MagicMock(return_value=True)

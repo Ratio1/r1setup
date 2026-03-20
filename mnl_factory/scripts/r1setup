@@ -8707,7 +8707,9 @@ class R1Setup:
 
                 if target_service_version:
                     applied_service_version = instance_view.get('service_file_version') or DEFAULT_SERVICE_FILE_VERSION
-                    if applied_service_version != target_service_version:
+                    if not self._is_service_update_candidate_instance(instance_view):
+                        version_state = 'N/A'
+                    elif applied_service_version != target_service_version:
                         outdated_service_nodes.append(instance_view['instance_name'])
                         version_state = 'UPDATE'
                     else:
@@ -9126,6 +9128,8 @@ class R1Setup:
 
         # Show compact status line
         has_config = self.check_hosts_config()
+        if has_config:
+            self.load_configuration()
         current_env = self.get_mnl_app_env() or 'not set'
         active_config_name = self.active_config.get('config_name', 'None')
 
@@ -9138,7 +9142,6 @@ class R1Setup:
 
         # Line 2: node status summary (only when configured)
         if has_config:
-            self.load_configuration()
             hosts = _get_gpu_hosts(self.inventory)
             if hosts:
                 status_counts = {}
@@ -9452,6 +9455,11 @@ class R1Setup:
     def _is_service_update_candidate(node_status: str) -> bool:
         """Return whether a node should participate in service-file update checks."""
         return node_status not in {'never_deployed', 'deleted', 'not_deployed'}
+
+    @classmethod
+    def _is_service_update_candidate_instance(cls, instance_view: Dict[str, Any]) -> bool:
+        """Return whether a grouped instance should participate in update recommendations."""
+        return cls._is_service_update_candidate(str(instance_view.get('status') or 'unknown'))
 
     def _get_service_update_inventory(
         self,
@@ -11186,8 +11194,12 @@ class R1Setup:
             node_status = status_info.get('status', 'unknown')
             status_emoji, status_color, status_desc = self._get_status_display_info(node_status)
             applied_service_version = self.get_host_service_file_version(host_config)
-            service_version_state = "current" if applied_service_version == target_service_version else "update recommended"
-            if applied_service_version != target_service_version:
+            if not self._is_service_update_candidate(node_status):
+                service_version_state = "not applicable"
+            elif applied_service_version == target_service_version:
+                service_version_state = "current"
+            else:
+                service_version_state = "update recommended"
                 outdated_service_nodes.append(node_name)
 
             self.print_section(node_name)
@@ -11197,7 +11209,7 @@ class R1Setup:
             self.print_colored(f"SSH User: {host_config.get('ansible_user', 'N/A')}", 'white')
             self.print_colored(
                 f"Service File Version: {applied_service_version} ({service_version_state})",
-                'green' if applied_service_version == target_service_version else 'red'
+                'green' if service_version_state in {'current', 'not applicable'} else 'red'
             )
 
             data = result.get('data') or {}

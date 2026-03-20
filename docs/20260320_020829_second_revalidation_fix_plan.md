@@ -488,3 +488,42 @@ Result:
   - the compact main-menu deployment label can still be stale on first render before status refresh
   - `Node Status & Info` still recommends service-file update for an undeployed sibling
   - old pre-fix `rollback_failed` saved plans are not auto-repaired
+
+### Phase G
+
+Status:
+
+- completed
+
+Implemented:
+
+- fixed the compact main-menu deployment line to load the saved inventory before deriving the tracked-live-nodes label
+- added a shared grouped-instance helper so service-update recommendations only apply to nodes whose runtime is actually update-eligible
+- changed grouped status rendering for undeployed siblings from:
+  - `[UPDATE]`
+  to:
+  - `[N/A]`
+- updated detailed node-info rendering so undeployed / never-deployed nodes show:
+  - `Service File Version: ... (not applicable)`
+  and do not appear in the `Update service for:` action list
+
+Files changed:
+
+- [r1setup](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- [test_r1setup_core.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_r1setup_core.py)
+- [test_machine_grouping.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_machine_grouping.py)
+
+Verification:
+
+- `python3 -m unittest tests.test_r1setup_core tests.test_machine_grouping`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+- manual repo-local startup check:
+  - first-render main menu now immediately shows `📡 tracking 1 live node(s)`
+
+Result:
+
+- the stale compact main-menu deployment label is resolved
+- undeployed sibling instances are no longer treated as service-update candidates in the grouped UI or detailed node-info view
+- the remaining follow-up from this remediation track is now limited to:
+  - optional repair behavior for old pre-fix `rollback_failed` saved plans
