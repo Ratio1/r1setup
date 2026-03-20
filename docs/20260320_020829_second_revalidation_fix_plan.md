@@ -336,3 +336,35 @@ Result:
 
 - per-instance runtime names are no longer collapsed back to the default runtime inside instance-scoped operational playbooks
 - shared-machine status checks can now distinguish a running primary instance from an undeployed sibling on the same host
+
+### Phase C
+
+Status:
+
+- completed
+
+Implemented:
+
+- added rollback source-runtime verification after a restart error
+- if rollback restart reports an error but the source instance verifies as `running`, the plan now reconciles to `rolled_back` instead of staying stuck in `rollback_failed`
+- preserved failure history by:
+  - logging the original rollback failure event
+  - recording recovery metadata under `rollback_recovery`
+  - clearing `last_error` only after recovery is confirmed
+- marked reconciled rollback success events with `reconciled_after_error` in the operation log payload
+
+Files changed:
+
+- [r1setup](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- [test_migration_finalization.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_migration_finalization.py)
+
+Verification:
+
+- `python3 -m unittest tests.test_migration_finalization tests.test_migration_execution`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Result:
+
+- rollback no longer has to remain a hard failure if the source node is demonstrably healthy again
+- migration plan state can now reconcile from restart-timeout noise back to a truthful `rolled_back` state while keeping failure history

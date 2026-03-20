@@ -58,6 +58,7 @@ class TestMigrationRollbackAndFinalization(unittest.TestCase):
         app.set_migration_plan_state = MagicMock()
         app.log_operation_event = MagicMock()
         app._update_node_status = MagicMock()
+        app.status_tracker = MagicMock()
         app.get_fleet_state_copy = MagicMock(return_value={
             "config_schema_version": r1setup.CONFIG_SCHEMA_VERSION,
             "fleet": {
@@ -145,3 +146,43 @@ class TestMigrationRollbackAndFinalization(unittest.TestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(app.run_generated_playbook.call_args.kwargs["timeout"], 180)
+
+    def test_rollback_reconciles_to_rolled_back_when_source_restart_times_out_but_status_verifies_running(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plan = self._build_plan(temp_dir, status="failed")
+            app = self._build_app(plan, input_side_effect=["y"])
+            planner = r1setup.MigrationPlanner(app)
+            planner._cleanup_runtime_artifacts = MagicMock(return_value={"status": "success"})
+            planner._cleanup_remote_archive = MagicMock(return_value={"status": "success"})
+            planner._cleanup_local_archive = MagicMock(return_value={"status": "success"})
+            planner._start_source_instance_after_rollback = MagicMock(return_value={"status": "error", "message": "Command timed out after 30 seconds"})
+            planner._verify_source_instance_after_rollback = MagicMock(return_value={"status": "success", "runtime_health": "verified"})
+
+            planner.rollback_saved_migration_plan()
+
+            final_plan = app.set_migration_plan_state.call_args_list[-1].args[0]
+            self.assertEqual(final_plan["status"], "rolled_back")
+            self.assertEqual(final_plan["last_step"], "rollback_completed")
+            self.assertIsNone(final_plan["last_error"])
+            self.assertTrue(final_plan["rollback_recovery"]["reconciled_after_error"])
+            self.assertEqual(final_plan["rollback_recovery"]["original_error"], "Command timed out after 30 seconds")
+            self.assertEqual(app._update_node_status.call_args_list[-1].args, ("node-1", "running"))
+            self.assertEqual(
+                [call.args[:2] for call in app.log_operation_event.call_args_list],
+                [("migration_rollback", "started"), ("migration_rollback", "failed"), ("migration_rollback", "success")],
+            )
+
+    def test_verify_source_instance_after_rollback_returns_error_when_runtime_is_not_running(self):
+        plan = self._build_plan("/tmp", status="failed")
+        app = self._build_app(plan, input_side_effect=["y"])
+        app.run_generated_playbook = MagicMock(return_value=(True, "status-output", ["node-1"], {}))
+        app.status_tracker._parse_ansible_status_lines.return_value = {
+            "node-1": {"status": "stopped"},
+        }
+        planner = r1setup.MigrationPlanner(app)
+
+        result = planner._verify_source_instance_after_rollback("node-1")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("stopped", result["message"])
+        self.assertEqual(app.run_generated_playbook.call_args.kwargs["timeout"], 60)

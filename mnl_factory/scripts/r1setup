@@ -6154,6 +6154,34 @@ class MigrationPlanner:
             return {'status': 'success', 'output': output}
         return {'status': 'error', 'message': output or 'Source restart failed'}
 
+    def _verify_source_instance_after_rollback(self, instance_name: str) -> Dict[str, Any]:
+        """Verify that the source instance is actually running after rollback restart."""
+        playbook_path = self.app.config_dir / 'playbooks/service_status.yml'
+        success, output, _, _ = self.app.run_generated_playbook(
+            playbook_path,
+            [instance_name],
+            machine_scope=False,
+            last_applied_action='migration_verify_source_rollback',
+            show_output=False,
+            timeout=self._migration_probe_timeout(),
+        )
+        if not success:
+            return {'status': 'error', 'message': output or 'Source rollback verification failed'}
+
+        status_tracker = getattr(self.app, 'status_tracker', None)
+        if status_tracker is None:
+            return {'status': 'error', 'message': 'Status tracker unavailable for rollback verification'}
+
+        status_data = status_tracker._parse_ansible_status_lines((output or '').splitlines())
+        host_status = status_data.get(instance_name, {})
+        resolved_status = str(host_status.get('status') or 'unknown')
+        if resolved_status != 'running':
+            return {
+                'status': 'error',
+                'message': f"Source rollback verification returned status '{resolved_status}'",
+            }
+        return {'status': 'success', 'runtime_health': 'verified'}
+
     def rollback_saved_migration_plan(self) -> None:
         """Rollback a failed or interrupted migration plan and restore the source runtime."""
         plan = copy.deepcopy(self.app.active_config.get('migration_plan_state') or {})
@@ -6279,31 +6307,49 @@ class MigrationPlanner:
 
         source_restart = self._start_source_instance_after_rollback(str(plan.get('instance_name') or ''))
         if source_restart.get('status') != 'success':
-            failed_plan = self._persist_plan_step(
-                rolling_back_plan,
-                'rollback_failed_source_restart',
-                status='rollback_failed',
-                last_error=source_restart.get('message', 'Source restart failed'),
-            )
-            self.app._update_node_status(str(plan.get('instance_name') or ''), 'stopped')
             self.app.log_operation_event(
                 'migration_rollback',
                 'failed',
                 {
-                    'plan_id': failed_plan.get('plan_id'),
-                    'instance_name': failed_plan.get('instance_name'),
+                    'plan_id': rolling_back_plan.get('plan_id'),
+                    'instance_name': rolling_back_plan.get('instance_name'),
                     'message': source_restart.get('message', 'Source restart failed'),
                 },
             )
-            self.app.print_colored(source_restart.get('message', 'Source restart failed'), 'red')
-            self.app.wait_for_enter()
-            return
+            recovery_probe = self._verify_source_instance_after_rollback(str(plan.get('instance_name') or ''))
+            if recovery_probe.get('status') != 'success':
+                failed_plan = self._persist_plan_step(
+                    rolling_back_plan,
+                    'rollback_failed_source_restart',
+                    status='rollback_failed',
+                    last_error=source_restart.get('message', 'Source restart failed'),
+                )
+                self.app._update_node_status(str(plan.get('instance_name') or ''), 'stopped')
+                self.app.print_colored(source_restart.get('message', 'Source restart failed'), 'red')
+                self.app.wait_for_enter()
+                return
+            rolling_back_plan = self._persist_plan_step(
+                rolling_back_plan,
+                'rollback_reconciled_source_recovered',
+                rollback_recovery={
+                    'reconciled_after_error': True,
+                    'recovered_at': datetime.now().isoformat(),
+                    'original_error': source_restart.get('message', 'Source restart failed'),
+                    'runtime_health': recovery_probe.get('runtime_health', 'verified'),
+                },
+                last_error=None,
+            )
+            self.app.print_colored(
+                "Source restart reported an error, but live verification confirmed the source node is running again.",
+                'yellow',
+            )
 
         rolled_back_plan = self._persist_plan_step(
             rolling_back_plan,
             'rollback_completed',
             status='rolled_back',
             rolled_back_at=datetime.now().isoformat(),
+            last_error=None,
             rollback_cleanup={
                 'target_volume_removed': True,
                 'local_archive_removed': True,
@@ -6320,6 +6366,7 @@ class MigrationPlanner:
                 'instance_name': rolled_back_plan.get('instance_name'),
                 'source_machine_id': rolled_back_plan.get('source_machine_id'),
                 'target_machine_id': rolled_back_plan.get('target_machine_id'),
+                'reconciled_after_error': bool((rolled_back_plan.get('rollback_recovery') or {}).get('reconciled_after_error')),
             },
         )
         self.app.print_colored("Migration rollback completed successfully.", 'green')
