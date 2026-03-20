@@ -332,6 +332,35 @@ Non-goals:
 - migration apply/start now requests visible Ansible task output
 - long-running migration phases print explicit operator guidance before the quiet sections begin
 - keyboard interrupts now surface rollback-oriented recovery guidance when a saved plan remains active
+
+### UX Phase 3: Discovery Cache Context Polish
+
+Objective:
+- make untracked discovery rows read as cached reference data rather than current active intent
+
+Implementation:
+- relabel untracked discovery rows as cached discovery results
+- show last-scan context when available
+- point the operator to `Configuration -> Discover Services` to refresh the cached view
+
+Tests:
+- extend `test_machine_grouping.py`
+
+Acceptance criteria:
+- untracked discovery rows no longer read like live authoritative state
+- grouped machine views explain how to refresh cached discovery information
+- the grouped view still preserves the distinction between tracked instances and untracked discovered services
+
+Non-goals:
+- automatic discovery refresh
+- removing untracked discovery rows entirely
+
+#### Implementation Results
+
+- completed on `2026-03-20`
+- grouped machine views now label untracked candidates as cached discovery results
+- last-scan context is shown when available
+- the UI now tells the operator exactly where to refresh discovery state
 - run targeted tests for the phase plus full suite before each phase commit
 
 ## Implementation Results

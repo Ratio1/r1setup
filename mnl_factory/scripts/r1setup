@@ -8946,7 +8946,7 @@ class R1Setup:
             if not machine_view['instances']:
                 lines.append(("      no assigned instances in this config", 'yellow'))
             if machine_view.get('untracked_discovered_candidates'):
-                lines.append(("      discovered on this machine but not imported into this config:", 'cyan'))
+                lines.append((self._format_discovery_cache_line(machine_view), 'cyan'))
                 for candidate in machine_view.get('untracked_discovered_candidates') or []:
                     candidate_line = (
                         f"        ~ {candidate.get('service_name', '?')} "
@@ -8999,7 +8999,7 @@ class R1Setup:
                     ))
 
             if machine_view.get('untracked_discovered_candidates'):
-                lines.append(("      discovered on this machine but not imported into this config:", 'cyan'))
+                lines.append((self._format_discovery_cache_line(machine_view), 'cyan'))
                 for candidate in machine_view.get('untracked_discovered_candidates') or []:
                     candidate_line = (
                         f"        ~ {candidate.get('service_name', '?')} "
@@ -9010,6 +9010,19 @@ class R1Setup:
                     lines.append((candidate_line, 'white'))
 
         return lines, sorted(set(outdated_service_nodes))
+
+    def _format_discovery_cache_line(self, machine_view: Dict[str, Any]) -> str:
+        """Describe cached discovery results in grouped machine views."""
+        last_scanned_at = machine_view.get('last_discovery_scan_at')
+        if last_scanned_at:
+            return (
+                "      cached discovery results not imported into this config "
+                f"(last scan {self._format_timestamp_ago(last_scanned_at)}; refresh via Configuration -> Discover Services):"
+            )
+        return (
+            "      cached discovery results not imported into this config "
+            "(refresh via Configuration -> Discover Services):"
+        )
 
     def _print_machine_group_display_lines(self, lines: List[Tuple[str, str]]) -> None:
         """Print grouped machine display lines."""

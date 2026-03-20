@@ -400,6 +400,7 @@ class TestMachineGroupDisplayLines(unittest.TestCase):
                 "group_status_emoji": "📭",
                 "machine_specs_summary": "",
                 "instances": [],
+                "last_discovery_scan_at": "2026-03-20T11:00:00+02:00",
                 "untracked_discovered_candidates": [
                     {
                         "service_name": "edge_node_devnet",
@@ -413,7 +414,10 @@ class TestMachineGroupDisplayLines(unittest.TestCase):
 
         lines, _ = app._build_machine_group_display_lines(machine_views)
         texts = [text for text, _ in lines]
-        self.assertIn("      discovered on this machine but not imported into this config:", texts)
+        self.assertIn(
+            "      cached discovery results not imported into this config (last scan Just now; refresh via Configuration -> Discover Services):",
+            texts,
+        )
         self.assertIn(
             "        ~ edge_node_devnet [DISCOVERED] state=active env=devnet (metadata)",
             texts,
