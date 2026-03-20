@@ -1269,6 +1269,61 @@ class ConfigurationManager:
         configs.sort(key=lambda x: x[1]['created_at'], reverse=True)
         return configs
 
+    def find_runtime_identity_claims(
+        self,
+        machine_config: Dict[str, Any],
+        service_name: str,
+        *,
+        exclude_config_name: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
+        """Return saved config claims for one runtime identity across all known configs."""
+        endpoint = self._machine_endpoint_from_record(machine_config)
+        normalized_service_name = str(service_name or '').strip()
+        if not endpoint or not normalized_service_name:
+            return []
+
+        claims: List[Dict[str, str]] = []
+        for config_filename, _metadata in self._list_available_configs():
+            config_name = Path(config_filename).stem
+            if exclude_config_name and config_name == exclude_config_name:
+                continue
+
+            config_path = self.app.configs_dir / config_filename
+            metadata_path = self._metadata_path_for_config(self.app.configs_dir, config_name)
+            try:
+                with open(config_path) as handle:
+                    inventory = yaml.safe_load(handle) or {}
+            except Exception:
+                continue
+
+            metadata = {}
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path) as handle:
+                        metadata = json.load(handle)
+                except Exception:
+                    metadata = {}
+
+            fleet_state = metadata.get('fleet_state') or self.build_fleet_state(inventory)
+            normalized_fleet = self._normalize_fleet_state(fleet_state)
+            machines = normalized_fleet.get('fleet', {}).get('machines', {})
+            instances = normalized_fleet.get('fleet', {}).get('instances', {})
+            for instance_name, instance_data in instances.items():
+                assigned_machine_id = str(instance_data.get('assigned_machine_id') or '').strip()
+                machine_record = dict(machines.get(assigned_machine_id, {}))
+                if self._machine_endpoint_from_record(machine_record) != endpoint:
+                    continue
+                runtime = dict(instance_data.get('runtime') or {})
+                if str(runtime.get('service_name') or '').strip() != normalized_service_name:
+                    continue
+                claims.append({
+                    'config_name': config_name,
+                    'instance_name': instance_name,
+                    'machine_id': assigned_machine_id,
+                })
+
+        return claims
+
     @staticmethod
     def _default_fleet_state() -> Dict[str, Any]:
         """Return the default fleet-state structure."""
@@ -1641,6 +1696,51 @@ class ConfigurationManager:
             'remaining_instance_names': sorted(remaining_instances),
             'machine_retained': bool(machine_record),
         }
+
+    def record_imported_discovery_instance(
+        self,
+        instance_name: str,
+        *,
+        machine_id: str,
+        runtime: Dict[str, Any],
+        status: str,
+        service_file_version: str,
+        environment: str,
+        environment_source: str,
+    ) -> None:
+        """Persist discovery-import metadata for one imported instance in fleet state."""
+        fleet_state = self._normalize_fleet_state(self.get_fleet_state_copy())
+        machines = fleet_state['fleet']['machines']
+        instances = fleet_state['fleet']['instances']
+
+        instance_record = dict(instances.get(instance_name, {}))
+        instance_record.update({
+            'logical_name': instance_name,
+            'assigned_machine_id': machine_id,
+            'runtime_name_policy': 'preserve',
+            'runtime': dict(runtime),
+            'status': {
+                'node_status': status,
+                'service_file_version': service_file_version or DEFAULT_SERVICE_FILE_VERSION,
+            },
+            'imported_from_discovery': True,
+            'discovery_import': {
+                'imported_at': datetime.now().isoformat(),
+                'environment': environment or 'unknown',
+                'environment_source': environment_source or 'unknown',
+            },
+        })
+        instances[instance_name] = instance_record
+
+        machine_record = dict(machines.get(machine_id, {}))
+        machine_record.setdefault('instance_names', [])
+        if instance_name not in machine_record['instance_names']:
+            machine_record['instance_names'].append(instance_name)
+        machine_record['instance_names'] = sorted(set(machine_record['instance_names']))
+        machine_record['deployment_state'] = 'active'
+        machines[machine_id] = machine_record
+
+        self.fleet_state = fleet_state
 
     def get_fleet_state_copy(self) -> Dict[str, Any]:
         """Return a deep copy of the current fleet state."""
@@ -9190,6 +9290,399 @@ PY"""
             'candidate_count': len(normalized_candidates),
         }
 
+    @staticmethod
+    def _derive_discovery_candidate_node_status(candidate: Dict[str, Any]) -> str:
+        """Translate a discovered service/container state into the CLI node-status model."""
+        service_state = str(candidate.get('service_state') or 'unknown').strip().lower()
+        container_state = str(candidate.get('container_state') or '').strip().lower()
+        container_present = bool(candidate.get('container_present'))
+
+        if service_state == 'active' or container_state == 'running':
+            return 'running'
+        if service_state in {'inactive', 'failed'} or (container_present and container_state in {'created', 'exited', 'dead'}):
+            return 'stopped'
+        if service_state in {'activating', 'deactivating'}:
+            return 'pending_restart'
+        return 'unknown'
+
+    def _select_single_registered_machine(
+        self,
+        machines: Dict[str, Dict[str, Any]],
+        *,
+        title: str,
+    ) -> Optional[str]:
+        """Select one registered machine by number."""
+        if not machines:
+            return None
+
+        machine_ids = list(machines.keys())
+        while True:
+            self.print_header(title)
+            for index, machine_id in enumerate(machine_ids, start=1):
+                machine_record = machines[machine_id]
+                connection_display = self.config_manager._format_machine_connection_display(machine_record)
+                topology_mode = str(machine_record.get('topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE)
+                deployment_state = str(machine_record.get('deployment_state') or DEFAULT_MACHINE_DEPLOYMENT_STATE)
+                specs_summary = self.config_manager._format_machine_specs_summary(machine_record.get('machine_specs'))
+                line = f"  {index}) {machine_id} | {connection_display} | mode={topology_mode} | state={deployment_state}"
+                self.print_colored(line, 'white')
+                if specs_summary:
+                    self.print_colored(f"      specs: {specs_summary}", 'cyan')
+            print()
+            self.print_colored("  0) Cancel", 'white')
+            print()
+
+            choice = self.get_input("Select machine", "0").strip()
+            if choice == '0':
+                return None
+            try:
+                selection = int(choice) - 1
+            except ValueError:
+                self.print_colored("Please enter a number.", 'red')
+                continue
+            if 0 <= selection < len(machine_ids):
+                return machine_ids[selection]
+            self.print_colored("Invalid selection.", 'red')
+
+    def _select_discovery_candidates(
+        self,
+        machine_record: Dict[str, Any],
+        candidates: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Interactively select which discovered candidates to import."""
+        if not candidates:
+            return []
+
+        while True:
+            self.print_header("Discover Existing Services")
+            self.print_colored(
+                f"Machine: {self.config_manager._format_machine_display_label(machine_record.get('machine_id', ''), machine_record)}",
+                'cyan',
+                bold=True,
+            )
+            self.print_colored(
+                self.config_manager._format_machine_connection_display(machine_record),
+                'white',
+            )
+            print()
+            self.print_colored("Discovered candidates:", 'cyan', bold=True)
+            for index, candidate in enumerate(candidates, start=1):
+                mount_summary = ''
+                effective_mounts = candidate.get('effective_mounts') or []
+                if effective_mounts:
+                    mount_summary = f" | mount={effective_mounts[0].get('source')} -> {effective_mounts[0].get('destination')}"
+                self.print_colored(
+                    (
+                        f"  {index}) {candidate['service_name']} | state={candidate['service_state']} | "
+                        f"env={candidate['environment']} ({candidate['environment_source']}) | "
+                        f"container={candidate.get('container_name') or '-'}{mount_summary}"
+                    ),
+                    'white',
+                )
+            print()
+            self.print_colored("Enter numbers separated by commas, 'all', or press Enter to cancel.", 'white')
+            raw_choice = self.get_input("Import which services", "").strip().lower()
+            if not raw_choice:
+                return []
+            if raw_choice == 'all':
+                return list(candidates)
+
+            selected_indexes: List[int] = []
+            for token in raw_choice.replace(',', ' ').split():
+                try:
+                    selected_indexes.append(int(token))
+                except ValueError:
+                    selected_indexes = []
+                    break
+
+            if not selected_indexes:
+                self.print_colored("Invalid selection.", 'red')
+                continue
+
+            selected_candidates: List[Dict[str, Any]] = []
+            valid = True
+            for index in selected_indexes:
+                if not 1 <= index <= len(candidates):
+                    valid = False
+                    break
+                candidate = candidates[index - 1]
+                if candidate not in selected_candidates:
+                    selected_candidates.append(candidate)
+
+            if valid and selected_candidates:
+                return selected_candidates
+            self.print_colored("Invalid selection.", 'red')
+
+    def _prompt_discovery_import_name(
+        self,
+        candidate: Dict[str, Any],
+        existing_hosts: Dict[str, Dict[str, Any]],
+    ) -> Optional[str]:
+        """Prompt for the config-local logical name of one imported discovered candidate."""
+        suggested_name = self.config_manager._sanitize_runtime_suffix(candidate.get('service_name') or 'imported_node')
+        if suggested_name in existing_hosts:
+            suffix = 2
+            base_name = suggested_name
+            while f"{base_name}_{suffix}" in existing_hosts:
+                suffix += 1
+            suggested_name = f"{base_name}_{suffix}"
+
+        while True:
+            chosen_name = self._get_valid_hostname(
+                f"Config node name for imported service '{candidate['service_name']}'",
+                suggested_name,
+            )
+            if chosen_name in existing_hosts:
+                self.print_colored(f"Node '{chosen_name}' already exists in the current config.", 'red')
+                continue
+            return chosen_name
+
+    def import_discovery_candidates(
+        self,
+        machine_id: str,
+        selected_candidates: List[Dict[str, Any]],
+        logical_name_map: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """Import selected discovery candidates into the current config with preserved runtime identities."""
+        if not selected_candidates:
+            return {'status': 'error', 'message': 'No discovery candidates were selected.'}
+
+        self.load_configuration()
+        hosts = _get_gpu_hosts(self.inventory)
+        fleet_state = self.config_manager._normalize_fleet_state(self.get_fleet_state_copy())
+        machines = fleet_state.get('fleet', {}).get('machines', {})
+        machine_record = dict(machines.get(machine_id, {}))
+        if not machine_record:
+            return {'status': 'error', 'message': f"Machine '{machine_id}' is not registered in the current config."}
+
+        existing_instances = list(machine_record.get('instance_names') or [])
+        final_topology_mode = str(machine_record.get('topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE)
+        if final_topology_mode != 'expert' and (len(existing_instances) + len(selected_candidates)) > 1:
+            final_topology_mode = 'expert'
+            if existing_instances:
+                self.config_manager.promote_machine_to_expert(machine_id, self.inventory)
+            else:
+                fleet_state = self.config_manager._normalize_fleet_state(self.get_fleet_state_copy())
+                machines = fleet_state.get('fleet', {}).get('machines', {})
+                machine_record = dict(machines.get(machine_id, {}))
+                machine_record['topology_mode'] = 'expert'
+                machines[machine_id] = machine_record
+                self.config_manager.fleet_state = fleet_state
+
+        imported_names: List[str] = []
+        working_fleet_state = self.config_manager._normalize_fleet_state(self.get_fleet_state_copy())
+        for candidate in selected_candidates:
+            service_name = str(candidate.get('service_name') or '').strip()
+            host_name = str(logical_name_map.get(service_name) or '').strip()
+            if not host_name:
+                return {'status': 'error', 'message': f"Missing logical name for discovered service '{service_name}'."}
+            if host_name in hosts:
+                return {'status': 'error', 'message': f"Node '{host_name}' already exists in the current config."}
+
+            runtime = {
+                'service_name': service_name,
+                'container_name': candidate.get('container_name') or service_name,
+                'volume_path': (candidate.get('effective_mounts') or candidate.get('configured_mounts') or [{}])[0].get(
+                    'source',
+                    DEFAULT_RUNTIME_VOLUME_PATH,
+                ),
+                'metadata_path': candidate.get('metadata_host_path') or '',
+                'exit_status_path': f"/tmp/{candidate.get('container_name') or service_name}.exit",
+            }
+            collisions = self.config_manager.detect_runtime_collisions(machine_id, runtime, working_fleet_state)
+            if collisions:
+                return {
+                    'status': 'error',
+                    'message': (
+                        f"Discovered service '{service_name}' collides with existing runtime fields on machine "
+                        f"'{machine_id}'."
+                    ),
+                }
+
+            host_config = self._extract_machine_access_config(machine_record)
+            host_config.update({
+                'r1setup_machine_id': machine_id,
+                'r1setup_topology_mode': final_topology_mode,
+                'r1setup_machine_deployment_state': 'active',
+                'r1setup_runtime_name_policy': 'preserve',
+                'r1setup_instance_logical_name': host_name,
+                'edge_node_service_name': runtime['service_name'],
+                'mnl_docker_container_name': runtime['container_name'],
+                'mnl_docker_volume_path': runtime['volume_path'],
+                'mnl_r1setup_metadata_host_path': runtime['metadata_path'] or f"{runtime['volume_path']}/_data/r1setup/metadata.json",
+                'r1setup_runtime_exit_status_path': runtime['exit_status_path'],
+                'node_status': self._derive_discovery_candidate_node_status(candidate),
+                'last_status_update': datetime.now().isoformat(),
+                SERVICE_FILE_VERSION_FIELD: candidate.get('service_file_version') or DEFAULT_SERVICE_FILE_VERSION,
+                'imported_from_discovery': True,
+                'r1setup_discovery_environment': candidate.get('environment') or 'unknown',
+                'r1setup_discovery_environment_source': candidate.get('environment_source') or 'unknown',
+            })
+            self.config_manager.apply_runtime_snapshot_to_host_config(host_name, host_config)
+            hosts[host_name] = host_config
+            imported_names.append(host_name)
+
+            self.config_manager.record_imported_discovery_instance(
+                host_name,
+                machine_id=machine_id,
+                runtime={
+                    'service_name': host_config['edge_node_service_name'],
+                    'container_name': host_config['mnl_docker_container_name'],
+                    'volume_path': host_config['mnl_docker_volume_path'],
+                    'metadata_path': host_config['mnl_r1setup_metadata_host_path'],
+                    'exit_status_path': host_config['r1setup_runtime_exit_status_path'],
+                },
+                status=host_config['node_status'],
+                service_file_version=host_config[SERVICE_FILE_VERSION_FIELD],
+                environment=str(candidate.get('environment') or 'unknown'),
+                environment_source=str(candidate.get('environment_source') or 'unknown'),
+            )
+            working_fleet_state = self.config_manager._normalize_fleet_state(self.get_fleet_state_copy())
+
+        updated_fleet_state = self.config_manager._normalize_fleet_state(self.get_fleet_state_copy())
+        updated_machine_record = dict(updated_fleet_state.get('fleet', {}).get('machines', {}).get(machine_id, {}))
+        updated_machine_record['topology_mode'] = final_topology_mode
+        updated_machine_record['deployment_state'] = 'active'
+        updated_fleet_state['fleet']['machines'][machine_id] = updated_machine_record
+        self.config_manager.fleet_state = updated_fleet_state
+        self._save_configuration()
+
+        return {
+            'status': 'success',
+            'imported_names': imported_names,
+            'topology_mode': final_topology_mode,
+        }
+
+    def discover_and_import_existing_services(self) -> None:
+        """Discover existing remote edge-node services and import a selected subset into the current config."""
+        if not self._ensure_configuration_shell_for_machine_registration():
+            return
+
+        self.load_configuration()
+        fleet_state = self.get_fleet_state_copy()
+        machines = dict(fleet_state.get('fleet', {}).get('machines', {}))
+        if not machines:
+            self.print_colored("No registered machines available. Register a machine first.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        machine_id = self._select_single_registered_machine(machines, title="Select Machine For Discovery")
+        if not machine_id:
+            return
+
+        machine_record = dict(machines.get(machine_id, {}))
+        self.print_colored(
+            f"Scanning {self.config_manager._format_machine_connection_display(machine_record)} for existing edge-node services...",
+            'cyan',
+        )
+        discovery_result = self.discover_existing_edge_node_services(machine_record)
+        if discovery_result.get('status') != 'success':
+            self.print_colored(f"Discovery failed: {discovery_result.get('message', 'unknown error')}", 'red')
+            self.wait_for_enter()
+            return
+
+        candidates = list(discovery_result.get('candidates') or [])
+        if not candidates:
+            self.print_colored("No existing edge-node services were discovered on this machine.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        selected_candidates = self._select_discovery_candidates(machine_record, candidates)
+        if not selected_candidates:
+            self.print_colored("Discovery import cancelled. No changes were saved.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        current_env = str(self.get_mnl_app_env() or self.active_config.get('environment') or '').strip().lower()
+        mismatch_candidates = [
+            candidate for candidate in selected_candidates
+            if candidate.get('environment') not in ('', 'unknown', current_env)
+        ]
+        if mismatch_candidates:
+            mismatch_services = ", ".join(sorted(candidate['service_name'] for candidate in mismatch_candidates))
+            proceed = self.get_input(
+                (
+                    f"Selected services ({mismatch_services}) do not match the current config environment "
+                    f"'{current_env or 'unknown'}'. Continue importing them? (y/n)"
+                ),
+                "n",
+            ).lower() == 'y'
+            if not proceed:
+                self.print_colored("Discovery import cancelled. No changes were saved.", 'yellow')
+                self.wait_for_enter()
+                return
+
+        duplicate_claims: List[str] = []
+        current_config_name = self.active_config.get('config_name')
+        for candidate in selected_candidates:
+            claims = self.config_manager.find_runtime_identity_claims(
+                machine_record,
+                candidate['service_name'],
+                exclude_config_name=current_config_name,
+            )
+            for claim in claims:
+                duplicate_claims.append(
+                    f"{candidate['service_name']} already tracked by config '{claim['config_name']}' as '{claim['instance_name']}'"
+                )
+        if duplicate_claims:
+            self.print_colored("Cross-config tracking warnings:", 'yellow', bold=True)
+            for line in duplicate_claims:
+                self.print_colored(f"  - {line}", 'yellow')
+            proceed = self.get_input("Continue importing into the current config anyway? (y/n)", "n").lower() == 'y'
+            if not proceed:
+                self.print_colored("Discovery import cancelled. No changes were saved.", 'yellow')
+                self.wait_for_enter()
+                return
+
+        existing_instances = list(machine_record.get('instance_names') or [])
+        requires_expert = (
+            str(machine_record.get('topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE) == 'expert'
+            or (len(existing_instances) + len(selected_candidates)) > 1
+        )
+        if requires_expert and str(machine_record.get('topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE) != 'expert':
+            self.print_colored(
+                (
+                    f"Importing {len(selected_candidates)} service(s) onto machine '{machine_id}' will require expert mode "
+                    f"because the machine would track {len(existing_instances) + len(selected_candidates)} instances."
+                ),
+                'yellow',
+            )
+            proceed = self.get_input("Promote this machine to expert mode and continue? (y/n)", "n").lower() == 'y'
+            if not proceed:
+                self.print_colored("Discovery import cancelled. No changes were saved.", 'yellow')
+                self.wait_for_enter()
+                return
+
+        hosts = _get_gpu_hosts(self.inventory)
+        logical_name_map: Dict[str, str] = {}
+        for candidate in selected_candidates:
+            logical_name = self._prompt_discovery_import_name(candidate, hosts)
+            if not logical_name:
+                self.print_colored("Discovery import cancelled. No changes were saved.", 'yellow')
+                self.wait_for_enter()
+                return
+            logical_name_map[candidate['service_name']] = logical_name
+            hosts[logical_name] = {}  # temporary reservation against duplicate prompts
+        for logical_name in logical_name_map.values():
+            if logical_name in hosts and not hosts[logical_name]:
+                del hosts[logical_name]
+
+        result = self.import_discovery_candidates(machine_id, selected_candidates, logical_name_map)
+        if result.get('status') != 'success':
+            self.print_colored(f"Discovery import failed: {result.get('message', 'unknown error')}", 'red')
+            self.wait_for_enter()
+            return
+
+        self.print_colored(
+            f"Imported {len(result.get('imported_names') or [])} service(s) into the current config.",
+            'green',
+        )
+        self.print_colored(
+            f"Machine '{machine_id}' now operates in {result.get('topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE)} mode.",
+            'cyan',
+        )
+        self.wait_for_enter()
+
     def _ensure_configuration_shell_for_machine_registration(self) -> bool:
         """Ensure an active configuration exists before persisting machine-only fleet data."""
         if self.active_config.get('config_name'):
@@ -9530,6 +10023,7 @@ PY"""
             self.print_colored("  4) Switch Environment     - Change network environment (mainnet/testnet/devnet)")
             self.print_colored("  5) Register Machine       - Add a fleet machine without deploying a node")
             self.print_colored("  6) Fleet Summary          - Show machines and current assignments")
+            self.print_colored("  7) Discover Services      - Scan a machine and import selected existing services")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -9550,8 +10044,10 @@ PY"""
                 self.register_machine_without_deployment()
             elif choice == '6':
                 self.fleet_summary()
+            elif choice == '7':
+                self.discover_and_import_existing_services()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-6.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-7.", 'red')
                 self.wait_for_enter()
 
     def configure_nodes_menu(self) -> None:

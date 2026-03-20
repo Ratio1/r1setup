@@ -299,3 +299,39 @@ Results:
 
 Follow-up for next phase:
 - wire this backend into a selective import review flow without auto-mutating config or remote state
+
+### Phase 2
+
+Status:
+- completed on `2026-03-20`
+
+What landed:
+- added cross-config runtime-identity claim lookup for discovery warnings
+- added a selective discovery-import workflow in [`r1setup`](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- added `Configuration -> Discover Services`
+- import now:
+  - scans one selected registered machine
+  - shows discovered candidates
+  - lets the user choose a subset explicitly
+  - warns on environment mismatch
+  - warns when another saved config already tracks the same `(machine endpoint + service name)`
+  - preserves discovered runtime identities by default
+  - promotes the target machine to expert mode only when the resulting tracked instance count requires it
+- imported instances now persist discovery-import metadata in fleet state
+
+Tests added:
+- [test_discovery_import_plan.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_discovery_import_plan.py)
+- [test_discovery_duplicates.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_discovery_duplicates.py)
+
+Verification:
+- `python3 -m unittest tests.test_discovery_import_plan tests.test_discovery_duplicates tests.test_discovery_scan tests.test_discovery_inference`
+- `python3 -m unittest tests.test_machine_registration tests.test_inventory_builder tests.test_r1setup_core`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Results:
+- `227` tests passed
+- `py_compile` passed
+
+Follow-up for next phase:
+- make grouped machine/status views distinguish discovered-untracked vs imported-tracked services more clearly
