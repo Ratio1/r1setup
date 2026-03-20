@@ -1092,6 +1092,38 @@ class TestTrackedLiveNodeMessaging(unittest.TestCase):
         self.assertIn("actively tracking live runtimes", rendered_text)
         self.assertIn("imported from discovery or moved via migration", rendered_text)
 
+
+class TestCancellationGuidance(unittest.TestCase):
+    """Tests recovery hints after keyboard interrupts."""
+
+    def test_print_cancellation_guidance_mentions_rollback_for_executing_migration(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {
+            "migration_plan_state": {
+                "status": "executing",
+                "instance_name": "node-1",
+                "last_step": "target_prepared",
+            }
+        }
+        app.print_colored = MagicMock()
+
+        app._print_cancellation_guidance()
+
+        rendered = " ".join(call.args[0] for call in app.print_colored.call_args_list)
+        self.assertIn("remains in 'executing' state", rendered)
+        self.assertIn("Rollback Migration", rendered)
+
+    def test_print_cancellation_guidance_is_silent_without_saved_plan(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {}
+        app.print_colored = MagicMock()
+
+        app._print_cancellation_guidance()
+
+        app.print_colored.assert_not_called()
+
     def test_clear_screen_respects_no_clear_env(self):
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)
 

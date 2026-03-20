@@ -6199,7 +6199,7 @@ class MigrationPlanner:
             plan,
             'apply_instance.yml',
             last_applied_action='migration_apply_target',
-            show_output=False,
+            show_output=True,
         )
         if success:
             return {'status': 'success', 'output': output}
@@ -6211,7 +6211,7 @@ class MigrationPlanner:
             plan,
             'service_start.yml',
             last_applied_action='migration_start_target',
-            show_output=False,
+            show_output=True,
         )
         if success:
             return {'status': 'success', 'output': output}
@@ -6814,6 +6814,10 @@ class MigrationPlanner:
 
         total_steps = 9
         self._announce_migration_phase(1, total_steps, "Prepare Target Machine", "Ensuring the destination host is ready to accept the migrated node.")
+        self.app.print_colored(
+            "This step may stay quiet between Ansible tasks while packages install or repositories refresh.",
+            'cyan',
+        )
         prep_result = self._prepare_target_machine_for_migration(executing_plan)
         if prep_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, prep_result.get('message', 'Target preparation failed'))
@@ -6918,6 +6922,15 @@ class MigrationPlanner:
         executing_plan = self._persist_plan_step(executing_plan, 'target_extracted')
 
         self._announce_migration_phase(8, total_steps, "Apply And Start Target Runtime", "Rendering the service definition on the target machine and starting the node.")
+        apply_timeout = self._migration_runtime_timeout()
+        self.app.print_colored(
+            f"Target apply/start can take several minutes. Timeout for this phase: {apply_timeout}s (base setting: {self.app.connection_timeout}s).",
+            'cyan',
+        )
+        self.app.print_colored(
+            "Ansible task output will be shown while the service definition is rendered and the runtime starts.",
+            'cyan',
+        )
         apply_result = self._apply_target_runtime_definition(executing_plan)
         if apply_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, apply_result.get('message', 'Target apply failed'))
@@ -7985,6 +7998,29 @@ class R1Setup:
         self.print_colored(f"\n{title}", 'yellow', bold=True)
         self.print_colored("-" * len(title), 'yellow')
 
+    def _print_cancellation_guidance(self) -> None:
+        """Show recovery guidance after a keyboard interrupt when saved migration state exists."""
+        plan = copy.deepcopy(self.active_config.get('migration_plan_state') or {})
+        if not plan:
+            return
+        status = str(plan.get('status') or 'unknown')
+        if status == 'executing':
+            instance_name = str(plan.get('instance_name') or '?')
+            last_step = str(plan.get('last_step') or 'started')
+            self.print_colored(
+                f"Saved migration plan for '{instance_name}' remains in 'executing' state (last step: {last_step}).",
+                'yellow',
+            )
+            self.print_colored(
+                "Reopen Deployment Menu -> Rollback Migration to recover source ownership, or review the saved plan before retrying execution.",
+                'yellow',
+            )
+        elif status in {'rolling_back', 'finalizing'}:
+            self.print_colored(
+                f"Saved migration plan remains in '{status}' state. Reopen Deployment Menu to review the saved plan before continuing.",
+                'yellow',
+            )
+
     def get_input(self, prompt: str, default: str = '', required: bool = False) -> str:
         """Get user input with validation"""
         while True:
@@ -7998,6 +8034,7 @@ class R1Setup:
                 return value
             except KeyboardInterrupt:
                 self.print_colored("\nOperation cancelled by user.", 'yellow')
+                self._print_cancellation_guidance()
                 sys.exit(0)
 
     def get_secure_input(self, prompt: str) -> str:
@@ -8007,6 +8044,7 @@ class R1Setup:
             return getpass.getpass(f"{prompt}: ")
         except (EOFError, KeyboardInterrupt):
             self.print_colored("\nOperation cancelled by user.", 'yellow')
+            self._print_cancellation_guidance()
             sys.exit(0)
 
     def validate_ip(self, ip: str) -> bool:
@@ -12841,6 +12879,7 @@ PY"""
 
             except KeyboardInterrupt:
                 self.print_colored("\n\nOperation cancelled by user.", 'yellow')
+                self._print_cancellation_guidance()
                 break
             except Exception as e:
                 self.print_colored(f"An error occurred: {e}", 'red')

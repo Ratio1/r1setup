@@ -303,6 +303,35 @@ Non-goals:
 - tracked-live deployment messaging now explains that runtimes may come from discovery or migration
 - migration review copy is now context-specific for execution, rollback, and finalization
 - finalize / rollback review no longer repeats the pre-execution target-preparation warning
+
+### UX Phase 2: Migration Progress And Cancellation Guidance
+
+Objective:
+- reduce ambiguity during long-running migration phases and make interrupted migrations easier to recover
+
+Implementation:
+- add explicit visibility notes before long-running migration phases
+- surface Ansible output during target apply/start rather than leaving the operator with a silent screen
+- print recovery guidance when a keyboard interrupt leaves a saved migration plan in a recoverable state
+
+Tests:
+- extend `test_migration_execution.py`
+- extend `test_r1setup_core.py`
+
+Acceptance criteria:
+- target apply/start no longer runs as a silent black box
+- operator-visible cancellation guidance explicitly points to rollback when a saved plan remains `executing`
+- no migration-state semantics change is required to understand the recovery path
+
+Non-goals:
+- redesigning the migration state machine
+
+#### Implementation Results
+
+- completed on `2026-03-20`
+- migration apply/start now requests visible Ansible task output
+- long-running migration phases print explicit operator guidance before the quiet sections begin
+- keyboard interrupts now surface rollback-oriented recovery guidance when a saved plan remains active
 - run targeted tests for the phase plus full suite before each phase commit
 
 ## Implementation Results

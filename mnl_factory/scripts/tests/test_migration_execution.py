@@ -224,6 +224,18 @@ class TestMigrationExecution(unittest.TestCase):
             rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
             self.assertIn("Application health: unknown", rendered_text)
 
+    def test_apply_and_start_target_runtime_show_output_for_visibility(self):
+        plan = self._build_plan("/tmp")
+        app = self._build_app(plan)
+        planner = r1setup.MigrationPlanner(app)
+        planner._run_target_instance_playbook = MagicMock(return_value=(True, "ok"))
+
+        planner._apply_target_runtime_definition(plan)
+        planner._start_target_instance(plan)
+
+        self.assertTrue(planner._run_target_instance_playbook.call_args_list[0].kwargs["show_output"])
+        self.assertTrue(planner._run_target_instance_playbook.call_args_list[1].kwargs["show_output"])
+
     def test_verify_target_migration_health_fails_on_explicit_app_probe_failure(self):
         plan = self._build_plan("/tmp")
         app = self._build_app(plan)
