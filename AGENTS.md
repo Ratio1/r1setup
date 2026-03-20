@@ -202,6 +202,15 @@ Minimum required critic topics when relevant:
 
 - 2026-03-17T02:22:00+02:00 | Correction to the previous 2026-03-17 metadata-path entry: runtime metadata now lives inside the existing Edge Node persistent volume under `{{ mnl_docker_volume_path }}/_data/r1setup/metadata.json` and is read in-container via `{{ mnl_docker_persistent_folder }}/_data/r1setup/metadata.json`. Do not add a second dedicated Docker mount for the metadata file in this design; keep only `R1SETUP_METADATA_PATH`.
 
+- 2026-03-20T10:19:02+02:00 | Discovery/import of existing remote services is now implemented under `Configuration Menu -> Discover Services`. Stable rules:
+  - discovery is read-only on the remote host
+  - import is selective per discovered service, not automatic
+  - discovered runtime identities are preserved by default on import
+  - service names like `edge_node2` or `edge_node3` must not by themselves imply expert mode
+  - grouped machine views may now show discovered-but-untracked services separately from imported tracked instances
+
+- 2026-03-20T10:19:02+02:00 | Saved legacy migration plans in stale `rollback_failed` state can now be auto-repaired only when recovery is unambiguous: the instance still belongs to the original source machine and the saved node status is already `running`. Ambiguous legacy plans must remain visible and require operator action instead of being silently rewritten.
+
 - 2026-03-17T23:01:53+02:00 | Phase 4 helper strategy is implemented. The stable rule is:
   - standard topology keeps machine-global helpers like `get_logs`, `get_node_info`, and `restart_service`
   - expert topology uses `/usr/local/bin/r1service <service> <action>`

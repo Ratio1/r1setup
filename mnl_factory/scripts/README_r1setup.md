@@ -52,6 +52,8 @@ Notes:
 - Docker-only deployment
 - Prepare registered machines without deploying an Edge Node yet
 - Plan an Edge Node migration before any data transfer or source shutdown happens
+- Default machine topology remains `standard`: one machine, one Edge Node
+- Multi-node-per-machine workflows stay explicit under `expert` mode
 
 ### Operations
 - Start, stop, and restart deployed services
@@ -62,10 +64,26 @@ Notes:
 ### Information
 - Get node information
 - `Fleet Summary` and `Node Status & Info` now group instances by physical machine, so expert-mode multi-instance hosts and empty registered machines are shown explicitly while standard one-machine-one-node setups remain concise
+- Discovery scans can now keep showing services found on a machine even when you choose not to import them into the current config
 - Display/export node addresses
 
 ### Settings
 - Change network environment (mainnet/testnet/devnet)
+
+## Discovery And Import
+Current discovery/import support lives under `Configuration Menu`:
+
+- `Register Machine`: add a fleet machine without deploying a node
+- `Discover Services`: scan a registered machine for existing remote `edge_node` services and import only the ones you choose
+
+Discovery/import rules:
+
+- discovery is read-only on the remote host
+- import is selective; unselected services stay untouched
+- discovered runtime names are preserved by default on import
+- names like `edge_node2` or `edge_node3` do not by themselves imply expert mode
+- if importing selected services would make one machine track multiple instances in the current config, `r1setup` requires explicit expert-mode confirmation
+- discovery can warn when another saved config already tracks the same remote `(machine endpoint + service name)`
 
 ### SSH Key Management
 - Install an SSH public key on selected password-auth hosts
@@ -132,3 +150,7 @@ Rollback/finalization currently follow these rules:
 - local temp artifacts are cleaned only during rollback or finalization, not during uncertain execution state
 
 Existing configurations remain compatible.
+
+Legacy note:
+
+- older saved migration plans that were left in a stale `rollback_failed` state can now be normalized automatically when `r1setup` can prove the source assignment is still authoritative and the saved source node status is already `running`

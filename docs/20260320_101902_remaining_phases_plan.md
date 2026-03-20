@@ -396,3 +396,28 @@ Results:
 
 Follow-up for next phase:
 - update operator docs/release surfaces and prepare the final validation gate
+
+### Phase 5
+
+Status:
+- completed on `2026-03-20`
+
+What landed:
+- updated [README_r1setup.md](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/README_r1setup.md) to document:
+  - default `standard` vs explicit `expert` topology behavior
+  - discovery/import workflow and safety rules
+  - grouped views showing discovered-but-untracked services
+  - legacy migration-plan repair note
+- updated [AGENTS.md](/home/vi/work/ratio1/repos/multi_node_launcher/AGENTS.md) with durable memory for:
+  - `Configuration -> Discover Services`
+  - the stable discovery/import rules
+  - the narrow legacy `rollback_failed` auto-repair rule
+
+Verification:
+- `python3 -m unittest discover tests`
+
+Results:
+- docs/release surfaces now describe the shipped behavior
+
+Follow-up for next phase:
+- run the final live validation gate against real hosts with discovery/import included in the matrix
