@@ -142,6 +142,8 @@ SSH_KEY_MANAGEMENT_REQUIRED_TOOLS = {
     'openssl': 'OpenSSL',
 }
 
+DISCOVERY_KNOWN_ENVIRONMENTS = ('mainnet', 'testnet', 'devnet')
+
 
 def _get_gpu_hosts(inventory: dict) -> dict:
     """Extract gpu_nodes hosts from an inventory dict."""
@@ -8885,6 +8887,308 @@ class R1Setup:
             return {'status': 'error', 'message': message}
 
         return {'status': 'success', 'stdout': result.stdout, 'stderr': result.stderr}
+
+    @staticmethod
+    def _extract_environment_from_image_tag(image: Any) -> str:
+        """Return a known network environment from a Docker image tag when possible."""
+        image_text = str(image or '').strip().lower()
+        if ':' not in image_text:
+            return ''
+        tag = image_text.rsplit(':', 1)[-1]
+        if tag in DISCOVERY_KNOWN_ENVIRONMENTS:
+            return tag
+        return ''
+
+    @classmethod
+    def _infer_discovery_environment(cls, raw_candidate: Dict[str, Any]) -> Dict[str, str]:
+        """Infer the node environment from discovery sources with explicit precedence."""
+        metadata_env = str(raw_candidate.get('metadata_app_env') or '').strip().lower()
+        if metadata_env in DISCOVERY_KNOWN_ENVIRONMENTS:
+            return {'value': metadata_env, 'source': 'metadata', 'confidence': 'high'}
+
+        env_map = raw_candidate.get('environment_map') or {}
+        if isinstance(env_map, dict):
+            for key in ('MNL_APP_ENV', 'EE_ENV', 'APP_ENV'):
+                candidate_value = str(env_map.get(key) or '').strip().lower()
+                if candidate_value in DISCOVERY_KNOWN_ENVIRONMENTS:
+                    return {'value': candidate_value, 'source': 'service_environment', 'confidence': 'high'}
+
+        image_env = cls._extract_environment_from_image_tag(raw_candidate.get('image'))
+        if image_env:
+            return {'value': image_env, 'source': 'image_tag', 'confidence': 'medium'}
+
+        return {'value': 'unknown', 'source': 'unknown', 'confidence': 'low'}
+
+    @staticmethod
+    def _normalize_discovery_mounts(mounts: Any) -> List[Dict[str, str]]:
+        """Normalize discovered mount dictionaries into a stable list shape."""
+        normalized_mounts: List[Dict[str, str]] = []
+        if not isinstance(mounts, list):
+            return normalized_mounts
+
+        seen = set()
+        for mount in mounts:
+            if not isinstance(mount, dict):
+                continue
+            source = str(mount.get('source') or '').strip()
+            destination = str(mount.get('destination') or '').strip()
+            mount_type = str(mount.get('type') or 'bind').strip() or 'bind'
+            if not source or not destination:
+                continue
+            key = (source, destination, mount_type)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_mounts.append({
+                'source': source,
+                'destination': destination,
+                'type': mount_type,
+            })
+        return normalized_mounts
+
+    @classmethod
+    def _normalize_discovery_candidate(
+        cls,
+        machine_config: Dict[str, Any],
+        raw_candidate: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Normalize one raw remote discovery candidate into a stable internal model."""
+        service_name = str(raw_candidate.get('service_name') or '').strip()
+        service_state = str(raw_candidate.get('service_state') or 'unknown').strip().lower() or 'unknown'
+        container_name = str(raw_candidate.get('container_name') or '').strip()
+        container_state = str(raw_candidate.get('container_state') or '').strip().lower()
+        endpoint = ConfigurationManager._normalize_machine_endpoint(
+            machine_config.get('ansible_host'),
+            machine_config.get('ansible_user', 'root'),
+            machine_config.get('ansible_port', 22),
+        )
+        env_info = cls._infer_discovery_environment(raw_candidate)
+
+        configured_mounts = cls._normalize_discovery_mounts(raw_candidate.get('configured_mounts'))
+        live_mounts = cls._normalize_discovery_mounts(raw_candidate.get('live_mounts'))
+        effective_mounts = live_mounts or configured_mounts
+
+        discovery_sources: List[str] = []
+        if raw_candidate.get('service_file_path'):
+            discovery_sources.append('service_file')
+        if raw_candidate.get('metadata_app_env') or raw_candidate.get('metadata_host_path'):
+            discovery_sources.append('metadata')
+        if raw_candidate.get('image'):
+            discovery_sources.append('image')
+        if container_name:
+            discovery_sources.append('container')
+
+        return {
+            'candidate_id': f"{endpoint}::{service_name}" if endpoint and service_name else service_name,
+            'machine_endpoint': endpoint,
+            'service_name': service_name,
+            'service_file_path': str(raw_candidate.get('service_file_path') or '').strip(),
+            'service_state': service_state,
+            'container_name': container_name,
+            'container_state': container_state or ('running' if raw_candidate.get('container_present') else 'absent'),
+            'container_present': bool(raw_candidate.get('container_present')),
+            'configured_mounts': configured_mounts,
+            'live_mounts': live_mounts,
+            'effective_mounts': effective_mounts,
+            'metadata_host_path': str(raw_candidate.get('metadata_host_path') or '').strip(),
+            'service_file_version': str(raw_candidate.get('service_file_version') or '').strip() or DEFAULT_SERVICE_FILE_VERSION,
+            'image': str(raw_candidate.get('image') or '').strip(),
+            'environment': env_info['value'],
+            'environment_source': env_info['source'],
+            'environment_confidence': env_info['confidence'],
+            'managed_by_r1setup': bool(raw_candidate.get('managed_by_r1setup')),
+            'logical_topology_hint': 'multiple_candidates_possible',
+            'discovery_sources': discovery_sources,
+        }
+
+    @staticmethod
+    def _build_discovery_probe_command() -> str:
+        """Return the remote command used to scan a machine for existing edge-node services."""
+        return """python3 - <<'PY'
+import glob
+import json
+import os
+import re
+import shlex
+import subprocess
+
+
+def run(args):
+    return subprocess.run(args, capture_output=True, text=True, check=False)
+
+
+def parse_environment_map(raw_environment):
+    env_map = {}
+    try:
+        for token in shlex.split(raw_environment or ''):
+            if '=' not in token:
+                continue
+            key, value = token.split('=', 1)
+            env_map[key] = value
+    except Exception:
+        return {}
+    return env_map
+
+
+def parse_configured_mounts(service_text):
+    mounts = []
+    seen = set()
+    pattern = re.compile(r'(?:^|[\\s\\\\])(?:-v|--volume)\\s+([^\\s:]+):([^\\s\\\\;]+)')
+    for match in pattern.finditer(service_text or ''):
+        source = match.group(1).strip()
+        destination = match.group(2).strip()
+        key = (source, destination, 'bind')
+        if not source or not destination or key in seen:
+            continue
+        seen.add(key)
+        mounts.append({'source': source, 'destination': destination, 'type': 'bind'})
+    return mounts
+
+
+def list_service_names():
+    names = set()
+    for pattern in ('/etc/systemd/system/*.service', '/lib/systemd/system/*.service'):
+        for path in glob.glob(pattern):
+            name = os.path.basename(path)
+            if 'edge_node' in name and name.endswith('.service'):
+                names.add(name[:-8])
+
+    listed = run(['systemctl', 'list-unit-files', '--type=service', '--all', '--no-legend', '--no-pager'])
+    if listed.returncode == 0:
+        for line in listed.stdout.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            unit_name = parts[0].strip()
+            if unit_name.endswith('.service') and 'edge_node' in unit_name:
+                names.add(unit_name[:-8])
+
+    return sorted(names)
+
+
+def parse_candidate(service_name):
+    service_show = run(['systemctl', 'show', service_name, '-p', 'FragmentPath', '-p', 'Environment'])
+    fragment_path = ''
+    environment_raw = ''
+    if service_show.returncode == 0:
+        for line in service_show.stdout.splitlines():
+            if line.startswith('FragmentPath='):
+                fragment_path = line.split('=', 1)[1].strip()
+            elif line.startswith('Environment='):
+                environment_raw = line.split('=', 1)[1]
+
+    candidate_paths = [
+        fragment_path,
+        f'/etc/systemd/system/{service_name}.service',
+        f'/lib/systemd/system/{service_name}.service',
+    ]
+    service_file_path = next((path for path in candidate_paths if path and os.path.exists(path)), '')
+
+    service_cat = run(['systemctl', 'cat', service_name])
+    service_text = service_cat.stdout if service_cat.returncode == 0 else ''
+    service_state = run(['systemctl', 'is-active', service_name]).stdout.strip() or 'unknown'
+
+    container_name = ''
+    image = ''
+    metadata_host_path = ''
+    service_file_version = ''
+
+    container_match = re.search(r'--name\\s+([^\\s\\\\]+)', service_text or '')
+    if container_match:
+        container_name = container_match.group(1).strip().strip("'\\\"")
+
+    image_match = re.search(r'([A-Za-z0-9./_-]*edge_node:[A-Za-z0-9._-]+)', service_text or '')
+    if image_match:
+        image = image_match.group(1).strip().strip("'\\\"")
+
+    metadata_match = re.search(r'R1SETUP_METADATA_PATH=([^\\s\\\\\\'\\"]+)', service_text or '')
+    if metadata_match:
+        metadata_host_path = metadata_match.group(1).strip()
+
+    version_match = re.search(r'R1SETUP_SERVICE_FILE_VERSION=([^\\s\\n\\r\\'\\"]+)', service_text or '')
+    if version_match:
+        service_file_version = version_match.group(1).strip()
+
+    metadata_app_env = ''
+    managed_by_r1setup = 'R1SETUP_SERVICE_FILE_VERSION=' in service_text or 'Managed by ratio1.multi_node_launcher' in service_text
+    if metadata_host_path and os.path.exists(metadata_host_path):
+        try:
+            with open(metadata_host_path, 'r', encoding='utf-8') as handle:
+                metadata = json.load(handle)
+            metadata_app_env = str(metadata.get('app_env') or '').strip()
+            managed_by_r1setup = managed_by_r1setup or str(metadata.get('managed_by') or '').strip() == 'r1setup'
+        except Exception:
+            pass
+
+    docker_available = run(['sh', '-lc', 'command -v docker >/dev/null 2>&1']).returncode == 0
+    container_present = False
+    container_state = ''
+    live_mounts = []
+    if docker_available and container_name:
+        inspect_result = run(['docker', 'inspect', container_name])
+        if inspect_result.returncode == 0:
+            try:
+                inspect_payload = json.loads(inspect_result.stdout or '[]')
+                if inspect_payload:
+                    container_present = True
+                    container_state = str(((inspect_payload[0].get('State') or {}).get('Status')) or '').strip().lower()
+                    for mount in inspect_payload[0].get('Mounts') or []:
+                        source = str(mount.get('Source') or '').strip()
+                        destination = str(mount.get('Destination') or '').strip()
+                        mount_type = str(mount.get('Type') or 'bind').strip() or 'bind'
+                        if source and destination:
+                            live_mounts.append({'source': source, 'destination': destination, 'type': mount_type})
+            except Exception:
+                pass
+
+    return {
+        'service_name': service_name,
+        'service_file_path': service_file_path,
+        'service_state': service_state,
+        'container_name': container_name,
+        'container_present': container_present,
+        'container_state': container_state,
+        'configured_mounts': parse_configured_mounts(service_text),
+        'live_mounts': live_mounts,
+        'metadata_host_path': metadata_host_path,
+        'metadata_app_env': metadata_app_env,
+        'service_file_version': service_file_version,
+        'environment_map': parse_environment_map(environment_raw),
+        'image': image,
+        'managed_by_r1setup': managed_by_r1setup,
+    }
+
+
+print(json.dumps({'services': [parse_candidate(service_name) for service_name in list_service_names()]}))
+PY"""
+
+    def discover_existing_edge_node_services(self, machine_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Scan a machine for existing edge-node services without mutating remote state."""
+        probe_result = self._run_machine_probe(machine_config, self._build_discovery_probe_command())
+        if probe_result.get('status') != 'success':
+            return probe_result
+
+        try:
+            payload = json.loads(probe_result.get('stdout') or '{}')
+        except json.JSONDecodeError:
+            return {'status': 'error', 'message': 'Discovery probe returned invalid JSON'}
+
+        raw_candidates = payload.get('services') or []
+        if not isinstance(raw_candidates, list):
+            return {'status': 'error', 'message': 'Discovery probe returned an invalid candidate list'}
+
+        normalized_candidates = [
+            self._normalize_discovery_candidate(machine_config, raw_candidate)
+            for raw_candidate in raw_candidates
+            if isinstance(raw_candidate, dict) and str(raw_candidate.get('service_name') or '').strip()
+        ]
+        normalized_candidates.sort(key=lambda item: item.get('service_name') or '')
+
+        return {
+            'status': 'success',
+            'candidates': normalized_candidates,
+            'candidate_count': len(normalized_candidates),
+        }
 
     def _ensure_configuration_shell_for_machine_registration(self) -> bool:
         """Ensure an active configuration exists before persisting machine-only fleet data."""
