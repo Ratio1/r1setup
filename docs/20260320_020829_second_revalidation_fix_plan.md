@@ -527,3 +527,5 @@ Result:
 - undeployed sibling instances are no longer treated as service-update candidates in the grouped UI or detailed node-info view
 - the remaining follow-up from this remediation track is now limited to:
   - optional repair behavior for old pre-fix `rollback_failed` saved plans
+- final focused live confirmation of those UI fixes is recorded in:
+  - [20260320_094240_final_ui_e2e_check.md](/home/vi/work/ratio1/repos/multi_node_launcher/docs/20260320_094240_final_ui_e2e_check.md)
