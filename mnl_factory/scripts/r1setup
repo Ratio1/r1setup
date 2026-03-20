@@ -4578,6 +4578,11 @@ class DeploymentService:
                 color = 'red'
             self.app.print_colored(f"   • {machine_id}: {connection_display} [{result_text}]", color)
 
+        self.app.print_colored(
+            "\nℹ️  Preparation finished at machine scope only. No Edge Node instances were deployed or started.",
+            'cyan',
+        )
+
         self.app.wait_for_enter()
 
     def deploy_full(self) -> None:
@@ -5033,32 +5038,23 @@ class DeploymentService:
 
         # Show deployment status overview
         deployment_status = self.app.active_config.get('deployment_status', 'never_deployed')
-        last_deployed_date = self.app.active_config.get('last_deployed_date')
-        last_deployed_network = self.app.active_config.get('last_deployed_network')
-        last_deployment_type = self.app.active_config.get('last_deployment_type')
-        last_deleted_date = self.app.active_config.get('last_deleted_date')
+        deployment_display = self.app._get_deployment_display_state(
+            metadata=self.app.active_config,
+            inventory=self.app.inventory,
+        )
 
         # Overall deployment status
         self.app.print_section("Overall Deployment Status")
-
-        if deployment_status == 'deployed' and last_deployed_date:
-            deployed_str = _parse_iso_datetime(last_deployed_date)
-            if deployed_str:
-                self.app.print_colored(f"🚀 Status: Deployed on {deployed_str}", 'green')
-                if last_deployed_network:
-                    self.app.print_colored(f"🌐 Network: {last_deployed_network}", 'cyan')
-                if last_deployment_type:
-                    self.app.print_colored(f"🔧 Type: {last_deployment_type}", 'cyan')
-            else:
-                self.app.print_colored("🚀 Status: Deployed", 'green')
-        elif deployment_status == 'deleted' and last_deleted_date:
-            deleted_str = _parse_iso_datetime(last_deleted_date)
-            if deleted_str:
-                self.app.print_colored(f"🗑️ Status: Deleted on {deleted_str}", 'red')
-            else:
-                self.app.print_colored("🗑️ Status: Deleted", 'red')
-        else:
-            self.app.print_colored("📋 Status: Never deployed", 'yellow')
+        self.app.print_colored(deployment_display['status_line'], deployment_display['color'])
+        if deployment_display.get('status_note'):
+            self.app.print_colored(f"ℹ️  {deployment_display['status_note']}", 'white')
+        if deployment_status == 'deployed':
+            last_deployed_network = self.app.active_config.get('last_deployed_network')
+            last_deployment_type = self.app.active_config.get('last_deployment_type')
+            if last_deployed_network:
+                self.app.print_colored(f"🌐 Network: {last_deployed_network}", 'cyan')
+            if last_deployment_type:
+                self.app.print_colored(f"🔧 Type: {last_deployment_type}", 'cyan')
 
         # Individual node status - check in real-time
         self.app.print_section(f"Machine Status Overview")
@@ -7746,10 +7742,18 @@ class R1Setup:
         if DEBUG:
             self.print_colored(f"[DEBUG] {text}", color)
 
+    def clear_screen(self) -> None:
+        """Clear the terminal unless explicit no-clear dev mode is enabled."""
+        if os.environ.get('R1SETUP_NO_CLEAR'):
+            return
+        if os.name == 'nt':
+            os.system('cls')
+        else:
+            print("\033[2J\033[H", end="")
+
     def print_header(self, title: str) -> None:
         """Print a formatted header"""
-        if not os.environ.get('R1SETUP_NO_CLEAR'):
-            os.system('clear' if os.name != 'nt' else 'cls')
+        self.clear_screen()
         self.print_colored("=" * 60, 'cyan')
         self.print_colored(f" {title.center(58)} ", 'cyan', bold=True)
         self.print_colored("=" * 60, 'cyan')
@@ -8984,6 +8988,111 @@ class R1Setup:
 
         self.wait_for_enter()
 
+    def _get_tracked_live_node_entries(
+        self,
+        inventory: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, str]]:
+        """Return configured nodes with live runtime evidence but no deploy record."""
+        hosts = _get_gpu_hosts(inventory if inventory is not None else self.inventory)
+        tracked_statuses = {'running', 'stopped', 'pending_restart', 'error', 'unreachable'}
+        tracked_entries = []
+        for host_name, host_config in hosts.items():
+            status = str(host_config.get('node_status') or 'unknown')
+            if status not in tracked_statuses:
+                continue
+            tracked_entries.append({
+                'host_name': host_name,
+                'status': status,
+            })
+        return tracked_entries
+
+    def _get_deployment_display_state(
+        self,
+        metadata: Optional[Dict[str, Any]] = None,
+        inventory: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Return a shared operator-facing deployment summary for the active config."""
+        metadata = metadata if metadata is not None else self.active_config
+        deployment_status = str(metadata.get('deployment_status') or 'never_deployed')
+        last_deployed_date = metadata.get('last_deployed_date')
+        last_deployed_network = metadata.get('last_deployed_network')
+        last_deployment_type = metadata.get('last_deployment_type')
+        last_deleted_date = metadata.get('last_deleted_date')
+
+        if deployment_status == 'deployed':
+            deployed_str = _parse_iso_datetime(last_deployed_date) if last_deployed_date else None
+            summary_text = f"🚀 Last deployed: {deployed_str}" if deployed_str else "🚀 Deployed"
+            main_menu_text = f"🚀 deployed {deployed_str}" if deployed_str else "✓ deployed"
+            if deployed_str and last_deployed_network:
+                summary_text += f" ({last_deployed_network}"
+                if last_deployment_type:
+                    summary_text += f", {last_deployment_type})"
+                else:
+                    summary_text += ")"
+                main_menu_text += f" ({last_deployed_network})"
+            status_line = f"🚀 Status: Deployed on {deployed_str}" if deployed_str else "🚀 Status: Deployed"
+            return {
+                'state_key': 'deployed',
+                'color': 'green',
+                'config_summary': summary_text,
+                'status_line': status_line,
+                'status_note': None,
+                'main_menu_text': main_menu_text,
+                'deployment_line': f"Deployment: {summary_text}",
+                'suggested_action': None,
+                'deployment_menu_default': '0',
+            }
+
+        if deployment_status == 'deleted':
+            deleted_str = _parse_iso_datetime(last_deleted_date) if last_deleted_date else None
+            summary_text = f"🗑️ Last deleted: {deleted_str}" if deleted_str else "🗑️ Deleted"
+            status_line = f"🗑️ Status: Deleted on {deleted_str}" if deleted_str else "🗑️ Status: Deleted"
+            return {
+                'state_key': 'deleted',
+                'color': 'red',
+                'config_summary': summary_text,
+                'status_line': status_line,
+                'status_note': None,
+                'main_menu_text': "🗑️ deleted",
+                'deployment_line': f"Deployment: {summary_text}",
+                'suggested_action': None,
+                'deployment_menu_default': '2',
+            }
+
+        tracked_live_nodes = self._get_tracked_live_node_entries(inventory=inventory)
+        if deployment_status == 'never_deployed' and tracked_live_nodes:
+            live_count = len(tracked_live_nodes)
+            live_label = f"{live_count} live node(s)"
+            return {
+                'state_key': 'tracking_live_nodes',
+                'color': 'yellow',
+                'config_summary': f"📡 Tracking {live_label}",
+                'status_line': f"📡 Status: Tracking {live_label}",
+                'status_note': (
+                    "Live runtimes were detected for this configuration, but there is no completed "
+                    "r1setup deployment record in the current config yet."
+                ),
+                'main_menu_text': f"📡 tracking {live_label}",
+                'deployment_line': f"Deployment: 📡 Tracking {live_label}",
+                'suggested_action': (
+                    '4',
+                    '\U0001f4a1 Suggested: Review tracked live nodes before deploying changes',
+                ),
+                'deployment_menu_default': '9',
+            }
+
+        return {
+            'state_key': 'never_deployed',
+            'color': 'yellow',
+            'config_summary': "📋 Never deployed",
+            'status_line': "📋 Status: Never deployed",
+            'status_note': None,
+            'main_menu_text': "✗ not deployed",
+            'deployment_line': "Deployment: ✗ Never deployed",
+            'suggested_action': None,
+            'deployment_menu_default': '2',
+        }
+
     def _get_suggested_action(self):
         """Return (default_option, hint_text) based on current state."""
         has_config = self.check_hosts_config()
@@ -8993,6 +9102,9 @@ class R1Setup:
             if machines:
                 return '2', '\U0001f4a1 Suggested: Prepare or review your registered machines'
             return '1', '\U0001f4a1 Suggested: Configure your nodes first'
+        deployment_display = self._get_deployment_display_state()
+        if deployment_display.get('suggested_action'):
+            return deployment_display['suggested_action']
         deployment_status = self.active_config.get('deployment_status', 'never_deployed')
         if deployment_status in ('never_deployed', 'deleted'):
             return '2', '\U0001f4a1 Suggested: Deploy your configured nodes'
@@ -9018,23 +9130,8 @@ class R1Setup:
         active_config_name = self.active_config.get('config_name', 'None')
 
         # Line 1: config | network | deployment
-        deployment_status = self.active_config.get('deployment_status', 'never_deployed')
-        last_deployed_date = self.active_config.get('last_deployed_date')
-        last_deployed_network = self.active_config.get('last_deployed_network')
-        last_deleted_date = self.active_config.get('last_deleted_date')
-
-        if deployment_status == 'deployed' and last_deployed_date:
-            deployed_str = _parse_iso_datetime(last_deployed_date)
-            if deployed_str:
-                deploy_str = f"\U0001f680 deployed {deployed_str}"
-                if last_deployed_network:
-                    deploy_str += f" ({last_deployed_network})"
-            else:
-                deploy_str = "\u2713 deployed"
-        elif deployment_status == 'deleted':
-            deploy_str = "\U0001f5d1\ufe0f deleted"
-        else:
-            deploy_str = "\u2717 not deployed"
+        deployment_display = self._get_deployment_display_state()
+        deploy_str = deployment_display['main_menu_text']
 
         config_label = active_config_name if active_config_name != 'None' else 'none'
         self.print_colored(f"  {config_label} | {current_env} | {deploy_str}", 'cyan')
@@ -9220,31 +9317,20 @@ class R1Setup:
 
             # Show deployment status overview
             deployment_status = self.active_config.get('deployment_status', 'never_deployed')
-            last_deployed_date = self.active_config.get('last_deployed_date')
-            last_deployed_network = self.active_config.get('last_deployed_network')
-            last_deployment_type = self.active_config.get('last_deployment_type')
-            last_deleted_date = self.active_config.get('last_deleted_date')
+            deployment_display = self._get_deployment_display_state()
 
             # Show current deployment status
             self.print_section("Current Deployment Status")
-            if deployment_status == 'deployed' and last_deployed_date:
-                deployed_str = _parse_iso_datetime(last_deployed_date)
-                if deployed_str:
-                    self.print_colored(f"🚀 Status: Deployed on {deployed_str}", 'green')
-                    if last_deployed_network:
-                        self.print_colored(f"🌐 Network: {last_deployed_network}", 'cyan')
-                    if last_deployment_type:
-                        self.print_colored(f"🔧 Type: {last_deployment_type}", 'cyan')
-                else:
-                    self.print_colored("🚀 Status: Deployed", 'green')
-            elif deployment_status == 'deleted' and last_deleted_date:
-                deleted_str = _parse_iso_datetime(last_deleted_date)
-                if deleted_str:
-                    self.print_colored(f"🗑️ Status: Deleted on {deleted_str}", 'red')
-                else:
-                    self.print_colored("🗑️ Status: Deleted", 'red')
-            else:
-                self.print_colored("📋 Status: Never deployed", 'yellow')
+            self.print_colored(deployment_display['status_line'], deployment_display['color'])
+            if deployment_display.get('status_note'):
+                self.print_colored(f"ℹ️  {deployment_display['status_note']}", 'white')
+            if deployment_status == 'deployed':
+                last_deployed_network = self.active_config.get('last_deployed_network')
+                last_deployment_type = self.active_config.get('last_deployment_type')
+                if last_deployed_network:
+                    self.print_colored(f"🌐 Network: {last_deployed_network}", 'cyan')
+                if last_deployment_type:
+                    self.print_colored(f"🔧 Type: {last_deployment_type}", 'cyan')
             migration_plan_state = self.active_config.get('migration_plan_state')
             if migration_plan_state:
                 self.print_colored(
@@ -9267,7 +9353,7 @@ class R1Setup:
             self.print_colored("  0) Back to Main Menu")
             print()
 
-            deploy_default = '2' if deployment_status in ('never_deployed', 'deleted') else '0'
+            deploy_default = deployment_display.get('deployment_menu_default') or ('2' if deployment_status in ('never_deployed', 'deleted') else '0')
             choice = self.get_input("Select option", deploy_default)
 
             if choice == '0':
@@ -12099,7 +12185,7 @@ class R1Setup:
                           initial_selection=None, interactive=True, preselection_label=None):
         """Render the host selection menu (shared by interactive and fallback modes)."""
         # Clear screen and move cursor to top
-        print("\033[2J\033[H", end="")
+        self.clear_screen()
 
         # Header
         self.print_header(f"Select Hosts for {operation_name.title()}")
@@ -12225,7 +12311,7 @@ class R1Setup:
                             selected_hosts.add(current_item)
                 elif key == '\r' or key == '\n':  # Enter - confirm
                     if len(selected_hosts) == 0:
-                        print("\033[2J\033[H", end="")
+                        self.clear_screen()
                         self.print_colored("❌ Cannot proceed without selecting any hosts!", 'red', bold=True)
                         self.print_colored("Press any key to continue...", 'yellow')
                         get_key()
@@ -12457,7 +12543,7 @@ class R1Setup:
         env = self.get_mnl_app_env()
 
         # Clear screen and show loading
-        print("\033[2J\033[H", end="")
+        self.clear_screen()
         self.print_header("Container Status")
         self.print_colored(f"🔍 Checking container status (max {self.connection_timeout}s timeout)...", 'cyan')
         
@@ -12470,36 +12556,18 @@ class R1Setup:
         self.settings_manager.mark_status_refreshed()
 
         # Clear and display beautiful status
-        print("\033[2J\033[H", end="")
+        self.clear_screen()
         self.print_header("Container Status")
         
         # Show deployment status overview (like deployment menu does)
         self._load_active_config()
-        deployment_status = self.active_config.get('deployment_status', 'never_deployed')
-        last_deployed_date = self.active_config.get('last_deployed_date')
-        last_deployed_network = self.active_config.get('last_deployed_network')
-        last_deployment_type = self.active_config.get('last_deployment_type')
-        last_deleted_date = self.active_config.get('last_deleted_date')
-        
-        # Overall deployment status
-        if deployment_status == 'deployed' and last_deployed_date:
-            deployed_str = _parse_iso_datetime(last_deployed_date)
-            if deployed_str:
-                deployment_text = f"🚀 Last deployed: {deployed_str}"
-                if last_deployed_network:
-                    deployment_text += f" ({last_deployed_network})"
-                self.print_colored(f"Deployment: {deployment_text}", 'green')
-            else:
-                self.print_colored("Deployment: ✓ Deployed", 'green')
-        elif deployment_status == 'deleted' and last_deleted_date:
-            deleted_str = _parse_iso_datetime(last_deleted_date)
-            if deleted_str:
-                deployment_text = f"🗑️ Last deleted: {deleted_str}"
-                self.print_colored(f"Deployment: {deployment_text}", 'red')
-            else:
-                self.print_colored("Deployment: ✓ Deleted", 'red')
-        else:
-            self.print_colored("Deployment: ✗ Never deployed", 'yellow')
+        deployment_display = self._get_deployment_display_state(
+            metadata=self.active_config,
+            inventory=self.inventory,
+        )
+        self.print_colored(deployment_display['deployment_line'], deployment_display['color'])
+        if deployment_display.get('status_note'):
+            self.print_colored(f"ℹ️  {deployment_display['status_note']}", 'white')
         print()
         
         # Network info

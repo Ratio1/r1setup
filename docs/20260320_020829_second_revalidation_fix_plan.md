@@ -401,3 +401,46 @@ Result:
 
 - remove-node no longer leaves the expert/single-instance state implicit
 - grouped views now explain why a one-instance machine can still remain in expert mode
+
+### Phase E
+
+Status:
+
+- completed
+
+Implemented:
+
+- added a shared operator-facing deployment-summary helper so the CLI can distinguish:
+  - truly never deployed configs
+  - deleted configs
+  - configs that are intentionally tracking live runtimes without an `r1setup` deployment record yet
+- updated these surfaces to use the shared deployment-summary wording:
+  - main menu compact header
+  - deployment menu status banner
+  - deployment status screen
+  - `Node Status & Info` deployment banner
+- changed the main-menu suggestion for this state from “deploy your configured nodes” to:
+  - “review tracked live nodes before deploying changes”
+- added an explicit machine-preparation recap note clarifying that machine prep:
+  - finished at machine scope only
+  - did not deploy or start any Edge Node instances
+- introduced a shared `clear_screen()` helper and replaced raw ANSI clears in the status / host-selection flows so `R1SETUP_NO_CLEAR=1` keeps these screens readable in repo-local dev runs
+
+Files changed:
+
+- [r1setup](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- [test_r1setup_core.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_r1setup_core.py)
+- [test_empty_machine_operations.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_empty_machine_operations.py)
+
+Verification:
+
+- `python3 -m unittest tests.test_r1setup_core tests.test_empty_machine_operations`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Result:
+
+- configs that are tracking live runtimes no longer present themselves as simply “not deployed” in the main operator-facing screens
+- the next recommended action now matches the operator intent better for preserved/live-tracked nodes
+- machine-preparation completion now ends with an explicit scope reminder
+- no-clear dev runs stay readable through the status workflow because those screens no longer force raw terminal clears

@@ -111,6 +111,8 @@ class TestPrepareRegisteredMachines(unittest.TestCase):
                 "deployment_state": "error",
                 "instance_names": [],
             })
+            rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
+            self.assertIn("No Edge Node instances were deployed or started.", rendered_text)
 
     def test_prepare_registered_machines_handles_no_empty_records(self):
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)
