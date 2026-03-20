@@ -10,5 +10,8 @@
     - ../group_vars/vault.yml
     - ../group_vars/mnl.yml
     - ../group_vars/variables.yml
+  pre_tasks:
+    - name: Resolve per-instance runtime vars
+      ansible.builtin.import_tasks: tasks/resolve_instance_runtime_vars.yml
   roles:
     - role: "{{ playbook_dir }}/../roles/setup"

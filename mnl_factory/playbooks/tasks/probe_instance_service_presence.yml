@@ -1,0 +1,19 @@
+---
+- name: Probe configured service presence
+  ansible.builtin.shell: |
+    SERVICE_NAME="{{ edge_node_service_name }}"
+    SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+    if [ -f "$SERVICE_PATH" ]; then
+      echo present
+    elif systemctl cat "$SERVICE_NAME" >/dev/null 2>&1; then
+      echo present
+    else
+      echo missing
+    fi
+  register: r1setup_service_presence_probe
+  changed_when: false
+  failed_when: false
+
+- name: Persist configured service presence
+  ansible.builtin.set_fact:
+    r1setup_service_exists: "{{ (r1setup_service_presence_probe.stdout | default('missing') | trim) == 'present' }}"

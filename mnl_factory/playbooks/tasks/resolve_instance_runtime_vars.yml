@@ -1,0 +1,14 @@
+---
+- name: Resolve instance runtime vars from execution inventory
+  ansible.builtin.set_fact:
+    edge_node_service_name: "{{ r1setup_effective_service_name | default(edge_node_service_name) }}"
+    mnl_docker_container_name: "{{ r1setup_effective_container_name | default(mnl_docker_container_name) }}"
+    mnl_docker_volume_path: "{{ r1setup_effective_volume_path | default(mnl_docker_volume_path) }}"
+    mnl_base_folder: "{{ r1setup_effective_base_folder | default(mnl_base_folder) }}"
+    mnl_local_cache_folder: "{{ r1setup_effective_local_cache_folder | default(mnl_local_cache_folder) }}"
+    mnl_config_startup_path: "{{ r1setup_effective_config_startup_path | default(mnl_config_startup_path) }}"
+    mnl_r1setup_metadata_host_dir: "{{ r1setup_effective_metadata_host_dir | default(mnl_r1setup_metadata_host_dir) }}"
+    mnl_r1setup_metadata_host_path: "{{ r1setup_effective_metadata_host_path | default(mnl_r1setup_metadata_host_path) }}"
+    r1setup_runtime_exit_status_path: "{{ r1setup_effective_exit_status_path | default(r1setup_runtime_exit_status_path) }}"
+    r1setup_helper_mode: "{{ r1setup_effective_helper_mode | default(r1setup_helper_mode) }}"
+    r1setup_helper_registry_path: "{{ r1setup_effective_helper_registry_path | default(r1setup_helper_registry_path) }}"

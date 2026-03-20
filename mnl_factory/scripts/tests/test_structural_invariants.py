@@ -259,6 +259,72 @@ class TestStructuralInvariants(unittest.TestCase):
             render_tasks_source,
             "render_edge_node_definition.yml must maintain the per-instance helper registry",
         )
+
+    def test_instance_runtime_resolution_task_is_wired_into_instance_playbooks(self):
+        playbook_dir = R1SETUP_PATH.parent.parent / "playbooks"
+        runtime_task_path = playbook_dir / "tasks" / "resolve_instance_runtime_vars.yml"
+        service_probe_task_path = playbook_dir / "tasks" / "probe_instance_service_presence.yml"
+        runtime_task_source = runtime_task_path.read_text()
+        service_probe_task_source = service_probe_task_path.read_text()
+        node_info_playbook_source = (playbook_dir / "get_node_info.yml").read_text()
+        prepare_machine_playbook_source = (playbook_dir / "prepare_machine.yml").read_text()
+        apply_instance_playbook_source = (playbook_dir / "apply_instance.yml").read_text()
+
+        self.assertIn(
+            'edge_node_service_name: "{{ r1setup_effective_service_name | default(edge_node_service_name) }}"',
+            runtime_task_source,
+            "runtime resolution task must map the effective service name back onto edge_node_service_name",
+        )
+        self.assertIn(
+            'mnl_docker_container_name: "{{ r1setup_effective_container_name | default(mnl_docker_container_name) }}"',
+            runtime_task_source,
+            "runtime resolution task must map the effective container name back onto mnl_docker_container_name",
+        )
+        self.assertIn(
+            'r1setup_helper_mode: "{{ r1setup_effective_helper_mode | default(r1setup_helper_mode) }}"',
+            runtime_task_source,
+            "runtime resolution task must preserve the effective helper mode",
+        )
+        self.assertIn(
+            'systemctl cat "$SERVICE_NAME" >/dev/null 2>&1',
+            service_probe_task_source,
+            "service presence probe must use systemctl cat as a runtime-aware existence check",
+        )
+        self.assertIn(
+            'r1setup_service_exists: "{{ (r1setup_service_presence_probe.stdout | default(\'missing\') | trim) == \'present\' }}"',
+            service_probe_task_source,
+            "service presence probe must persist a boolean fact for downstream playbooks",
+        )
+
+        for relative_path in (
+            "apply_instance.yml",
+            "service_status.yml",
+            "service_start.yml",
+            "service_stop.yml",
+            "service_restart.yml",
+            "customize_service.yml",
+            "delete_edge_node.yml",
+        ):
+            source = (playbook_dir / relative_path).read_text()
+            self.assertIn(
+                "import_tasks: tasks/resolve_instance_runtime_vars.yml",
+                source,
+                f"{relative_path} must import the runtime resolution task before using per-instance runtime vars",
+            )
+
+        for relative_path in (
+            "service_status.yml",
+            "service_start.yml",
+            "service_stop.yml",
+            "service_restart.yml",
+            "customize_service.yml",
+        ):
+            source = (playbook_dir / relative_path).read_text()
+            self.assertIn(
+                "import_tasks: tasks/probe_instance_service_presence.yml",
+                source,
+                f"{relative_path} must import the service presence probe before relying on service existence state",
+            )
         self.assertIn(
             '{{ r1setup_remote_get_node_info_command }}',
             node_info_playbook_source,

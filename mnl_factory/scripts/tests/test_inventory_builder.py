@@ -56,6 +56,19 @@ class TestInventoryBuilder(unittest.TestCase):
         self.assertEqual(node["r1setup_execution_scope"], "instance")
         self.assertEqual(node["r1setup_helper_mode"], r1setup.HELPER_MODE_EXPERT)
         self.assertEqual(node["r1setup_remote_get_logs_command"], "r1service edge_node2 logs")
+        self.assertEqual(node["r1setup_effective_service_name"], "edge_node2")
+        self.assertEqual(node["r1setup_effective_container_name"], "edge_node2")
+        self.assertEqual(node["r1setup_effective_volume_path"], "/var/cache/edge_node2/_local_cache")
+        self.assertEqual(node["r1setup_effective_base_folder"], "/var/cache/edge_node2")
+        self.assertEqual(
+            node["r1setup_effective_metadata_host_path"],
+            "/var/cache/edge_node2/_local_cache/_data/r1setup/metadata.json",
+        )
+        self.assertEqual(node["r1setup_effective_helper_mode"], r1setup.HELPER_MODE_EXPERT)
+        self.assertEqual(
+            node["r1setup_effective_helper_registry_path"],
+            "/var/lib/ratio1/r1setup/helpers/edge_node2.env",
+        )
 
     def test_build_execution_inventory_machine_scope_dedupes_machine_hosts(self):
         inventory = self.cm.build_execution_inventory(["node-1", "node-2", "node-3"], dedupe_by_machine=True)

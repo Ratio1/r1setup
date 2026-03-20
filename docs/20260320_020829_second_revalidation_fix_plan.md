@@ -283,3 +283,56 @@ Result:
 
 - migration lifecycle steps no longer inherit the raw `30s` base timeout by default
 - target verification probes remain shorter than apply/start lifecycle phases
+
+### Phase B
+
+Status:
+
+- completed
+
+Implemented:
+
+- added execution-inventory-only runtime aliases so per-instance service/container/volume names survive playbook `vars_files` precedence
+- added a shared runtime-resolution task and wired it into:
+  - `apply_instance.yml`
+  - `service_status.yml`
+  - `service_start.yml`
+  - `service_stop.yml`
+  - `service_restart.yml`
+  - `customize_service.yml`
+  - `delete_edge_node.yml`
+- added a shared service-presence probe so status and service-control playbooks can distinguish:
+  - configured runtime exists
+  - configured runtime is missing / undeployed
+- confirmed on the live shared-machine test host that:
+  - `nodea` resolves to `edge_node`
+  - undeployed sibling `nodeb` resolves to `edge_node_nodeb`
+  - status summary now reports `NOT FOUND` for `nodeb` instead of copying `nodea`'s running runtime
+
+Files changed:
+
+- [r1setup](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- [apply_instance.yml](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/playbooks/apply_instance.yml)
+- [service_status.yml](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/playbooks/service_status.yml)
+- [service_start.yml](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/playbooks/service_start.yml)
+- [service_stop.yml](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/playbooks/service_stop.yml)
+- [service_restart.yml](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/playbooks/service_restart.yml)
+- [customize_service.yml](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/playbooks/customize_service.yml)
+- [delete_edge_node.yml](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/playbooks/delete_edge_node.yml)
+- [resolve_instance_runtime_vars.yml](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/playbooks/tasks/resolve_instance_runtime_vars.yml)
+- [probe_instance_service_presence.yml](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/playbooks/tasks/probe_instance_service_presence.yml)
+- [test_inventory_builder.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_inventory_builder.py)
+- [test_structural_invariants.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_structural_invariants.py)
+
+Verification:
+
+- `python3 -m unittest tests.test_inventory_builder`
+- `python3 -m unittest tests.test_structural_invariants tests.test_node_status_tracker`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+- live repo-playbook validation against `/tmp/r1setup_two_instance_execution_inventory.yml`
+
+Result:
+
+- per-instance runtime names are no longer collapsed back to the default runtime inside instance-scoped operational playbooks
+- shared-machine status checks can now distinguish a running primary instance from an undeployed sibling on the same host

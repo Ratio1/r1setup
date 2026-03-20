@@ -10,19 +10,18 @@
     - ../group_vars/vault.yml
     - ../group_vars/mnl.yml
     - ../group_vars/variables.yml
+  pre_tasks:
+    - name: Resolve per-instance runtime vars
+      ansible.builtin.import_tasks: tasks/resolve_instance_runtime_vars.yml
+    - name: Probe configured service presence
+      ansible.builtin.import_tasks: tasks/probe_instance_service_presence.yml
   tasks:
-    - name: Check if service exists
-      ansible.builtin.systemd:
-        name: "{{ edge_node_service_name }}"
-      register: service_exists
-      ignore_errors: true
-
     - name: Fail if service doesn't exist
       fail:
         msg: |
           Service {{ edge_node_service_name }} not found on {{ inventory_hostname }}.
           Please run a full deployment first before customizing the service.
-      when: service_exists is failed
+      when: not r1setup_service_exists
 
     - name: Check for nvidia-smi (needed by service template GPU conditional)
       ansible.builtin.command:

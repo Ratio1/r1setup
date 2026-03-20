@@ -12,25 +12,24 @@
     - ../group_vars/vault.yml
     - ../group_vars/mnl.yml
     - ../group_vars/variables.yml
+  pre_tasks:
+    - name: Resolve per-instance runtime vars
+      ansible.builtin.import_tasks: tasks/resolve_instance_runtime_vars.yml
+    - name: Probe configured service presence
+      ansible.builtin.import_tasks: tasks/probe_instance_service_presence.yml
   tasks:
-    - name: Check if service exists
-      ansible.builtin.systemd:
-        name: "{{ edge_node_service_name }}"
-      register: service_exists
-      ignore_errors: true
-
     - name: Get service status
       ansible.builtin.systemd:
         name: "{{ edge_node_service_name }}"
       register: service_status
-      when: service_exists is not failed
+      when: r1setup_service_exists
 
     - name: Get detailed service status
       ansible.builtin.shell: |
         systemctl status {{ edge_node_service_name }} --no-pager -l
       register: detailed_status
       ignore_errors: true
-      when: service_exists is not failed
+      when: r1setup_service_exists
 
     - name: Check if Docker container is running
       ansible.builtin.shell: |
@@ -63,7 +62,7 @@
         printf '%s\n' "${VERSION:-unknown}"
       register: service_file_version
       ignore_errors: true
-      when: service_exists is not failed
+      when: r1setup_service_exists
 
     - name: Display service status summary
       debug:
@@ -72,15 +71,15 @@
           NODE: {{ inventory_hostname }}
           ==========================================
           Service Name: {{ edge_node_service_name }}
-          Service Status: {{ 'ACTIVE' if (service_status.status.ActiveState | default('')) == 'active' else 'INACTIVE/FAILED' if service_exists is not failed else 'NOT FOUND' }}
-          Service Enabled: {{ 'YES' if (service_status.status.UnitFileState | default('')) == 'enabled' else 'NO' if service_exists is not failed else 'N/A' }}
-          Service File Version: {{ service_file_version.stdout | default('unknown') | trim if service_exists is not failed else 'NOT FOUND' }}
+          Service Status: {{ 'ACTIVE' if (service_status.status.ActiveState | default('')) == 'active' else 'INACTIVE/FAILED' if r1setup_service_exists else 'NOT FOUND' }}
+          Service Enabled: {{ 'YES' if (service_status.status.UnitFileState | default('')) == 'enabled' else 'NO' if r1setup_service_exists else 'N/A' }}
+          Service File Version: {{ service_file_version.stdout | default('unknown') | trim if r1setup_service_exists else 'NOT FOUND' }}
           Container Status: {{ 'RUNNING' if (container_status is succeeded and mnl_docker_container_name in container_status.stdout and 'Up' in container_status.stdout) else 'NOT RUNNING' }}
 
     - name: Display detailed service information
       debug:
         var: detailed_status.stdout_lines
-      when: service_exists is not failed and detailed_status is defined
+      when: r1setup_service_exists and detailed_status is defined
 
     - name: Display container information
       debug:
@@ -92,14 +91,14 @@
         journalctl -u {{ edge_node_service_name }} -n 10 --no-pager
       register: recent_logs
       ignore_errors: true
-      when: service_exists is not failed
+      when: r1setup_service_exists
 
     - name: Display recent logs
       debug:
         msg: |
           Recent logs (last 10 lines):
           {{ recent_logs.stdout }}
-      when: service_exists is not failed and recent_logs.stdout is defined
+      when: r1setup_service_exists and recent_logs.stdout is defined
 
     - name: Service not found warning
       debug:
@@ -107,4 +106,4 @@
           ⚠️  WARNING: Service '{{ edge_node_service_name }}' not found on {{ inventory_hostname }}
           This usually means the Edge Node has not been deployed yet.
           Please run deployment first before checking service status.
-      when: service_exists is failed 
+      when: not r1setup_service_exists
