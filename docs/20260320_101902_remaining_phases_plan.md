@@ -335,3 +335,35 @@ Results:
 
 Follow-up for next phase:
 - make grouped machine/status views distinguish discovered-untracked vs imported-tracked services more clearly
+
+### Phase 3
+
+Status:
+- completed on `2026-03-20`
+
+What landed:
+- persisted the latest machine discovery scan results in fleet-state machine metadata
+- grouped machine views now surface untracked discovered services separately from imported tracked instances
+- grouped CLI display now renders:
+  - assigned instances in the current config
+  - discovered services on the same machine that were not imported into the current config
+- machine registration now offers a follow-up discovery step instead of forcing the user to find it later
+
+Tests extended:
+- [test_machine_grouping.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_machine_grouping.py)
+- [test_machine_registration.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_machine_registration.py)
+- [test_machine_specs.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_machine_specs.py)
+
+Verification:
+- `python3 -m unittest tests.test_machine_grouping tests.test_machine_registration tests.test_discovery_import_plan`
+- `python3 -m unittest tests.test_machine_grouping tests.test_machine_registration tests.test_discovery_import_plan tests.test_r1setup_core`
+- `python3 -m unittest tests.test_machine_specs tests.test_machine_registration tests.test_machine_grouping`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Results:
+- `230` tests passed
+- `py_compile` passed
+
+Follow-up for next phase:
+- add one-time repair/normalization for clearly recoverable legacy `rollback_failed` migration plans

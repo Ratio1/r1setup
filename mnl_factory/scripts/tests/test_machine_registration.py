@@ -70,3 +70,44 @@ class TestMachineRegistrationPersistence(unittest.TestCase):
         self.assertEqual(machine["deployment_state"], "empty")
         self.assertEqual(machine["instance_names"], [])
 
+    def test_register_machine_can_offer_followup_discovery(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.inventory = {
+            "all": {
+                "vars": {"mnl_app_env": "mainnet"},
+                "children": {"gpu_nodes": {"hosts": {}}},
+            }
+        }
+        app.config_dir = self.base_path
+        app.configs_dir = self.base_path / "configs"
+        app.config_file = self.base_path / "hosts.yml"
+        app.vars_file = self.base_path / "group_vars" / "variables.yml"
+        app.active_config_file = self.base_path / "active_config.json"
+        app.print_colored = MagicMock()
+        app.print_debug = MagicMock()
+        app.wait_for_enter = MagicMock()
+        app._ensure_configuration_shell_for_machine_registration = MagicMock(return_value=True)
+        app._select_topology_mode = MagicMock(return_value="standard")
+        app._extract_machine_access_config = MagicMock(return_value={
+            "ansible_host": "10.0.0.9",
+            "ansible_user": "root",
+        })
+        app._configure_single_node = MagicMock(return_value={
+            "ansible_host": "10.0.0.9",
+            "ansible_user": "root",
+        })
+        app._probe_machine_specs = MagicMock(return_value={"status": "error", "message": "skipped"})
+        app.get_input = MagicMock(side_effect=["machine-discovery", "n", "y", "y", "y", "y"])
+        app.discover_and_import_existing_services = MagicMock()
+        app.config_manager = r1setup.ConfigurationManager(app)
+        app.config_manager._save_active_config = MagicMock()
+        app.config_manager._update_hosts_symlink = MagicMock()
+        app.config_manager.active_config["config_name"] = "fleet"
+        app.config_manager.active_config["environment"] = "mainnet"
+        app.get_fleet_state_copy = app.config_manager.get_fleet_state_copy
+        app.upsert_machine_record = app.config_manager.upsert_machine_record
+        app.load_configuration = MagicMock()
+
+        app.register_machine_without_deployment()
+
+        app.discover_and_import_existing_services.assert_called_once()

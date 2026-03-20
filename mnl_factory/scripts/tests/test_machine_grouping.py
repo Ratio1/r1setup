@@ -143,6 +143,37 @@ class TestMachineGroupViews(unittest.TestCase):
         self.assertEqual(view["group_status"], "Running")
         self.assertEqual(view["instances"][0]["runtime"]["service_name"], "edge_node2")
 
+    def test_build_machine_group_views_includes_untracked_discovered_candidates(self):
+        inventory = {"all": {"children": {"gpu_nodes": {"hosts": {}}}}}
+        fleet_state = self.cm._default_fleet_state()
+        fleet_state["fleet"]["machines"]["machine-discovery"] = {
+            "machine_id": "machine-discovery",
+            "ansible_host": "10.0.0.20",
+            "ansible_user": "root",
+            "ansible_port": 22,
+            "topology_mode": "standard",
+            "deployment_state": "empty",
+            "instance_names": [],
+            "discovery": {
+                "last_scanned_at": "2026-03-20T10:00:00",
+                "candidates": [
+                    {
+                        "service_name": "edge_node_devnet",
+                        "service_state": "active",
+                        "environment": "devnet",
+                        "environment_source": "metadata",
+                    }
+                ],
+            },
+        }
+
+        views = self.cm.build_machine_group_views(inventory=inventory, fleet_state=fleet_state)
+
+        self.assertEqual(len(views), 1)
+        self.assertEqual(len(views[0]["instances"]), 0)
+        self.assertEqual(len(views[0]["untracked_discovered_candidates"]), 1)
+        self.assertEqual(views[0]["untracked_discovered_candidates"][0]["service_name"], "edge_node_devnet")
+
     def test_derived_machine_id_uses_hostname_as_display_label(self):
         inventory = {
             "all": {
@@ -352,3 +383,38 @@ class TestMachineGroupDisplayLines(unittest.TestCase):
             texts,
         )
         self.assertEqual(outdated, [])
+
+    def test_build_machine_group_display_lines_show_discovered_untracked_candidates(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app._format_timestamp_ago = MagicMock(return_value="Just now")
+
+        machine_views = [
+            {
+                "machine_id": "machine-discovery",
+                "display_label": "machine-discovery",
+                "connection_display": "root@10.0.0.20",
+                "topology_mode": "standard",
+                "deployment_state": "empty",
+                "group_status": "No Instances",
+                "group_status_color": "yellow",
+                "group_status_emoji": "📭",
+                "machine_specs_summary": "",
+                "instances": [],
+                "untracked_discovered_candidates": [
+                    {
+                        "service_name": "edge_node_devnet",
+                        "service_state": "active",
+                        "environment": "devnet",
+                        "environment_source": "metadata",
+                    }
+                ],
+            }
+        ]
+
+        lines, _ = app._build_machine_group_display_lines(machine_views)
+        texts = [text for text, _ in lines]
+        self.assertIn("      discovered on this machine but not imported into this config:", texts)
+        self.assertIn(
+            "        ~ edge_node_devnet [DISCOVERED] state=active env=devnet (metadata)",
+            texts,
+        )

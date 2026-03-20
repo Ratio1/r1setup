@@ -108,7 +108,7 @@ class TestMachineRegistrationSpecMessaging(unittest.TestCase):
             "memory_gb_total": 15.6,
             "last_checked_at": "2026-03-20T00:00:00",
         })
-        app.get_input = MagicMock(side_effect=["machine-b", "y"])
+        app.get_input = MagicMock(side_effect=["machine-b", "y", "n"])
         app.config_manager = r1setup.ConfigurationManager(app)
         app.config_manager._save_active_config = MagicMock()
         app.config_manager._update_hosts_symlink = MagicMock()
