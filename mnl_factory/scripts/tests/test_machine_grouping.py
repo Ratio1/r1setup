@@ -254,3 +254,44 @@ class TestMachineGroupDisplayLines(unittest.TestCase):
         self.assertIn("  • machine-b: root@10.0.0.2 | mode=standard | state=empty | 📭 No Instances", texts)
         self.assertIn("      no assigned instances in this config", texts)
         self.assertEqual(outdated, ["node-1"])
+
+    def test_build_machine_group_display_lines_notes_single_instance_expert_mode_retention(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app._format_timestamp_ago = MagicMock(return_value="Just now")
+
+        machine_views = [
+            {
+                "machine_id": "machine-a",
+                "display_label": "machine-a",
+                "connection_display": "root@10.0.0.1",
+                "topology_mode": "expert",
+                "deployment_state": "active",
+                "group_status": "Running",
+                "group_status_color": "green",
+                "group_status_emoji": "🟢",
+                "machine_specs_summary": "",
+                "instances": [
+                    {
+                        "instance_name": "node-1",
+                        "status_emoji": "🟢",
+                        "status_label": "Running",
+                        "status_color": "green",
+                        "runtime": {
+                            "service_name": "edge_node",
+                            "container_name": "edge_node",
+                        },
+                        "service_file_version": "v1",
+                        "last_update": "",
+                        "ssh_auth_mode": "key_only",
+                    }
+                ],
+            }
+        ]
+
+        lines, _ = app._build_machine_group_display_lines(machine_views, target_service_version="v1")
+
+        texts = [text for text, _ in lines]
+        self.assertIn(
+            "      expert mode retained with 1 instance; normalize back to standard only via an explicit future action",
+            texts,
+        )

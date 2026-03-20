@@ -368,3 +368,36 @@ Result:
 
 - rollback no longer has to remain a hard failure if the source node is demonstrably healthy again
 - migration plan state can now reconcile from restart-timeout noise back to a truthful `rolled_back` state while keeping failure history
+
+### Phase D
+
+Status:
+
+- completed
+
+Implemented:
+
+- made the current topology policy explicit in the UI:
+  - removing an extra instance does not silently downgrade the machine from `expert` to `standard`
+- added a delete-flow note when one expert-mode sibling remains after removal
+- added a grouped machine-view note so operators can see that:
+  - expert mode is still retained with one instance
+  - runtime names remain stable
+  - normalization back to standard is intentionally deferred to an explicit future action
+
+Files changed:
+
+- [r1setup](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/r1setup)
+- [test_instance_operations.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_instance_operations.py)
+- [test_machine_grouping.py](/home/vi/work/ratio1/repos/multi_node_launcher/mnl_factory/scripts/tests/test_machine_grouping.py)
+
+Verification:
+
+- `python3 -m unittest tests.test_instance_operations tests.test_machine_grouping`
+- `python3 -m unittest discover tests`
+- `python3 -m py_compile r1setup`
+
+Result:
+
+- remove-node no longer leaves the expert/single-instance state implicit
+- grouped views now explain why a one-instance machine can still remain in expert mode

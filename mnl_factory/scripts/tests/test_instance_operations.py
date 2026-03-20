@@ -124,6 +124,13 @@ class TestInstanceOperations(unittest.TestCase):
             metadata["fleet_state"]["fleet"]["machines"]["machine-a"]["instance_names"],
             ["nodea"],
         )
+        rendered_text = " ".join(
+            str(call.args[0])
+            for call in self.app.print_colored.call_args_list
+            if call.args
+        )
+        self.assertIn("remains in expert mode", rendered_text)
+        self.assertIn("No automatic downgrade to standard was performed", rendered_text)
 
     def test_delete_last_instance_retains_machine_as_prepared(self):
         del self.app.inventory["all"]["children"]["gpu_nodes"]["hosts"]["nodeb"]

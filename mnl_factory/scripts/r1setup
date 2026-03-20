@@ -8683,6 +8683,15 @@ class R1Setup:
                 lines.append(("      no assigned instances in this config", 'yellow'))
                 continue
 
+            if (
+                machine_view.get('topology_mode') == 'expert'
+                and len(machine_view.get('instances') or []) == 1
+            ):
+                lines.append((
+                    "      expert mode retained with 1 instance; normalize back to standard only via an explicit future action",
+                    'yellow',
+                ))
+
             for instance_view in machine_view['instances']:
                 runtime = instance_view.get('runtime') or {}
                 instance_line = (
@@ -10613,6 +10622,22 @@ class R1Setup:
             self.config_manager.remove_instance_from_fleet_state(name)
             self._save_configuration()
             self.print_colored(f"Node '{name}' deleted successfully!", 'green')
+            if (
+                len(remaining_instances) == 1
+                and str(machine_record.get('topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE) == 'expert'
+            ):
+                remaining_instance = remaining_instances[0]
+                self.print_colored(
+                    (
+                        f"Machine '{machine_id}' remains in expert mode with the remaining instance "
+                        f"'{remaining_instance}'. No automatic downgrade to standard was performed."
+                    ),
+                    'yellow',
+                )
+                self.print_colored(
+                    "Runtime names stay stable in this mode. Normalize back to standard only via an explicit future action.",
+                    'yellow',
+                )
 
     def _create_new_configuration(self) -> None:
         """Create completely new configuration"""
