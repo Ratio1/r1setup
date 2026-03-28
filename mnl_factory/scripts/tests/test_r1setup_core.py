@@ -107,6 +107,47 @@ class TestWaitForEnter(unittest.TestCase):
         arg = mock_input.call_args[0][0]
         self.assertTrue(arg.startswith("\n"))
 
+    @patch("sys.stderr.flush")
+    @patch("sys.stdout.flush")
+    @patch("builtins.input")
+    def test_wait_for_enter_flushes_output_streams(self, mock_input, mock_stdout_flush, mock_stderr_flush):
+        self.app.wait_for_enter()
+        mock_stdout_flush.assert_called_once()
+        mock_stderr_flush.assert_called_once()
+
+
+class TestPrintHeader(unittest.TestCase):
+    """Tests for R1Setup.print_header()."""
+
+    def setUp(self):
+        self.app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        self.app.colors = {
+            'cyan': '',
+            'white': '',
+            'yellow': '',
+            'red': '',
+            'green': '',
+            'blue': '',
+            'end': '',
+        }
+
+    @patch("builtins.print")
+    @patch("os.system")
+    def test_print_header_clears_by_default(self, mock_system, mock_print):
+        with patch.dict(os.environ, {}, clear=False):
+            self.app.print_header("Header")
+        if os.name == "nt":
+            mock_system.assert_called_once()
+        else:
+            mock_system.assert_not_called()
+            mock_print.assert_any_call("\033[2J\033[H", end="")
+
+    @patch("os.system")
+    def test_print_header_skips_clear_when_requested(self, mock_system):
+        with patch.dict(os.environ, {"R1SETUP_NO_CLEAR": "1"}, clear=False):
+            self.app.print_header("Header")
+        mock_system.assert_not_called()
+
 
 class TestServiceVersionTracking(unittest.TestCase):
     """Tests for service-template version persistence helpers."""
@@ -186,7 +227,8 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
             base_path = Path(temp_dir)
             playbooks_dir = base_path / "playbooks"
             playbooks_dir.mkdir(parents=True, exist_ok=True)
-            (playbooks_dir / "site.yml").write_text("---\n")
+            (playbooks_dir / "prepare_machine.yml").write_text("---\n")
+            (playbooks_dir / "apply_instance.yml").write_text("---\n")
 
             app = MagicMock()
             app.check_hosts_config.return_value = True
@@ -210,7 +252,7 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
             app.config_dir = base_path
             app.config_file = base_path / "hosts.yml"
             app.active_config = {"deployment_status": "never_deployed"}
-            app.run_command.return_value = (True, "")
+            app.connection_timeout = 30
             app.print_colored = MagicMock()
             app.print_header = MagicMock()
             app.wait_for_enter = MagicMock()
@@ -218,12 +260,21 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
             app._display_node_status = MagicMock()
             app._display_copy_friendly_addresses = MagicMock()
             app.record_service_file_version = MagicMock()
-            app._build_runtime_metadata_extra_vars = MagicMock(return_value={
-                "r1setup_cli_version": "1.4.12",
-                "r1setup_collection_version": "1.3.30",
-                "r1setup_last_applied_action": "deploy_full",
-            })
-            app._append_ansible_extra_vars = MagicMock(side_effect=lambda cmd, extra_vars: f"{cmd} --extra-vars '{extra_vars}'")
+            app.group_host_names_by_machine.return_value = {
+                "root@10.0.0.1:22": {
+                    "representative_host": "node-1",
+                    "host_names": ["node-1"],
+                }
+            }
+            app.config_manager = MagicMock()
+            app.config_manager._derive_machine_id.side_effect = lambda host_name, host_config: f"{host_config.get('ansible_user', 'root')}@{host_config['ansible_host']}:22"
+            app._parse_ansible_play_recap.return_value = {
+                "node-1": {"status": "connected"}
+            }
+            app.run_generated_playbook.side_effect = [
+                (True, "machine phase", ["node-1"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-1": {}}}}}}),
+                (True, "instance phase", ["node-1"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-1": {}}}}}}),
+            ]
 
             service = r1setup.DeploymentService(app)
 
@@ -237,7 +288,107 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
 
             update_metadata.assert_called_once_with("full")
             app.record_service_file_version.assert_called_once_with(["node-1"])
-            self.assertIn("r1setup_last_applied_action", app.run_command.call_args[0][0])
+            self.assertEqual(app.run_generated_playbook.call_count, 2)
+            self.assertEqual(app.run_generated_playbook.call_args_list[0].kwargs["timeout"], 600)
+            self.assertEqual(app.run_generated_playbook.call_args_list[1].kwargs["timeout"], 180)
+
+
+class TestAddNodeExpertModeFlow(unittest.TestCase):
+    """Tests same-machine add-node expert-mode gating."""
+
+    def _make_app(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "nodea": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                                "r1setup_machine_id": "machine-a",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        app.print_section = MagicMock()
+        app.print_colored = MagicMock()
+        app._save_configuration = MagicMock()
+        app._get_valid_hostname = MagicMock(return_value="nodeb")
+        app._configure_single_node = MagicMock(return_value={
+            "ansible_host": "10.0.0.1",
+            "ansible_user": "root",
+        })
+        app.config_manager = MagicMock()
+        app.config_manager.bind_host_to_existing_machine.return_value = {
+            "ansible_host": "10.0.0.1",
+            "ansible_user": "root",
+            "r1setup_machine_id": "machine-a",
+        }
+        app.config_manager.get_fleet_state_copy.return_value = {
+            "config_schema_version": r1setup.CONFIG_SCHEMA_VERSION,
+            "fleet": {
+                "machines": {
+                    "machine-a": {
+                        "machine_id": "machine-a",
+                        "ansible_host": "10.0.0.1",
+                        "ansible_user": "root",
+                        "ansible_port": 22,
+                        "topology_mode": "standard",
+                        "deployment_state": "active",
+                        "instance_names": ["nodea"],
+                    }
+                },
+                "instances": {
+                    "nodea": {"assigned_machine_id": "machine-a"},
+                },
+            },
+        }
+        app.config_manager._normalize_fleet_state.side_effect = lambda fleet_state: fleet_state
+        app.config_manager._format_machine_connection_display.return_value = "root@10.0.0.1"
+        app.config_manager.promote_machine_to_expert.return_value = {
+            "machine_id": "machine-a",
+            "topology_mode": "expert",
+            "deployment_state": "active",
+            "instance_names": ["nodea"],
+        }
+        return app
+
+    def test_add_node_cancels_when_expert_mode_declined(self):
+        app = self._make_app()
+        app.get_input = MagicMock(return_value="n")
+
+        app._add_node()
+
+        hosts = app.inventory["all"]["children"]["gpu_nodes"]["hosts"]
+        self.assertEqual(sorted(hosts.keys()), ["nodea"])
+        app._save_configuration.assert_not_called()
+        app.config_manager.promote_machine_to_expert.assert_not_called()
+
+    def test_add_node_promotes_machine_when_expert_mode_accepted(self):
+        app = self._make_app()
+        app.get_input = MagicMock(return_value="y")
+        app.config_manager.apply_runtime_snapshot_to_host_config.side_effect = lambda host_name, host_config: host_config.update({
+            "edge_node_service_name": "edge_node_nodeb",
+            "mnl_docker_container_name": "edge_node_nodeb",
+            "mnl_docker_volume_path": "/var/cache/edge_node_nodeb/_local_cache",
+            "mnl_r1setup_metadata_host_path": "/var/cache/edge_node_nodeb/_local_cache/_data/r1setup/metadata.json",
+            "r1setup_runtime_exit_status_path": "/tmp/edge_node_nodeb.exit",
+        }) or True
+
+        app._add_node()
+
+        hosts = app.inventory["all"]["children"]["gpu_nodes"]["hosts"]
+        self.assertIn("nodeb", hosts)
+        self.assertEqual(hosts["nodeb"]["r1setup_topology_mode"], "expert")
+        self.assertEqual(hosts["nodeb"]["r1setup_runtime_name_policy"], "normalize_to_target")
+        self.assertEqual(hosts["nodeb"]["edge_node_service_name"], "edge_node_nodeb")
+        self.assertEqual(hosts["nodeb"]["mnl_docker_container_name"], "edge_node_nodeb")
+        app.config_manager.promote_machine_to_expert.assert_called_once_with("machine-a", app.inventory)
+        app.config_manager.apply_runtime_snapshot_to_host_config.assert_called_once_with("nodeb", hosts["nodeb"])
+        app._save_configuration.assert_called_once()
 
 
 class TestNodeInfoDetails(unittest.TestCase):
@@ -287,6 +438,86 @@ class TestNodeInfoDetails(unittest.TestCase):
         matching_calls = [call for call in app.print_colored.call_args_list if "Service File Version: v3" in call.args[0]]
         self.assertTrue(matching_calls)
         self.assertEqual(matching_calls[0].args[1], "red")
+
+    def test_display_node_info_details_skips_update_recommendation_for_not_deployed_node(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                                r1setup.SERVICE_FILE_VERSION_FIELD: "NOT",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        app.load_configuration = MagicMock()
+        app.get_mnl_service_version = MagicMock(return_value="v5")
+        app.get_host_service_file_version = MagicMock(return_value="NOT")
+        app._get_node_status_info = MagicMock(return_value={"status": "not_deployed"})
+        app._get_status_display_info = MagicMock(return_value=("📦", "yellow", "Not Deployed"))
+        app.print_header = MagicMock()
+        app.print_section = MagicMock()
+        app.print_colored = MagicMock()
+
+        app._display_node_info_details({
+            "node-1": {
+                "status": "unreachable",
+                "data": {},
+            }
+        })
+
+        rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
+        self.assertIn("Service File Version: NOT (not applicable)", rendered_text)
+        self.assertNotIn("Update service for: node-1", rendered_text)
+
+
+class TestMainMenuDeploymentDisplay(unittest.TestCase):
+    """Tests compact main-menu deployment wording."""
+
+    def test_show_main_menu_loads_configuration_before_tracking_live_label(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {
+            "config_name": "cfg",
+            "deployment_status": "never_deployed",
+        }
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        def _load_configuration():
+            app.inventory["all"]["children"]["gpu_nodes"]["hosts"]["node-1"]["node_status"] = "running"
+        app.load_configuration = MagicMock(side_effect=_load_configuration)
+        app._load_active_config = MagicMock()
+        app.check_hosts_config = MagicMock(return_value=True)
+        app.get_mnl_app_env = MagicMock(return_value="devnet")
+        app._get_node_status_info = MagicMock(return_value={"status": "running", "last_update": ""})
+        app._get_status_display_info = MagicMock(return_value=("🟢", "green", "Running"))
+        app._format_timestamp_ago = MagicMock(return_value="Just now")
+        app.print_header = MagicMock()
+        app.print_colored = MagicMock()
+        app.get_input = MagicMock(return_value="0")
+
+        app.show_main_menu()
+
+        rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
+        self.assertIn("cfg | devnet | 📡 tracking 1 live node(s)", rendered_text)
 
     def test_combined_status_and_info_shows_inline_details(self):
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)
@@ -764,6 +995,144 @@ class TestSuggestedActions(unittest.TestCase):
 
         self.assertEqual(default_option, "3")
         self.assertIn("Update service file on 1 node(s)", hint)
+
+    def test_suggested_action_prefers_review_for_tracked_live_nodes(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=True)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "never_deployed"}
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {"node_status": "running"},
+                        }
+                    }
+                }
+            }
+        }
+
+        default_option, hint = app._get_suggested_action()
+
+        self.assertEqual(default_option, "4")
+        self.assertIn("Review tracked live nodes", hint)
+
+
+class TestTrackedLiveNodeMessaging(unittest.TestCase):
+    """Tests operator-facing deployment wording for tracked live nodes."""
+
+    def test_get_deployment_display_state_marks_tracked_live_nodes(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "never_deployed"}
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {"node_status": "running"},
+                            "node-2": {"node_status": "not_deployed"},
+                        }
+                    }
+                }
+            }
+        }
+
+        display = app._get_deployment_display_state()
+
+        self.assertEqual(display["state_key"], "tracking_live_nodes")
+        self.assertEqual(display["main_menu_text"], "📡 tracking 1 live node(s)")
+        self.assertIn("actively tracking live runtimes", display["status_note"])
+        self.assertIn("imported from discovery or moved via migration", display["status_note"])
+
+    def test_combined_status_and_info_describes_tracked_live_nodes(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=True)
+        app.load_configuration = MagicMock()
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {
+                                "ansible_host": "10.0.0.1",
+                                "ansible_user": "root",
+                                "node_status": "running",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "never_deployed"}
+        app.get_mnl_app_env = MagicMock(return_value="mainnet")
+        app.get_mnl_service_version = MagicMock(return_value="v2")
+        app.get_host_service_file_version = MagicMock(return_value="v1")
+        app._get_real_time_node_status = MagicMock(return_value={"node-1": {"status": "running"}})
+        app._update_node_status = MagicMock()
+        app._get_node_status_info = MagicMock(return_value={"status": "running", "last_update": "2026-03-17T00:00:00"})
+        app._format_timestamp_ago = MagicMock(return_value="15 minute(s) ago")
+        app.settings_manager = MagicMock()
+        app.settings_manager.connection_timeout = 30
+        app.settings_manager.mark_status_refreshed = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "never_deployed"}
+        app._load_active_config = MagicMock()
+        app.print_header = MagicMock()
+        app.print_colored = MagicMock()
+        app.get_input = MagicMock(return_value="n")
+        app.wait_for_enter = MagicMock()
+        app.clear_screen = MagicMock()
+
+        app.combined_node_status_and_info()
+
+        rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
+        self.assertIn("Deployment: 📡 Tracking 1 live node(s)", rendered_text)
+        self.assertIn("actively tracking live runtimes", rendered_text)
+        self.assertIn("imported from discovery or moved via migration", rendered_text)
+
+
+class TestCancellationGuidance(unittest.TestCase):
+    """Tests recovery hints after keyboard interrupts."""
+
+    def test_print_cancellation_guidance_mentions_rollback_for_executing_migration(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {
+            "migration_plan_state": {
+                "status": "executing",
+                "instance_name": "node-1",
+                "last_step": "target_prepared",
+            }
+        }
+        app.print_colored = MagicMock()
+
+        app._print_cancellation_guidance()
+
+        rendered = " ".join(call.args[0] for call in app.print_colored.call_args_list)
+        self.assertIn("remains in 'executing' state", rendered)
+        self.assertIn("Rollback Migration", rendered)
+
+    def test_print_cancellation_guidance_is_silent_without_saved_plan(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {}
+        app.print_colored = MagicMock()
+
+        app._print_cancellation_guidance()
+
+        app.print_colored.assert_not_called()
+
+    def test_clear_screen_respects_no_clear_env(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+
+        with patch.dict(os.environ, {"R1SETUP_NO_CLEAR": "1"}, clear=False):
+            with patch("builtins.print") as mock_print, patch("os.system") as mock_system:
+                app.clear_screen()
+
+        mock_print.assert_not_called()
+        mock_system.assert_not_called()
 
 
 class TestRuntimeMetadataHelpers(unittest.TestCase):

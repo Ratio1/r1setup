@@ -110,6 +110,7 @@
     dest: "/usr/local/bin/get_logs"
     mode: '0755'
   become: true
+  when: r1setup_helper_mode == 'standard_helpers'
 
 - name: Create restart_service script  # Using template
   ansible.builtin.template:  # Changed from copy to template
@@ -117,6 +118,7 @@
     dest: "/usr/local/bin/restart_service"  # Updated destination
     mode: '0755'
   become: true
+  when: r1setup_helper_mode == 'standard_helpers'
 
 - name: Create get_node_info script  # Using template
   ansible.builtin.template:  # Changed from copy to template
@@ -124,6 +126,7 @@
     dest: "/usr/local/bin/get_node_info"  # Updated destination
     mode: '0755'
   become: true
+  when: r1setup_helper_mode == 'standard_helpers'
 
 - name: Create get_node_history script
   ansible.builtin.copy:
@@ -134,6 +137,7 @@
     mode: '0755'
     force: true
   become: true
+  when: r1setup_helper_mode == 'standard_helpers'
 
 - name: Create get_e2_pem_file script
   ansible.builtin.copy:
@@ -144,6 +148,16 @@
     mode: '0755'
     force: true
   become: true
+  when: r1setup_helper_mode == 'standard_helpers'
+
+- name: Create r1service dispatcher
+  ansible.builtin.template:
+    src: r1service.j2
+    dest: "/usr/local/bin/r1service"
+    mode: '0755'
+    force: true
+  become: true
+  when: r1setup_helper_mode == 'expert_dispatcher'
 
 ################### LEGACY SCRIPTS ##########################
 
@@ -155,6 +169,7 @@
     mode: '0755'
     force: true
   become: false
+  when: r1setup_helper_mode == 'standard_helpers'
 
 - name: Create restart.sh script
   ansible.builtin.copy:
@@ -167,6 +182,7 @@
     mode: '0755'
     force: true
   become: false
+  when: r1setup_helper_mode == 'standard_helpers'
 
 - name: Create stop.sh script
   ansible.builtin.copy:
@@ -177,3 +193,4 @@
     mode: '0755'
     force: true
   become: false
+  when: r1setup_helper_mode == 'standard_helpers'

@@ -73,6 +73,7 @@ Top level:
 - `install.sh`: bootstrap installer that downloads `r1setup` scripts into `~/.ratio1/r1_setup` and symlinks `/usr/local/bin/r1setup`
 - `README.md`: root project overview
 - `docs/`: dated operational/design notes
+- `scripts/run_r1setup_repo_local.sh`: developer helper to run the repo `r1setup` against an isolated local dev collection workspace
 - `.github/workflows/`: release and publish automation
 
 Ansible collection:
@@ -116,6 +117,9 @@ Code and repo conventions:
 - Keep per-node applied service-unit state in inventory host metadata under `r1setup_service_file_version`; missing values must be normalized to `v0`.
 - When refreshing node status, prefer updating `r1setup_service_file_version` from live remote data using non-fatal fallbacks instead of trusting local state alone.
 - For SSH key management, use the state model already present in `r1setup` instead of inventing parallel metadata.
+- Standard-mode machines keep the existing global helpers such as `get_logs` and `get_node_info`; expert-mode machines must use the `r1service <service> <action>` dispatcher plus per-instance helper registry files under `/var/lib/ratio1/r1setup/helpers/`.
+- Prefer generated execution inventories for CLI-driven Ansible operations. The settled Phase 5 split is: machine preparation runs from `playbooks/prepare_machine.yml`, instance runtime application runs from `playbooks/apply_instance.yml`, and the CLI should avoid driving multi-instance operations directly from the full persisted `hosts.yml` when a narrowed temp inventory is more accurate.
+- Local repo testing before publish can use `scripts/run_r1setup_repo_local.sh`. It supports either isolated dev configs or the real `~/.ratio1/r1_setup` config store via `--use-real-configs` / `--config-source`, and it enables `R1SETUP_NO_CLEAR=1` by default so terminal history remains visible during dev runs.
 - Update docs when user-visible menus, workflows, triggers, or safety guarantees change.
 - Prefer adding focused unit tests in `mnl_factory/scripts/tests/` for new logic.
 
@@ -197,3 +201,57 @@ Minimum required critic topics when relevant:
 - 2026-03-17T02:02:00+02:00 | Edge Node deployments now carry launcher-owned runtime metadata in a dedicated JSON file at `/var/lib/ratio1/r1setup/edge_node/metadata.json`, mounted read-only into the container at `/run/r1setup/metadata.json` via `R1SETUP_METADATA_PATH`. Render that file from the same apply path as `edge_node.service`, include service file version plus CLI/collection version and last applied action, and update/remove it whenever the service definition is applied/deleted.
 
 - 2026-03-17T02:22:00+02:00 | Correction to the previous 2026-03-17 metadata-path entry: runtime metadata now lives inside the existing Edge Node persistent volume under `{{ mnl_docker_volume_path }}/_data/r1setup/metadata.json` and is read in-container via `{{ mnl_docker_persistent_folder }}/_data/r1setup/metadata.json`. Do not add a second dedicated Docker mount for the metadata file in this design; keep only `R1SETUP_METADATA_PATH`.
+
+- 2026-03-20T10:19:02+02:00 | Discovery/import of existing remote services is now implemented under `Configuration Menu -> Discover Services`. Stable rules:
+  - discovery is read-only on the remote host
+  - import is selective per discovered service, not automatic
+  - discovered runtime identities are preserved by default on import
+  - service names like `edge_node2` or `edge_node3` must not by themselves imply expert mode
+  - grouped machine views may now show discovered-but-untracked services separately from imported tracked instances
+
+- 2026-03-20T10:19:02+02:00 | Saved legacy migration plans in stale `rollback_failed` state can now be auto-repaired only when recovery is unambiguous: the instance still belongs to the original source machine and the saved node status is already `running`. Ambiguous legacy plans must remain visible and require operator action instead of being silently rewritten.
+
+- 2026-03-17T23:01:53+02:00 | Phase 4 helper strategy is implemented. The stable rule is:
+  - standard topology keeps machine-global helpers like `get_logs`, `get_node_info`, and `restart_service`
+  - expert topology uses `/usr/local/bin/r1service <service> <action>`
+  - per-instance helper registry files live under `/var/lib/ratio1/r1setup/helpers/<service>.env`
+  - `r1setup` must reject mixed standard/expert helper semantics on one physical machine instead of guessing
+  - topology-aware helper command selection is now used by the `get_node_info.yml` playbook and the CLI log-streaming paths
+
+- 2026-03-17T23:15:42+02:00 | Phase 5 generated execution inventory support is implemented. The stable rule is:
+  - CLI-driven Ansible operations should prefer temp generated inventories scoped to the selected machines or instances
+  - generated execution inventories must enrich hosts with resolved runtime names, helper-mode fields, metadata paths, and derived volume/base-folder values
+  - deployment is now split in the CLI into `prepare_machine.yml` followed by `apply_instance.yml`
+  - one deploy operation should prepare each unique machine at most once, then apply instance runtime only to instances whose machine preparation succeeded
+
+- 2026-03-17T23:15:42+02:00 | Local pre-release repo testing now has a supported helper at `scripts/run_r1setup_repo_local.sh`. It runs the repo `r1setup` against a workspace synced from the local collection, can reuse the real `~/.ratio1/r1_setup` configs when explicitly requested, and defaults to `R1SETUP_NO_CLEAR=1` so menu transitions do not wipe terminal history during dev runs.
+
+- 2026-03-19T19:49:56+02:00 | Phase 6 visualization is implemented. The stable rule is:
+  - `Fleet Summary`, `Deployment Status`, and `Node Status & Info` should render grouped machine/instance views instead of a flat host list
+  - empty registered machines must remain visible in grouped views even when they have no assigned instance
+  - standard topology remains the default and should still read concisely as one machine with one instance
+  - expert topology should render multiple nested instances under one physical machine with per-instance runtime identity and status/version context
+
+- 2026-03-19T19:58:28+02:00 | Phase 7 empty-machine operations are implemented. The stable rule is:
+  - registered machines with no assigned instances can now be prepared through the deployment menu without creating placeholder node entries
+  - machine-only preparation must use a generated inventory built from fleet machine records, not from fake instance hosts
+  - successful machine-only preparation should move machine deployment state to `prepared`; failed preparation should move it to `error`
+  - standard mode remains the default behavior; machine-only preparation is additive and does not replace normal one-machine-one-node deployment
+
+- 2026-03-19T22:32:03+02:00 | Phase 8 migration planning is implemented. The stable rule is:
+  - migration planning must be non-mutating: no source stop, assignment change, archive creation, or transfer during planning
+  - plans must explicitly show the transfer route as `source machine -> local temp -> target machine`
+  - target runtime naming must be resolved during planning and checked for collisions before execution
+  - saved migration plans now persist locally in config metadata as `migration_plan_state`
+
+- 2026-03-19T22:48:16+02:00 | Phase 9 migration execution is implemented. The stable rule is:
+  - migration execution must use the controller-routed path `source machine -> local temp -> target machine`; do not introduce direct machine-to-machine copy as the default path
+  - target preparation must happen before data transfer when the saved plan requires it
+  - the source runtime must be stopped before source archiving, and assignment must not be finalized until target verification succeeds
+  - migration execution results must be recorded in the local operation log, and source cleanup/rollback remain separate Phase 10 concerns
+
+- 2026-03-19T22:55:35+02:00 | Phase 10 rollback/finalization is implemented. The stable rule is:
+  - failed or interrupted migrations are recovered through `Rollback Migration`, which must keep the source assignment authoritative and restart the source runtime after conservative target cleanup
+  - verified migrations are cleaned up through `Finalize Migration`, which must keep source cleanup explicit and optionally remove source volume data only after the operator confirms
+  - saved `migration_plan_state` now tracks `last_step` so recovery logic can reason about how far execution progressed
+  - rollback/finalization must clean controller-temp archive artifacts explicitly; do not silently delete them during uncertain execution state

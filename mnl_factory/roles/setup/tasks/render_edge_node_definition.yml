@@ -36,6 +36,23 @@
     mode: '0644'
     force: true
 
+- name: Create helper registry directory
+  ansible.builtin.file:
+    path: "{{ r1setup_helper_registry_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Render helper registry entry
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../roles/setup/templates/r1service-instance.env.j2"
+    dest: "{{ r1setup_helper_registry_path }}"
+    owner: root
+    group: root
+    mode: '0644'
+    force: true
+
 - name: Create service for {{ mnl_app_name }}
   ansible.builtin.template:
     src: "{{ playbook_dir }}/../roles/setup/templates/edge_node.service.j2"

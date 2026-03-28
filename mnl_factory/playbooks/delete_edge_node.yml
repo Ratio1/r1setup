@@ -9,6 +9,9 @@
     - ../group_vars/vault.yml
     - ../group_vars/mnl.yml
     - ../group_vars/variables.yml
+  pre_tasks:
+    - name: Resolve per-instance runtime vars
+      ansible.builtin.import_tasks: tasks/resolve_instance_runtime_vars.yml
   tasks:
     - name: Display cleanup warning
       debug:
@@ -19,7 +22,8 @@
           - Docker container ({{ mnl_docker_container_name }})
           - Docker images ({{ mnl_docker_image_url }})
           - Application data directory ({{ mnl_base_folder }})
-          - Created command scripts (/usr/local/bin/get_logs, /usr/local/bin/restart_service, /usr/local/bin/get_node_info)
+          - Per-instance helper registry entry ({{ r1setup_helper_registry_path }})
+          - Standard helper scripts when this machine uses standard helper mode
           - Docker daemon configuration (/etc/docker/daemon.json)
 
     - name: Stop the Edge Node service
@@ -68,7 +72,13 @@
         state: absent
       ignore_errors: true
 
-    - name: Remove created command scripts
+    - name: Remove per-instance helper registry entry
+      ansible.builtin.file:
+        path: "{{ r1setup_helper_registry_path }}"
+        state: absent
+      ignore_errors: true
+
+    - name: Remove standard-mode command scripts
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
@@ -81,6 +91,7 @@
         - "/usr/local/bin/get_allowed"
         - "/usr/local/bin/update_allowed_batch"
       ignore_errors: true
+      when: r1setup_helper_mode == 'standard_helpers'
 
     - name: Check if Docker daemon.json exists and was created by our setup
       ansible.builtin.stat:
@@ -103,7 +114,7 @@
 
     - name: Remove any remaining container exit status files
       ansible.builtin.file:
-        path: /tmp/ee-node.exit
+        path: "{{ r1setup_runtime_exit_status_path | default('/tmp/ee-node.exit') }}"
         state: absent
       ignore_errors: true
 

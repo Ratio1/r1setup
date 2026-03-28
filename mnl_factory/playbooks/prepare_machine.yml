@@ -1,0 +1,16 @@
+---
+- name: Prepare target machines
+  hosts: gpu_nodes
+  become: true
+  vars:
+    ansible_roles_path: "{{ playbook_dir }}/../roles"
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+    - ../group_vars/mnl.yml
+    - ../group_vars/variables.yml
+  roles:
+    - role: "{{ playbook_dir }}/../roles/prerequisites"
+    - role: "{{ playbook_dir }}/../roles/docker"
+    - role: "{{ playbook_dir }}/../roles/nvidia_gpu"
+      when: skip_gpu is not defined or not skip_gpu

@@ -109,9 +109,23 @@ class TestStructuralInvariants(unittest.TestCase):
         group_vars_path = R1SETUP_PATH.parent.parent / "group_vars" / "mnl.yml"
         template_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "templates" / "edge_node.service.j2"
         metadata_template_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "templates" / "r1setup-metadata.json.j2"
+        dispatcher_template_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "templates" / "r1service.j2"
+        helper_registry_template_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "templates" / "r1service-instance.env.j2"
+        services_tasks_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "tasks" / "services.yml"
+        render_tasks_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "tasks" / "render_edge_node_definition.yml"
+        node_info_playbook_path = R1SETUP_PATH.parent.parent / "playbooks" / "get_node_info.yml"
+        prepare_machine_playbook_path = R1SETUP_PATH.parent.parent / "playbooks" / "prepare_machine.yml"
+        apply_instance_playbook_path = R1SETUP_PATH.parent.parent / "playbooks" / "apply_instance.yml"
         group_vars_source = group_vars_path.read_text()
         template_source = template_path.read_text()
         metadata_template_source = metadata_template_path.read_text()
+        dispatcher_template_source = dispatcher_template_path.read_text()
+        helper_registry_template_source = helper_registry_template_path.read_text()
+        services_tasks_source = services_tasks_path.read_text()
+        render_tasks_source = render_tasks_path.read_text()
+        node_info_playbook_source = node_info_playbook_path.read_text()
+        prepare_machine_playbook_source = prepare_machine_playbook_path.read_text()
+        apply_instance_playbook_source = apply_instance_playbook_path.read_text()
 
         service_version_match = re.search(r'^mnl_service_version:\s*"([^"]+)"', group_vars_source, re.MULTILINE)
         self.assertIsNotNone(service_version_match, "mnl_service_version must be defined in group_vars/mnl.yml")
@@ -168,6 +182,21 @@ class TestStructuralInvariants(unittest.TestCase):
             "mnl.yml must expose metadata inside the existing container persistent volume",
         )
         self.assertIn(
+            'r1setup_helper_mode: "{{ \'expert_dispatcher\' if (r1setup_topology_mode | default(\'standard\')) == \'expert\' else \'standard_helpers\' }}"',
+            group_vars_source,
+            "mnl.yml must define helper mode from topology",
+        )
+        self.assertIn(
+            'r1setup_helper_registry_dir: "/var/lib/ratio1/r1setup/helpers"',
+            group_vars_source,
+            "mnl.yml must define the helper registry directory",
+        )
+        self.assertIn(
+            'r1setup_remote_get_node_info_command:',
+            group_vars_source,
+            "mnl.yml must define a topology-aware node-info helper command",
+        )
+        self.assertIn(
             '"managed_by": "r1setup"',
             metadata_template_source,
             "r1setup metadata template must identify its manager",
@@ -199,4 +228,115 @@ class TestStructuralInvariants(unittest.TestCase):
             "{{ mnl_service_version }}",
             image_url_match.group(1),
             "mnl_service_version must not change Docker image selection semantics",
+        )
+        self.assertIn(
+            'Usage:',
+            dispatcher_template_source,
+            "r1service dispatcher must provide operator-facing usage text",
+        )
+        self.assertIn(
+            'REGISTRY_DIR="{{ r1setup_helper_registry_dir }}"',
+            dispatcher_template_source,
+            "r1service dispatcher must use the shared helper registry directory",
+        )
+        self.assertIn(
+            "EDGE_NODE_SERVICE_NAME='{{ edge_node_service_name }}'",
+            helper_registry_template_source,
+            "helper registry template must persist the service name",
+        )
+        self.assertIn(
+            'when: r1setup_helper_mode == \'standard_helpers\'',
+            services_tasks_source,
+            "services.yml must keep standard helpers gated behind standard helper mode",
+        )
+        self.assertIn(
+            'when: r1setup_helper_mode == \'expert_dispatcher\'',
+            services_tasks_source,
+            "services.yml must install the dispatcher only for expert helper mode",
+        )
+        self.assertIn(
+            'Render helper registry entry',
+            render_tasks_source,
+            "render_edge_node_definition.yml must maintain the per-instance helper registry",
+        )
+
+    def test_instance_runtime_resolution_task_is_wired_into_instance_playbooks(self):
+        playbook_dir = R1SETUP_PATH.parent.parent / "playbooks"
+        runtime_task_path = playbook_dir / "tasks" / "resolve_instance_runtime_vars.yml"
+        service_probe_task_path = playbook_dir / "tasks" / "probe_instance_service_presence.yml"
+        runtime_task_source = runtime_task_path.read_text()
+        service_probe_task_source = service_probe_task_path.read_text()
+        node_info_playbook_source = (playbook_dir / "get_node_info.yml").read_text()
+        prepare_machine_playbook_source = (playbook_dir / "prepare_machine.yml").read_text()
+        apply_instance_playbook_source = (playbook_dir / "apply_instance.yml").read_text()
+
+        self.assertIn(
+            'edge_node_service_name: "{{ r1setup_effective_service_name | default(edge_node_service_name) }}"',
+            runtime_task_source,
+            "runtime resolution task must map the effective service name back onto edge_node_service_name",
+        )
+        self.assertIn(
+            'mnl_docker_container_name: "{{ r1setup_effective_container_name | default(mnl_docker_container_name) }}"',
+            runtime_task_source,
+            "runtime resolution task must map the effective container name back onto mnl_docker_container_name",
+        )
+        self.assertIn(
+            'r1setup_helper_mode: "{{ r1setup_effective_helper_mode | default(r1setup_helper_mode) }}"',
+            runtime_task_source,
+            "runtime resolution task must preserve the effective helper mode",
+        )
+        self.assertIn(
+            'systemctl cat "$SERVICE_NAME" >/dev/null 2>&1',
+            service_probe_task_source,
+            "service presence probe must use systemctl cat as a runtime-aware existence check",
+        )
+        self.assertIn(
+            'r1setup_service_exists: "{{ (r1setup_service_presence_probe.stdout | default(\'missing\') | trim) == \'present\' }}"',
+            service_probe_task_source,
+            "service presence probe must persist a boolean fact for downstream playbooks",
+        )
+
+        for relative_path in (
+            "apply_instance.yml",
+            "service_status.yml",
+            "service_start.yml",
+            "service_stop.yml",
+            "service_restart.yml",
+            "customize_service.yml",
+            "delete_edge_node.yml",
+        ):
+            source = (playbook_dir / relative_path).read_text()
+            self.assertIn(
+                "import_tasks: tasks/resolve_instance_runtime_vars.yml",
+                source,
+                f"{relative_path} must import the runtime resolution task before using per-instance runtime vars",
+            )
+
+        for relative_path in (
+            "service_status.yml",
+            "service_start.yml",
+            "service_stop.yml",
+            "service_restart.yml",
+            "customize_service.yml",
+        ):
+            source = (playbook_dir / relative_path).read_text()
+            self.assertIn(
+                "import_tasks: tasks/probe_instance_service_presence.yml",
+                source,
+                f"{relative_path} must import the service presence probe before relying on service existence state",
+            )
+        self.assertIn(
+            '{{ r1setup_remote_get_node_info_command }}',
+            node_info_playbook_source,
+            "get_node_info.yml must use the topology-aware helper command",
+        )
+        self.assertIn(
+            "Prepare target machines",
+            prepare_machine_playbook_source,
+            "prepare_machine.yml must exist for machine-level deduped preparation",
+        )
+        self.assertIn(
+            "Apply Edge Node instance runtime",
+            apply_instance_playbook_source,
+            "apply_instance.yml must exist for instance-level runtime application",
         )
