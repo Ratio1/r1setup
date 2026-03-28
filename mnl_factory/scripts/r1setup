@@ -63,7 +63,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.4.19"
+    CLI_VERSION = "1.4.20"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -1432,7 +1432,17 @@ class ConfigurationManager:
                 canonical_record['instance_names'] = []
                 continue
 
-            for field in ('ansible_host', 'ansible_user', 'ansible_port', 'machine_specs', 'discovery'):
+            for field in (
+                'ansible_host',
+                'ansible_user',
+                'ansible_port',
+                'ansible_ssh_common_args',
+                'ansible_ssh_pass',
+                'ansible_become_password',
+                'ansible_ssh_private_key_file',
+                'machine_specs',
+                'discovery',
+            ):
                 if canonical_record.get(field) in (None, '', {}):
                     value = current_record.get(field)
                     if value not in (None, '', {}):
@@ -1587,6 +1597,14 @@ class ConfigurationManager:
                 'ansible_user': machine_data.get('ansible_user', 'root'),
                 'ansible_port': machine_data.get('ansible_port', 22),
             })
+            for field in (
+                'ansible_ssh_common_args',
+                'ansible_ssh_pass',
+                'ansible_become_password',
+                'ansible_ssh_private_key_file',
+            ):
+                if machine_data.get(field) not in (None, ''):
+                    merged_machine[field] = machine_data.get(field)
             merged_machine.setdefault('topology_mode', machine_data.get('topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE))
             merged_machine.setdefault(
                 'deployment_state',
@@ -2604,12 +2622,24 @@ class ConfigurationManager:
                 'ansible_host': host_config.get('ansible_host'),
                 'ansible_user': host_config.get('ansible_user', 'root'),
                 'ansible_port': host_config.get('ansible_port', 22),
+                'ansible_ssh_common_args': host_config.get('ansible_ssh_common_args'),
+                'ansible_ssh_pass': host_config.get('ansible_ssh_pass'),
+                'ansible_become_password': host_config.get('ansible_become_password'),
+                'ansible_ssh_private_key_file': host_config.get('ansible_ssh_private_key_file'),
                 'topology_mode': host_config.get('r1setup_topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE),
                 'deployment_state': host_config.get(
                     'r1setup_machine_deployment_state', DEFAULT_MACHINE_DEPLOYMENT_STATE
                 ),
                 'instance_names': [],
             })
+            for field in (
+                'ansible_ssh_common_args',
+                'ansible_ssh_pass',
+                'ansible_become_password',
+                'ansible_ssh_private_key_file',
+            ):
+                if machine.get(field) in (None, '') and host_config.get(field) not in (None, ''):
+                    machine[field] = host_config.get(field)
             machine['instance_names'].append(host_name)
 
             fleet_state['fleet']['instances'][host_name] = {
