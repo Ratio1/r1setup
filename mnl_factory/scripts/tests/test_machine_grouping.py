@@ -422,3 +422,52 @@ class TestMachineGroupDisplayLines(unittest.TestCase):
             "        ~ edge_node_devnet [DISCOVERED] state=active env=devnet (metadata)",
             texts,
         )
+
+    def test_display_lines_discovery_cache_not_duplicated_with_instances(self):
+        """Cached discovery rows must appear once when the machine also has tracked instances."""
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app._format_timestamp_ago = MagicMock(return_value="Just now")
+
+        machine_views = [
+            {
+                "machine_id": "machine-mixed",
+                "display_label": "machine-mixed",
+                "connection_display": "root@10.0.0.30",
+                "topology_mode": "standard",
+                "deployment_state": "active",
+                "group_status": "Running",
+                "group_status_color": "green",
+                "group_status_emoji": "🟢",
+                "machine_specs_summary": "",
+                "instances": [
+                    {
+                        "instance_name": "tracked-node",
+                        "status_emoji": "🟢",
+                        "status_label": "running",
+                        "status_color": "green",
+                        "runtime": {
+                            "service_name": "edge_node",
+                            "container_name": "edge_node",
+                        },
+                    }
+                ],
+                "last_discovery_scan_at": "2026-03-20T11:00:00+02:00",
+                "untracked_discovered_candidates": [
+                    {
+                        "service_name": "edge_node_bkp",
+                        "service_state": "inactive",
+                        "environment": "devnet",
+                        "environment_source": "image_tag",
+                    }
+                ],
+            }
+        ]
+
+        lines, _ = app._build_machine_group_display_lines(machine_views)
+        texts = [text for text, _ in lines]
+
+        discovery_lines = [t for t in texts if "edge_node_bkp" in t]
+        self.assertEqual(len(discovery_lines), 1, f"Expected exactly 1 discovery line, got {len(discovery_lines)}: {discovery_lines}")
+
+        cache_header_lines = [t for t in texts if "cached discovery results" in t]
+        self.assertEqual(len(cache_header_lines), 1, f"Expected exactly 1 cache header, got {len(cache_header_lines)}")

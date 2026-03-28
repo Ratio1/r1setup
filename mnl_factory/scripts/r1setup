@@ -63,7 +63,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.4.17"
+    CLI_VERSION = "1.4.18"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -8945,17 +8945,16 @@ class R1Setup:
 
             if not machine_view['instances']:
                 lines.append(("      no assigned instances in this config", 'yellow'))
-            if machine_view.get('untracked_discovered_candidates'):
-                lines.append((self._format_discovery_cache_line(machine_view), 'cyan'))
-                for candidate in machine_view.get('untracked_discovered_candidates') or []:
-                    candidate_line = (
-                        f"        ~ {candidate.get('service_name', '?')} "
-                        f"[DISCOVERED] state={candidate.get('service_state', 'unknown')} "
-                        f"env={candidate.get('environment', 'unknown')} "
-                        f"({candidate.get('environment_source', 'unknown')})"
-                    )
-                    lines.append((candidate_line, 'white'))
-            if not machine_view['instances']:
+                if machine_view.get('untracked_discovered_candidates'):
+                    lines.append((self._format_discovery_cache_line(machine_view), 'cyan'))
+                    for candidate in machine_view.get('untracked_discovered_candidates') or []:
+                        candidate_line = (
+                            f"        ~ {candidate.get('service_name', '?')} "
+                            f"[DISCOVERED] state={candidate.get('service_state', 'unknown')} "
+                            f"env={candidate.get('environment', 'unknown')} "
+                            f"({candidate.get('environment_source', 'unknown')})"
+                        )
+                        lines.append((candidate_line, 'white'))
                 continue
 
             if (
@@ -9684,11 +9683,16 @@ PY"""
             }
             collisions = self.config_manager.detect_runtime_collisions(machine_id, runtime, working_fleet_state)
             if collisions:
+                collision_details = ', '.join(
+                    f"{field} (used by {', '.join(owners)})"
+                    for field, owners in collisions.items()
+                )
                 return {
                     'status': 'error',
                     'message': (
-                        f"Discovered service '{service_name}' collides with existing runtime fields on machine "
-                        f"'{machine_id}'."
+                        f"Discovered service '{service_name}' collides with already-tracked instance(s) on machine "
+                        f"'{machine_id}': {collision_details}. "
+                        f"If this service is already managed under a different name, skip importing it."
                     ),
                 }
 
