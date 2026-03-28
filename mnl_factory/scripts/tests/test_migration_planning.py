@@ -248,3 +248,51 @@ class TestMigrationPlanningFlow(unittest.TestCase):
 
         app.set_migration_plan_state.assert_called_once()
 
+    def test_plan_instance_migration_warns_when_saving_blocked_plan(self):
+        app = MagicMock()
+        app.active_config = {"config_name": "fleet"}
+        app.load_configuration = MagicMock()
+        app.get_fleet_state_copy.return_value = {
+            "config_schema_version": r1setup.CONFIG_SCHEMA_VERSION,
+            "fleet": {
+                "machines": {
+                    "machine-a": {"machine_id": "machine-a"},
+                },
+                "instances": {
+                    "node-1": {"assigned_machine_id": "machine-a", "runtime": {}},
+                },
+            },
+        }
+        app.print_header = MagicMock()
+        app.print_colored = MagicMock()
+        app.print_section = MagicMock()
+        app.wait_for_enter = MagicMock()
+        app.get_input = MagicMock(return_value="y")
+        app.set_migration_plan_state = MagicMock()
+        app.config_manager = MagicMock()
+        app.config_manager._format_machine_connection_display.return_value = "root@10.0.0.1"
+
+        planner = r1setup.MigrationPlanner(app)
+        planner._get_plannable_instances = MagicMock(return_value={"node-1": {"assigned_machine_id": "machine-a", "runtime": {}}})
+        planner._select_migration_source_instance = MagicMock(return_value="node-1")
+        planner._confirm_source_machine = MagicMock(return_value=True)
+        planner._select_migration_target_machine = MagicMock(return_value="machine-b")
+        planner._select_runtime_name_policy = MagicMock(return_value="preserve")
+        planner.build_migration_plan = MagicMock(return_value={
+            "plan_id": "migration-node-1",
+            "status": "blocked",
+            "instance_name": "node-1",
+            "source_machine_id": "machine-a",
+            "target_machine_id": "machine-b",
+            "runtime_name_policy": "preserve",
+            "target_runtime": {},
+            "transfer": {},
+            "preflight": {},
+            "validation": {"errors": ["target unreachable"], "warnings": []},
+        })
+        planner._display_migration_plan = MagicMock()
+
+        planner.plan_instance_migration()
+
+        rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
+        self.assertIn("Blocked migration plan saved locally for review.", rendered_text)

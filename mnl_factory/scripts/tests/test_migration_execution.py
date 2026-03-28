@@ -93,6 +93,7 @@ class TestMigrationExecution(unittest.TestCase):
             plan = self._build_plan(temp_dir)
             app = self._build_app(plan)
             planner = r1setup.MigrationPlanner(app)
+            planner._revalidate_saved_migration_plan = MagicMock(return_value=plan)
 
             verification_complete = {"value": False}
 
@@ -155,11 +156,78 @@ class TestMigrationExecution(unittest.TestCase):
                 [("migration_execution", "started"), ("migration_execution", "success")],
             )
 
+    def test_execute_saved_migration_plan_revalidates_blocked_plan_and_then_runs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            saved_plan = self._build_plan(temp_dir)
+            saved_plan["status"] = "blocked"
+            saved_plan["validation"] = {"errors": ["Source machine reachability probe failed: timed out"], "warnings": []}
+            app = self._build_app(saved_plan)
+            planner = r1setup.MigrationPlanner(app)
+
+            refreshed_plan = self._build_plan(temp_dir)
+            planner.build_migration_plan = MagicMock(return_value=refreshed_plan)
+            planner._prepare_target_machine_for_migration = MagicMock(return_value={"status": "success", "prepared": True})
+            planner._stop_source_instance_for_migration = MagicMock(return_value={"status": "success"})
+            planner._create_source_archive = MagicMock(return_value={"status": "success"})
+            planner._compute_remote_checksum = MagicMock(side_effect=[
+                {"status": "success", "checksum": "abc123"},
+                {"status": "success", "checksum": "abc123"},
+            ])
+            planner._copy_from_machine = MagicMock(return_value={"status": "success"})
+            planner._compute_local_checksum = MagicMock(return_value="abc123")
+            planner._copy_to_machine = MagicMock(return_value={"status": "success"})
+            planner._prepare_target_volume_root = MagicMock(return_value={"status": "success"})
+            planner._extract_archive_on_target = MagicMock(return_value={"status": "success"})
+            planner._apply_target_runtime_definition = MagicMock(return_value={"status": "success"})
+            planner._start_target_instance = MagicMock(return_value={"status": "success"})
+            planner._verify_target_migration_health = MagicMock(return_value={
+                "status": "success",
+                "runtime_health": "verified",
+                "app_health": True,
+                "app_health_status": "verified",
+            })
+
+            planner.execute_saved_migration_plan()
+
+            planner.build_migration_plan.assert_called_once_with(
+                "node-1",
+                "machine-b",
+                runtime_name_policy="preserve",
+                custom_runtime=None,
+            )
+            self.assertEqual(app.set_migration_plan_state.call_args_list[0].args[0]["status"], "planned")
+            app.finalize_instance_migration.assert_called_once()
+
+    def test_execute_saved_migration_plan_stops_when_revalidation_finds_blockers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            saved_plan = self._build_plan(temp_dir)
+            app = self._build_app(saved_plan)
+            planner = r1setup.MigrationPlanner(app)
+
+            blocked_plan = self._build_plan(temp_dir)
+            blocked_plan["status"] = "blocked"
+            blocked_plan["validation"] = {
+                "errors": ["Target machine reachability probe failed: connection timed out"],
+                "warnings": [],
+            }
+            planner.build_migration_plan = MagicMock(return_value=blocked_plan)
+
+            planner.execute_saved_migration_plan()
+
+            app.get_input.assert_not_called()
+            app.finalize_instance_migration.assert_not_called()
+            self.assertEqual(app.set_migration_plan_state.call_count, 1)
+            self.assertEqual(app.set_migration_plan_state.call_args.args[0]["status"], "blocked")
+            rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
+            self.assertIn("remains blocked after revalidation", rendered_text)
+            self.assertIn("Target machine reachability probe failed: connection timed out", rendered_text)
+
     def test_execute_saved_migration_plan_checksum_mismatch_fails_without_finalizing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             plan = self._build_plan(temp_dir)
             app = self._build_app(plan)
             planner = r1setup.MigrationPlanner(app)
+            planner._revalidate_saved_migration_plan = MagicMock(return_value=plan)
 
             planner._prepare_target_machine_for_migration = MagicMock(return_value={"status": "success", "prepared": True})
             planner._stop_source_instance_for_migration = MagicMock(return_value={"status": "success"})
@@ -182,8 +250,10 @@ class TestMigrationExecution(unittest.TestCase):
                 [call.args for call in app._update_node_status.call_args_list],
                 [("node-1", "stopped")],
             )
-            self.assertGreaterEqual(app.set_migration_plan_state.call_count, 4)
-            self.assertEqual(app.set_migration_plan_state.call_args_list[0].args[0]["status"], "executing")
+            persisted_statuses = [call.args[0]["status"] for call in app.set_migration_plan_state.call_args_list]
+            self.assertGreaterEqual(len(persisted_statuses), 5)
+            self.assertEqual(persisted_statuses[0], "planned")
+            self.assertEqual(persisted_statuses[1], "executing")
             self.assertEqual(app.set_migration_plan_state.call_args_list[-1].args[0]["status"], "failed")
             self.assertEqual(app.set_migration_plan_state.call_args_list[-1].args[0]["last_step"], "source_archived")
 
@@ -192,6 +262,7 @@ class TestMigrationExecution(unittest.TestCase):
             plan = self._build_plan(temp_dir)
             app = self._build_app(plan)
             planner = r1setup.MigrationPlanner(app)
+            planner._revalidate_saved_migration_plan = MagicMock(return_value=plan)
 
             planner._prepare_target_machine_for_migration = MagicMock(return_value={"status": "success", "prepared": True})
             planner._stop_source_instance_for_migration = MagicMock(return_value={"status": "success"})

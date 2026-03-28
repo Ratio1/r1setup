@@ -63,7 +63,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.4.18"
+    CLI_VERSION = "1.4.19"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -5773,6 +5773,24 @@ class MigrationPlanner:
         if context_note:
             self.app.print_colored(context_note, 'cyan')
 
+    def _revalidate_saved_migration_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Refresh a saved plan against current fleet and probe state before execution."""
+        runtime_name_policy = str(plan.get('runtime_name_policy') or 'preserve')
+        custom_runtime = None
+        if runtime_name_policy == 'custom':
+            custom_runtime = dict(plan.get('target_runtime') or {})
+
+        refreshed_plan = self.build_migration_plan(
+            str(plan.get('instance_name') or ''),
+            str(plan.get('target_machine_id') or ''),
+            runtime_name_policy=runtime_name_policy,
+            custom_runtime=custom_runtime,
+        )
+        refreshed_plan['plan_id'] = plan.get('plan_id') or refreshed_plan.get('plan_id')
+        refreshed_plan['created_at'] = plan.get('created_at') or refreshed_plan.get('created_at')
+        refreshed_plan['revalidated_at'] = datetime.now().isoformat()
+        return refreshed_plan
+
     def _migration_runtime_timeout(self) -> int:
         """Timeout for migration lifecycle steps that can take as long as deploy/apply."""
         return DeploymentService._phase_timeout(self.app.connection_timeout, 180)
@@ -5835,7 +5853,13 @@ class MigrationPlanner:
 
         if self.app.get_input("\nSave this migration plan locally? (Y/n)", "Y").lower() == 'y':
             self.app.set_migration_plan_state(plan)
-            self.app.print_colored("Migration plan saved locally.", 'green')
+            if plan.get('status') == 'blocked':
+                self.app.print_colored(
+                    "Blocked migration plan saved locally for review. Resolve the errors above; execution will revalidate before proceeding.",
+                    'yellow',
+                )
+            else:
+                self.app.print_colored("Migration plan saved locally.", 'green')
         else:
             self.app.print_colored("Migration plan was not saved.", 'yellow')
 
@@ -6751,7 +6775,26 @@ class MigrationPlanner:
             self.app.print_colored("No saved migration plan found. Build a plan first.", 'yellow')
             self.app.wait_for_enter()
             return
-        if plan.get('status') != 'planned':
+
+        plan_status = str(plan.get('status') or 'unknown')
+        if plan_status in {'planned', 'blocked'}:
+            self.app.print_colored(
+                f"Revalidating saved migration plan from status '{plan_status}' against current fleet state.",
+                'cyan',
+            )
+            plan = self._revalidate_saved_migration_plan(plan)
+            self.app.set_migration_plan_state(plan)
+            if plan.get('status') != 'planned':
+                self.app.print_colored("Saved migration plan remains blocked after revalidation.", 'red')
+                self._display_migration_plan(plan, context='execution')
+                self.app.print_colored(
+                    "Resolve the blocking errors above or rebuild the migration plan after fleet/runtime changes.",
+                    'yellow',
+                )
+                self.app.wait_for_enter()
+                return
+            self.app.print_colored("Saved migration plan passed revalidation and is ready to execute.", 'green')
+        else:
             self.app.print_colored(
                 f"Saved migration plan is not executable in status '{plan.get('status', 'unknown')}'.",
                 'red',
