@@ -1206,19 +1206,113 @@ class ConfigurationManager:
             self.app.print_colored(f"Error saving active config: {e}", 'red')
             self.app.print_debug(f"Exception saving active config: {e}")
 
+    # -- Shared config-creation primitives (Phase 1) --
+
+    def _prompt_new_config_name(self) -> str:
+        """Prompt the operator for a valid configuration base name."""
+        self.app.print_colored("\n📝 Configuration Naming", 'cyan', bold=True)
+        self.app.print_colored("Give your configuration a meaningful name to identify it later.", 'yellow')
+        self.app.print_colored("Examples: 'production-cluster', 'test-env', 'gpu-farm-1'", 'white')
+        while True:
+            custom_name = self.app.get_input("Enter configuration name (letters, numbers, -, _)", required=True)
+            if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
+                return custom_name
+            self.app.print_colored("Invalid name. Use only letters, numbers, hyphens (-), and underscores (_)", 'red')
+
+    def _prompt_new_config_environment(self) -> str:
+        """Prompt for network environment and persist the selection."""
+        env = self.app._select_network_environment()
+        self.set_mnl_app_env(env)
+        return env
+
+    def _prompt_node_count(self) -> int:
+        """Prompt the operator for the number of nodes to configure."""
+        while True:
+            try:
+                num_nodes = int(self.app.get_input("How many nodes do you want to configure", "1"))
+                if num_nodes <= 0:
+                    self.app.print_colored("Please enter a positive number", 'red')
+                    continue
+                return num_nodes
+            except ValueError:
+                self.app.print_colored("Please enter a valid number", 'red')
+
+    def _reset_inventory_for_new_config(self) -> None:
+        """Reset inventory to an empty gpu_nodes structure."""
+        self.app.inventory = {
+            'all': {
+                'vars': {},
+                'children': {
+                    'gpu_nodes': {
+                        'hosts': {}
+                    }
+                }
+            }
+        }
+
+    def _collect_node_connection_entries(
+        self,
+        num_nodes: int,
+        *,
+        allow_credential_reuse: bool = False,
+        enforce_duplicate_check: bool = True,
+        show_progress: bool = False,
+    ) -> dict:
+        """Collect node connection entries interactively.
+
+        Returns the hosts dict from the current inventory.
+        """
+        hosts = self.app.inventory['all']['children']['gpu_nodes']['hosts']
+        previous_config = None
+        configured_nodes = []
+
+        for i in range(num_nodes):
+            if show_progress and configured_nodes:
+                self.app.print_colored("")
+                for idx, (n, ip, user) in enumerate(configured_nodes, 1):
+                    self.app.print_colored(f"  \u2713 {idx}/{num_nodes}: {n} ({user}@{ip})", 'green')
+
+            self.app.print_section(f"Configuring Node {i + 1} of {num_nodes}")
+
+            while True:
+                name = self.app._get_valid_hostname(f"Enter name for node {i + 1}", f"gpu-node-{i + 1}")
+                if enforce_duplicate_check and name in hosts:
+                    self.app.print_colored(f"Node '{name}' already exists! Please choose a different name.", 'red')
+                    continue
+                break
+
+            kwargs = {}
+            if allow_credential_reuse and previous_config is not None:
+                kwargs['previous_config'] = previous_config
+
+            node_config = self.app._configure_single_node(**kwargs)
+            hosts[name] = node_config
+
+            if allow_credential_reuse:
+                previous_config = node_config
+
+            ip = node_config.get('ansible_host', '')
+            user = node_config.get('ansible_user', '')
+            configured_nodes.append((name, ip, user))
+
+            if show_progress:
+                self.app.print_colored(
+                    f"\u2713 Node {i + 1}/{num_nodes} configured: {name} ({user}@{ip})", 'green'
+                )
+            else:
+                self.app.print_colored(f"Node '{name}' configured successfully!", 'green')
+
+        return hosts
+
+    def _finalize_new_config_save(self, config_name: str, env: str, nodes_count: int, *, update_symlink: bool = True) -> None:
+        """Save the new config, update symlink, and print confirmation."""
+        self._save_config_with_metadata(config_name, env, nodes_count, update_symlink=update_symlink)
+        self.app.print_colored(f"Configuration '{config_name}' created and activated!", 'green')
+
     def _generate_config_name(self, nodes_count: int, custom_name: str = None) -> str:
         """Generate a configuration name with user input, timestamp and metadata"""
         if not custom_name:
-            self.app.print_colored("\n📝 Configuration Naming", 'cyan', bold=True)
-            self.app.print_colored("Give your configuration a meaningful name to identify it later.", 'yellow')
-            self.app.print_colored("Examples: 'production-cluster', 'test-env', 'gpu-farm-1'", 'white')
-
-            while True:
-                custom_name = self.app.get_input("Enter configuration name (letters, numbers, -, _)", required=True)
-                # Validate name (allow letters, numbers, hyphens, underscores)
-                if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
-                    break
-                self.app.print_colored("Invalid name. Use only letters, numbers, hyphens (-), and underscores (_)", 'red')
+            custom_name = self._prompt_new_config_name()
 
         # Generate timestamp components
         now = datetime.now()
@@ -3251,70 +3345,22 @@ class ConfigurationManager:
         """Create a new configuration with proper management"""
         self.app.print_section("Create New Configuration")
 
-        # First step: Get configuration name
-        self.app.print_colored("\n📝 Configuration Naming", 'cyan', bold=True)
-        self.app.print_colored("Give your configuration a meaningful name to identify it later.", 'yellow')
-        self.app.print_colored("Examples: 'production-cluster', 'test-env', 'gpu-farm-1'", 'white')
-
-        while True:
-            custom_name = self.app.get_input("Enter configuration name (letters, numbers, -, _)", required=True)
-            # Validate name (allow letters, numbers, hyphens, underscores)
-            if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
-                break
-            self.app.print_colored("Invalid name. Use only letters, numbers, hyphens (-), and underscores (_)", 'red')
-
-        # Select network environment
-        env = self.app._select_network_environment()
-
-        # Get number of nodes
-        while True:
-            try:
-                num_nodes = int(self.app.get_input("How many nodes do you want to configure", "1"))
-                if num_nodes <= 0:
-                    self.app.print_colored("Please enter a positive number", 'red')
-                    continue
-                break
-            except ValueError:
-                self.app.print_colored("Please enter a valid number", 'red')
-
-        # Generate configuration name with the custom name
+        custom_name = self._prompt_new_config_name()
+        env = self._prompt_new_config_environment()
+        num_nodes = self._prompt_node_count()
         config_name = self._generate_config_name(num_nodes, custom_name)
 
-        # Reset inventory for new configuration
-        self.app.inventory = {
-            'all': {
-                'vars': {},
-                'children': {
-                    'gpu_nodes': {
-                        'hosts': {}
-                    }
-                }
-            }
-        }
+        self._reset_inventory_for_new_config()
+        self._collect_node_connection_entries(
+            num_nodes,
+            allow_credential_reuse=True,
+            enforce_duplicate_check=True,
+            show_progress=True,
+        )
 
-        # Configure each node
-        hosts = self.app.inventory['all']['children']['gpu_nodes']['hosts']
-        previous_config = None
-        configured_nodes = []
-        for i in range(num_nodes):
-            # Show progress of previously configured nodes
-            if configured_nodes:
-                self.app.print_colored("")
-                for idx, (n, ip, user) in enumerate(configured_nodes, 1):
-                    self.app.print_colored(f"  \u2713 {idx}/{num_nodes}: {n} ({user}@{ip})", 'green')
-            self.app.print_section(f"Configuring Node {i + 1} of {num_nodes}")
-            name = self.app._get_valid_hostname(f"Enter name for node {i + 1}", f"gpu-node-{i + 1}")
-            node_config = self.app._configure_single_node(previous_config=previous_config)
-            hosts[name] = node_config
-            previous_config = node_config
-            configured_nodes.append((name, node_config.get('ansible_host', ''), node_config.get('ansible_user', '')))
-            self.app.print_colored(f"\u2713 Node {i + 1}/{num_nodes} configured: {name} ({node_config.get('ansible_user', '')}@{node_config.get('ansible_host', '')})", 'green')
+        self._finalize_new_config_save(config_name, env, num_nodes)
 
-        # Save configuration with metadata
-        self._save_config_with_metadata(config_name, env, num_nodes)
-        self.app.print_colored(f"Configuration '{config_name}' created and activated!", 'green')
-
-        # Offer to deploy immediately
+        # Caller-specific: offer to deploy immediately
         self.app.print_colored("\n\U0001f4a1 Your nodes are configured and ready for deployment!", 'cyan')
         deploy_choice = self.app.get_input("Would you like to deploy now? (y/n)", "y")
         if deploy_choice.lower() == 'y':
@@ -8598,6 +8644,18 @@ class R1Setup:
     def _save_active_config(self):
         return self.config_manager._save_active_config()
 
+    def _prompt_new_config_name(self):
+        return self.config_manager._prompt_new_config_name()
+
+    def _prompt_new_config_environment(self):
+        return self.config_manager._prompt_new_config_environment()
+
+    def _prompt_node_count(self):
+        return self.config_manager._prompt_node_count()
+
+    def _reset_inventory_for_new_config(self):
+        return self.config_manager._reset_inventory_for_new_config()
+
     def _generate_config_name(self, nodes_count, custom_name=None):
         return self.config_manager._generate_config_name(nodes_count, custom_name)
 
@@ -11433,52 +11491,19 @@ PY"""
         """Create initial configuration"""
         self.print_section("Initial Configuration Setup")
 
-        # First step: Get configuration name
-        self.print_colored("\n📝 Configuration Naming", 'cyan', bold=True)
-        self.print_colored("Give your configuration a meaningful name to identify it later.", 'yellow')
-        self.print_colored("Examples: 'production-cluster', 'test-env', 'gpu-farm-1'", 'white')
-
-        while True:
-            custom_name = self.get_input("Enter configuration name (letters, numbers, -, _)", required=True)
-            # Validate name (allow letters, numbers, hyphens, underscores)
-            if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
-                break
-            self.print_colored("Invalid name. Use only letters, numbers, hyphens (-), and underscores (_)", 'red')
-
-        # Select network environment
-        env = self._select_network_environment()
-        self.set_mnl_app_env(env)
-
-        # Get number of nodes
-        while True:
-            try:
-                num_nodes = int(self.get_input("How many nodes do you want to configure", "1"))
-                if num_nodes <= 0:
-                    self.print_colored("Please enter a positive number", 'red')
-                    continue
-                break
-            except ValueError:
-                self.print_colored("Please enter a valid number", 'red')
-
-        # Generate configuration name with the custom name
+        custom_name = self.config_manager._prompt_new_config_name()
+        env = self.config_manager._prompt_new_config_environment()
+        num_nodes = self.config_manager._prompt_node_count()
         config_name = self._generate_config_name(num_nodes, custom_name)
 
-        # Configure each node
-        hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
-        for i in range(num_nodes):
-            self.print_section(f"Configuring Node {i + 1} of {num_nodes}")
-            while True:
-                name = self._get_valid_hostname(f"Enter name for node {i + 1}", f"gpu-node-{i + 1}")
-                if name in hosts:
-                    self.print_colored(f"Node '{name}' already exists! Please choose a different name.", 'red')
-                    continue
-                break
-            hosts[name] = self._configure_single_node()
-            self.print_colored(f"Node '{name}' configured successfully!", 'green')
+        self.config_manager._collect_node_connection_entries(
+            num_nodes,
+            allow_credential_reuse=False,
+            enforce_duplicate_check=True,
+            show_progress=False,
+        )
 
-        # Save configuration with metadata (instead of legacy _save_configuration)
-        self._save_config_with_metadata(config_name, env, num_nodes)
-        self.print_colored(f"Configuration '{config_name}' created and activated!", 'green')
+        self.config_manager._finalize_new_config_save(config_name, env, num_nodes)
 
     def _select_network_environment(self) -> str:
         """Select network environment"""
@@ -12017,17 +12042,7 @@ PY"""
                 self.config_file.rename(backup_file)
                 self.print_colored(f"Configuration backed up to: {backup_file}", 'green')
 
-            # Reset inventory
-            self.inventory = {
-                'all': {
-                    'vars': {},
-                    'children': {
-                        'gpu_nodes': {
-                            'hosts': {}
-                        }
-                    }
-                }
-            }
+            self.config_manager._reset_inventory_for_new_config()
             self._create_initial_configuration()
 
     def view_configuration(self) -> None:

@@ -1130,12 +1130,32 @@ Recommended per-phase closeout checklist:
 
 #### Phase 1
 
-- Status: not started
-- Scope notes:
+- Status: completed
+- Scope notes: Extract shared config-creation primitives; migrate all three entry points; normalize missing behaviors.
 - Actual behavior shipped:
+  - Added 6 shared primitives on `ConfigurationManager`:
+    - `_prompt_new_config_name()` — extracted from duplicate name-prompt loops in Path 1, Path 2, and `_generate_config_name`
+    - `_prompt_new_config_environment()` — wraps `_select_network_environment()` + `set_mnl_app_env()`
+    - `_prompt_node_count()` — extracted from duplicate count prompts
+    - `_reset_inventory_for_new_config()` — extracted from inline inventory resets
+    - `_collect_node_connection_entries(num_nodes, *, allow_credential_reuse, enforce_duplicate_check, show_progress)` — unified collection loop
+    - `_finalize_new_config_save(config_name, env, nodes_count)` — save + confirmation message
+  - Updated `_generate_config_name()` to delegate to `_prompt_new_config_name()` when no name given
+  - Migrated Path 1 (`_create_new_configuration_with_management`): now uses all shared primitives; deploy prompt preserved as caller-specific
+  - Migrated Path 2 (`_create_initial_configuration`): now uses all shared primitives
+  - Migrated Path 3 (`_create_new_configuration`): now uses `_reset_inventory_for_new_config()` before delegating to Path 2
+  - Added delegation stubs on `R1Setup`: `_prompt_new_config_name`, `_prompt_new_config_environment`, `_prompt_node_count`, `_reset_inventory_for_new_config`
+  - Normalized behaviors:
+    - Path 1 now calls `set_mnl_app_env(env)` (was missing)
+    - Path 1 now enforces duplicate hostname check (was missing)
 - Tests run:
-- Commit(s):
-- Follow-up notes:
+  - `python3 -m py_compile r1setup` — clean
+  - `python3 -m unittest discover tests -v` — 267 tests, all passed
+  - New tests added to `tests/test_r1setup_core.py`:
+    - `TestSharedConfigCreationPrimitives` (11 tests): prompt_new_config_name valid/invalid, prompt_new_config_environment calls set_mnl_app_env, prompt_node_count valid/zero, reset_inventory, collect_node_connection_entries duplicate_check/credential_reuse, finalize_new_config_save, generate_config_name delegation
+    - `TestConfigCreationPathMigration` (4 tests): path1_calls_set_mnl_app_env, path1_enforces_duplicate_check, path2_uses_shared_primitives, path3_resets_inventory_before_delegating
+- Commit(s): (pending)
+- Follow-up notes: No behavioral regressions. All three entry points preserve their caller-specific behavior while sharing mechanics.
 
 #### Phase 2
 

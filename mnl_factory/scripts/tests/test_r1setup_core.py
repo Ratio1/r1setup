@@ -1334,3 +1334,204 @@ class TestPhase0Wording(unittest.TestCase):
         action_option, action_hint = display["suggested_action"]
         self.assertEqual(action_option, "4")
         self.assertIn("Review fleet status", action_hint)
+
+
+class TestSharedConfigCreationPrimitives(unittest.TestCase):
+    """Tests for Phase 1 shared config-creation primitives."""
+
+    def _make_config_manager(self):
+        """Build a minimal ConfigurationManager mock for primitive testing."""
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {}
+        cm.fleet_state = None
+        return cm
+
+    def test_prompt_new_config_name_returns_valid_name(self):
+        cm = self._make_config_manager()
+        cm.app.get_input = MagicMock(return_value="my-cluster")
+        result = cm._prompt_new_config_name()
+        self.assertEqual(result, "my-cluster")
+
+    def test_prompt_new_config_name_rejects_invalid_then_accepts(self):
+        cm = self._make_config_manager()
+        cm.app.get_input = MagicMock(side_effect=["bad name!", "good-name"])
+        result = cm._prompt_new_config_name()
+        self.assertEqual(result, "good-name")
+        self.assertEqual(cm.app.get_input.call_count, 2)
+
+    def test_prompt_new_config_environment_calls_set_mnl_app_env(self):
+        cm = self._make_config_manager()
+        cm.app._select_network_environment = MagicMock(return_value="testnet")
+        cm.set_mnl_app_env = MagicMock()
+        result = cm._prompt_new_config_environment()
+        self.assertEqual(result, "testnet")
+        cm.set_mnl_app_env.assert_called_once_with("testnet")
+
+    def test_prompt_node_count_returns_positive_int(self):
+        cm = self._make_config_manager()
+        cm.app.get_input = MagicMock(return_value="3")
+        result = cm._prompt_node_count()
+        self.assertEqual(result, 3)
+
+    def test_prompt_node_count_rejects_zero_then_accepts(self):
+        cm = self._make_config_manager()
+        cm.app.get_input = MagicMock(side_effect=["0", "2"])
+        result = cm._prompt_node_count()
+        self.assertEqual(result, 2)
+
+    def test_reset_inventory_for_new_config(self):
+        cm = self._make_config_manager()
+        cm.app.inventory = {"old": "data"}
+        cm._reset_inventory_for_new_config()
+        hosts = cm.app.inventory['all']['children']['gpu_nodes']['hosts']
+        self.assertEqual(hosts, {})
+
+    def test_collect_node_connection_entries_enforces_duplicate_check(self):
+        cm = self._make_config_manager()
+        cm.app.inventory = {
+            'all': {'vars': {}, 'children': {'gpu_nodes': {'hosts': {}}}}
+        }
+        # First call returns duplicate name, second returns unique name
+        cm.app._get_valid_hostname = MagicMock(side_effect=["node-1", "node-1", "node-2"])
+        cm.app._configure_single_node = MagicMock(
+            return_value={"ansible_host": "10.0.0.1", "ansible_user": "root"}
+        )
+        cm.app.print_section = MagicMock()
+        cm.app.print_colored = MagicMock()
+
+        hosts = cm._collect_node_connection_entries(
+            2, enforce_duplicate_check=True, show_progress=False
+        )
+
+        self.assertIn("node-1", hosts)
+        self.assertIn("node-2", hosts)
+        self.assertEqual(len(hosts), 2)
+
+    def test_collect_node_connection_entries_with_credential_reuse(self):
+        cm = self._make_config_manager()
+        cm.app.inventory = {
+            'all': {'vars': {}, 'children': {'gpu_nodes': {'hosts': {}}}}
+        }
+        cm.app._get_valid_hostname = MagicMock(side_effect=["node-1", "node-2"])
+        first_config = {"ansible_host": "10.0.0.1", "ansible_user": "root"}
+        second_config = {"ansible_host": "10.0.0.2", "ansible_user": "root"}
+        cm.app._configure_single_node = MagicMock(side_effect=[first_config, second_config])
+        cm.app.print_section = MagicMock()
+        cm.app.print_colored = MagicMock()
+
+        cm._collect_node_connection_entries(
+            2, allow_credential_reuse=True, show_progress=True
+        )
+
+        # Second call should pass previous_config
+        calls = cm.app._configure_single_node.call_args_list
+        self.assertEqual(calls[0], ((), {}))  # first call: no previous
+        self.assertEqual(calls[1], ((), {'previous_config': first_config}))
+
+    def test_finalize_new_config_save_delegates_and_prints(self):
+        cm = self._make_config_manager()
+        cm._save_config_with_metadata = MagicMock()
+        cm._finalize_new_config_save("test_20260329_1200_2n", "testnet", 2)
+        cm._save_config_with_metadata.assert_called_once_with(
+            "test_20260329_1200_2n", "testnet", 2, update_symlink=True,
+        )
+        cm.app.print_colored.assert_called_once()
+        self.assertIn("created and activated", cm.app.print_colored.call_args[0][0])
+
+    def test_generate_config_name_delegates_to_prompt_when_no_name(self):
+        cm = self._make_config_manager()
+        cm._prompt_new_config_name = MagicMock(return_value="auto-name")
+        result = cm._generate_config_name(3)
+        cm._prompt_new_config_name.assert_called_once()
+        self.assertIn("auto-name", result)
+        self.assertTrue(result.endswith("3n"))
+
+    def test_generate_config_name_skips_prompt_when_name_given(self):
+        cm = self._make_config_manager()
+        cm._prompt_new_config_name = MagicMock()
+        result = cm._generate_config_name(2, "explicit")
+        cm._prompt_new_config_name.assert_not_called()
+        self.assertIn("explicit", result)
+        self.assertTrue(result.endswith("2n"))
+
+
+class TestConfigCreationPathMigration(unittest.TestCase):
+    """Tests that migrated config-creation paths use shared primitives correctly."""
+
+    def test_path1_calls_set_mnl_app_env(self):
+        """Path 1 (_create_new_configuration_with_management) must persist env."""
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {}
+        cm.fleet_state = None
+
+        cm._prompt_new_config_name = MagicMock(return_value="test")
+        cm._prompt_new_config_environment = MagicMock(return_value="devnet")
+        cm._prompt_node_count = MagicMock(return_value=1)
+        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1n")
+        cm._reset_inventory_for_new_config = MagicMock()
+        cm._collect_node_connection_entries = MagicMock()
+        cm._finalize_new_config_save = MagicMock()
+        cm.app.get_input = MagicMock(return_value="n")  # decline deploy
+        cm.app.wait_for_enter = MagicMock()
+
+        cm._create_new_configuration_with_management()
+
+        cm._prompt_new_config_environment.assert_called_once()
+
+    def test_path1_enforces_duplicate_check(self):
+        """Path 1 must pass enforce_duplicate_check=True."""
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {}
+        cm.fleet_state = None
+
+        cm._prompt_new_config_name = MagicMock(return_value="test")
+        cm._prompt_new_config_environment = MagicMock(return_value="testnet")
+        cm._prompt_node_count = MagicMock(return_value=1)
+        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1n")
+        cm._reset_inventory_for_new_config = MagicMock()
+        cm._collect_node_connection_entries = MagicMock()
+        cm._finalize_new_config_save = MagicMock()
+        cm.app.get_input = MagicMock(return_value="n")
+        cm.app.wait_for_enter = MagicMock()
+
+        cm._create_new_configuration_with_management()
+
+        _, kwargs = cm._collect_node_connection_entries.call_args
+        self.assertTrue(kwargs.get('enforce_duplicate_check'))
+
+    def test_path2_uses_shared_primitives(self):
+        """Path 2 (_create_initial_configuration) delegates to shared primitives."""
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.print_section = MagicMock()
+        app.config_manager = MagicMock()
+        app.config_manager._prompt_new_config_name = MagicMock(return_value="initial")
+        app.config_manager._prompt_new_config_environment = MagicMock(return_value="mainnet")
+        app.config_manager._prompt_node_count = MagicMock(return_value=1)
+        app.config_manager._generate_config_name = MagicMock(return_value="initial_20260329_1200_1n")
+        app.config_manager._collect_node_connection_entries = MagicMock()
+        app.config_manager._finalize_new_config_save = MagicMock()
+
+        app._create_initial_configuration()
+
+        app.config_manager._prompt_new_config_name.assert_called_once()
+        app.config_manager._prompt_new_config_environment.assert_called_once()
+        app.config_manager._prompt_node_count.assert_called_once()
+        app.config_manager._collect_node_connection_entries.assert_called_once()
+        app.config_manager._finalize_new_config_save.assert_called_once()
+
+    def test_path3_resets_inventory_before_delegating(self):
+        """Path 3 (_create_new_configuration) uses shared reset."""
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.get_input = MagicMock(return_value="y")
+        app.config_file = MagicMock()
+        app.config_file.exists = MagicMock(return_value=False)
+        app.config_manager = MagicMock()
+        app._create_initial_configuration = MagicMock()
+
+        app._create_new_configuration()
+
+        app.config_manager._reset_inventory_for_new_config.assert_called_once()
+        app._create_initial_configuration.assert_called_once()
