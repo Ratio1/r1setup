@@ -1212,12 +1212,29 @@ Recommended per-phase closeout checklist:
 
 #### Phase 4
 
-- Status: not started
-- Scope notes:
+- Status: completed
+- Scope notes: Safe gap fill for simple mode. Fresh instances only on scanned-clean machines. Deploy prompt gated on fresh instance creation.
 - Actual behavior shipped:
+  - Added `_build_fresh_host_entry(machine_id, host_name)` on `ConfigurationManager` — synthesizes deployable inventory host from machine record SSH fields + standard runtime names (`normalize_to_target` policy, `never_deployed` status)
+  - Added `_onboarding_gap_fill_clean_machines(clean_ids, config_env)` — offers fresh instance creation on scanned-clean machines; prompts for instance name per machine; updates fleet + saves config
+  - Extended `_onboarding_batch_discovery_and_import` return value with `clean_machine_ids`
+  - Updated `_create_machine_first_configuration`:
+    - Calls `_onboarding_gap_fill_clean_machines` after discovery
+    - Dynamic summary: shows `N imported` and/or `N new` breakdown
+    - Deploy prompt only when `fresh_count > 0`, default `n`
+    - If only imports (no fresh), no deploy prompt
+    - If zero instances total, shows guidance
+  - Safety rules enforced:
+    - Scan failure → machine stays registered-only
+    - Discovered-but-not-imported → machine stays registered-only
+    - Scan skipped → machine stays registered-only
+    - Only `clean` classification eligible for gap fill
 - Tests run:
-- Commit(s):
-- Follow-up notes:
+  - `python3 -m py_compile r1setup` — clean
+  - `python3 -m unittest discover tests -v` — 292 tests, all passed
+  - New tests in `TestPhase4GapFill` (7 tests): build_fresh_host_entry standard fields + raises for unknown machine, gap_fill creates/skips declined/skips empty, batch_discovery returns clean_machine_ids, create_machine_first deploy gating
+- Commit(s): 56cf0a9
+- Follow-up notes: None. Advanced-mode gap fill (remaining planned capacity) deferred to Phase 5.
 
 #### Phase 5
 

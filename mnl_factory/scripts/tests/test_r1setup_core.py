@@ -1803,3 +1803,127 @@ class TestPhase3BatchDiscovery(unittest.TestCase):
         cm._create_machine_first_configuration()
 
         cm._onboarding_batch_discovery_and_import.assert_called_once_with(["m-1"], "testnet")
+
+
+class TestPhase4GapFill(unittest.TestCase):
+    """Tests for Phase 4 safe gap fill for simple mode."""
+
+    def _make_cm(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {"config_name": "test_config"}
+        cm.fleet_state = {
+            "config_schema_version": 1,
+            "fleet": {
+                "machines": {
+                    "m-1": {
+                        "machine_id": "m-1",
+                        "ansible_host": "10.0.0.1",
+                        "ansible_user": "root",
+                        "ansible_port": 22,
+                        "topology_mode": "standard",
+                        "instance_names": [],
+                    },
+                },
+                "instances": {},
+            },
+        }
+        return cm
+
+    def test_build_fresh_host_entry_sets_standard_fields(self):
+        cm = self._make_cm()
+        cm.app._extract_machine_access_config = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "ansible_user": "root", "ansible_port": 22,
+        })
+        cm.apply_runtime_snapshot_to_host_config = MagicMock(return_value=False)
+
+        host = cm._build_fresh_host_entry("m-1", "my-node")
+
+        self.assertEqual(host["ansible_host"], "10.0.0.1")
+        self.assertEqual(host["r1setup_machine_id"], "m-1")
+        self.assertEqual(host["r1setup_topology_mode"], "standard")
+        self.assertEqual(host["r1setup_runtime_name_policy"], "normalize_to_target")
+        self.assertEqual(host["r1setup_instance_logical_name"], "my-node")
+        self.assertEqual(host["node_status"], "never_deployed")
+        self.assertEqual(host["r1setup_service_file_version"], r1setup.DEFAULT_SERVICE_FILE_VERSION)
+        cm.apply_runtime_snapshot_to_host_config.assert_called_once_with("my-node", host)
+
+    def test_build_fresh_host_entry_raises_for_unknown_machine(self):
+        cm = self._make_cm()
+        with self.assertRaises(ValueError):
+            cm._build_fresh_host_entry("nonexistent", "node-1")
+
+    def test_gap_fill_creates_instances_on_clean_machines(self):
+        cm = self._make_cm()
+        cm.app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {}}}}}
+        cm.app._get_valid_hostname = MagicMock(return_value="m-1")
+        cm._build_fresh_host_entry = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "node_status": "never_deployed",
+        })
+        cm.upsert_machine_record = MagicMock()
+        cm._save_config_with_metadata = MagicMock()
+        cm.app.get_input = MagicMock(return_value="Y")
+
+        count = cm._onboarding_gap_fill_clean_machines(["m-1"], "testnet")
+
+        self.assertEqual(count, 1)
+        cm._build_fresh_host_entry.assert_called_once_with("m-1", "m-1")
+        cm.upsert_machine_record.assert_called_once()
+        cm._save_config_with_metadata.assert_called_once()
+
+    def test_gap_fill_skips_when_declined(self):
+        cm = self._make_cm()
+        cm.app.get_input = MagicMock(return_value="n")
+
+        count = cm._onboarding_gap_fill_clean_machines(["m-1"], "testnet")
+
+        self.assertEqual(count, 0)
+
+    def test_gap_fill_skips_when_no_clean_machines(self):
+        cm = self._make_cm()
+
+        count = cm._onboarding_gap_fill_clean_machines([], "testnet")
+
+        self.assertEqual(count, 0)
+
+    def test_batch_discovery_returns_clean_machine_ids(self):
+        cm = self._make_cm()
+        cm.app.get_input = MagicMock(return_value="Y")
+        cm.app.discover_existing_edge_node_services = MagicMock(
+            return_value={"status": "success", "candidates": []},
+        )
+        cm.record_machine_discovery_scan = MagicMock()
+
+        result = cm._onboarding_batch_discovery_and_import(["m-1"], "testnet")
+
+        self.assertIn("clean_machine_ids", result)
+        self.assertEqual(result["clean_machine_ids"], ["m-1"])
+
+    def test_create_machine_first_deploys_only_for_fresh(self):
+        """Deploy prompt should only appear when fresh_count > 0."""
+        cm = self._make_cm()
+        cm._prompt_new_config_name = MagicMock(return_value="test")
+        cm._prompt_new_config_environment = MagicMock(return_value="testnet")
+        cm._prompt_machine_count = MagicMock(return_value=1)
+        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1m")
+        cm._reset_inventory_for_new_config = MagicMock()
+        cm.ensure_configuration_shell = MagicMock()
+        cm._collect_machine_registration_entries = MagicMock(return_value=["m-1"])
+        cm._onboarding_batch_discovery_and_import = MagicMock(return_value={
+            "scanned": True, "imported_total": 2, "session_mode": "simple",
+            "clean_machine_ids": [],
+        })
+        cm._onboarding_gap_fill_clean_machines = MagicMock(return_value=0)
+        cm.app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {"n1": {}, "n2": {}}}}}}
+        cm.app.wait_for_enter = MagicMock()
+        cm.app.get_input = MagicMock()
+
+        cm._create_machine_first_configuration()
+
+        # With 0 fresh, deploy prompt should NOT be shown (get_input not called for deploy)
+        # The only get_input calls are from mocked methods, not deploy prompt
+        deploy_calls = [
+            c for c in cm.app.get_input.call_args_list
+            if 'deploy' in str(c).lower()
+        ]
+        self.assertEqual(len(deploy_calls), 0)

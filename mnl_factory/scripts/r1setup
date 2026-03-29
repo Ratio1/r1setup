@@ -1412,18 +1412,41 @@ class ConfigurationManager:
         # Offer batch discovery and import
         discovery_result = self._onboarding_batch_discovery_and_import(registered_ids, env)
 
+        # Gap fill: create fresh instances on scanned-clean machines
+        fresh_count = self._onboarding_gap_fill_clean_machines(
+            discovery_result.get('clean_machine_ids', []), env,
+        )
+
+        imported = discovery_result.get('imported_total', 0)
+        total_instances = imported + fresh_count
+
         # Final summary
         self.app.print_section("Configuration Summary")
         self.app.print_colored(f"Configuration '{config_name}' created and activated.", 'green')
-        imported = discovery_result.get('imported_total', 0)
-        if imported > 0:
+        if total_instances > 0:
+            parts = []
+            if imported > 0:
+                parts.append(f"{imported} imported")
+            if fresh_count > 0:
+                parts.append(f"{fresh_count} new")
             self.app.print_colored(
-                f"  {len(registered_ids)} machine(s), {imported} imported instance(s).", 'cyan',
+                f"  {len(registered_ids)} machine(s), {total_instances} instance(s) ({', '.join(parts)}).",
+                'cyan',
             )
         else:
             self.app.print_colored(
                 f"  {len(registered_ids)} machine(s) registered, 0 instances.", 'cyan',
             )
+
+        # Deploy prompt: only when fresh instances were created, default n
+        if fresh_count > 0:
+            deploy_choice = self.app.get_input("Would you like to deploy now? (y/n)", "n")
+            if deploy_choice.lower() == 'y':
+                self.app.wait_for_enter("Press Enter to continue to deployment...")
+                self.app.deployment_menu()
+                return
+
+        if total_instances == 0:
             self.app.print_colored(
                 "\n\U0001f4a1 Use 'Discover Services' to scan for existing edge_node services,\n"
                 "   or 'Fleet Summary' to review your registered machines.",
@@ -1619,7 +1642,7 @@ class ConfigurationManager:
             "Check these machines for existing edge_node services now? (Y/n)", "Y",
         )
         if scan_choice.lower() == 'n':
-            return {'scanned': False, 'imported_total': 0, 'session_mode': 'simple'}
+            return {'scanned': False, 'imported_total': 0, 'session_mode': 'simple', 'clean_machine_ids': []}
 
         # Batch scan
         self.app.print_section("Scanning Machines")
@@ -1654,7 +1677,103 @@ class ConfigurationManager:
             if result.get('mode_switched_to') == 'advanced':
                 session_mode = 'advanced'
 
-        return {'scanned': True, 'imported_total': imported_total, 'session_mode': session_mode}
+        return {
+            'scanned': True,
+            'imported_total': imported_total,
+            'session_mode': session_mode,
+            'clean_machine_ids': classified['clean'],
+        }
+
+    # -- Gap fill primitives (Phase 4) --
+
+    def _build_fresh_host_entry(self, machine_id: str, host_name: str, *, topology_mode: str = 'standard') -> Dict[str, Any]:
+        """Build a fresh inventory host entry from a registered machine record."""
+        fleet_state = self._normalize_fleet_state(self.get_fleet_state_copy())
+        machine_record = fleet_state['fleet']['machines'].get(machine_id)
+        if not machine_record:
+            raise ValueError(f"Machine '{machine_id}' not found in fleet state")
+
+        machine_access = self.app._extract_machine_access_config(machine_record)
+
+        host_config = dict(machine_access)
+        host_config.update({
+            'r1setup_machine_id': machine_id,
+            'r1setup_topology_mode': topology_mode,
+            'r1setup_machine_deployment_state': 'active',
+            'r1setup_runtime_name_policy': 'normalize_to_target',
+            'r1setup_instance_logical_name': host_name,
+            'node_status': 'never_deployed',
+            'last_status_update': datetime.now().isoformat(),
+            'r1setup_service_file_version': DEFAULT_SERVICE_FILE_VERSION,
+        })
+
+        self.apply_runtime_snapshot_to_host_config(host_name, host_config)
+
+        return host_config
+
+    def _onboarding_gap_fill_clean_machines(self, clean_ids: List[str], config_env: str) -> int:
+        """Offer to create fresh instances on scanned-clean machines.
+
+        Returns the number of fresh instances created.
+        """
+        if not clean_ids:
+            return 0
+
+        self.app.print_section("Fresh Instance Creation")
+        self.app.print_colored(
+            f"{len(clean_ids)} machine(s) have no existing services and are ready for fresh instances:",
+            'cyan',
+        )
+        for mid in clean_ids:
+            self.app.print_colored(f"  {mid}", 'white')
+
+        create_choice = self.app.get_input(
+            "Create a fresh edge_node instance on each clean machine? (Y/n)", "Y",
+        )
+        if create_choice.lower() == 'n':
+            return 0
+
+        created_count = 0
+        hosts = _get_gpu_hosts(self.app.inventory)
+        for mid in clean_ids:
+            # Default host name = machine label (avoid collisions)
+            default_name = mid
+            if default_name in hosts:
+                suffix = 2
+                while f"{default_name}_{suffix}" in hosts:
+                    suffix += 1
+                default_name = f"{default_name}_{suffix}"
+
+            host_name = self.app._get_valid_hostname(
+                f"Instance name for machine '{mid}'", default_name,
+            )
+            while host_name in hosts:
+                self.app.print_colored(f"Instance '{host_name}' already exists.", 'red')
+                host_name = self.app._get_valid_hostname(
+                    f"Instance name for machine '{mid}'", default_name,
+                )
+
+            host_config = self._build_fresh_host_entry(mid, host_name)
+            hosts[host_name] = host_config
+
+            # Update fleet: link instance to machine, mark active
+            self.upsert_machine_record(mid, {
+                'deployment_state': 'active',
+                'instance_names': sorted(set(
+                    self.get_fleet_state_copy()['fleet']['machines'].get(mid, {}).get('instance_names', [])
+                    + [host_name]
+                )),
+            })
+
+            self.app.print_colored(f"  \u2713 Instance '{host_name}' created on machine '{mid}'.", 'green')
+            created_count += 1
+
+        # Save inventory with new hosts
+        config_name = self.active_config.get('config_name')
+        nodes_count = len(_get_gpu_hosts(self.app.inventory))
+        self._save_config_with_metadata(config_name, config_env, nodes_count)
+
+        return created_count
 
     def _generate_config_name(self, nodes_count: int, custom_name: str = None, *, unit: str = 'n') -> str:
         """Generate a configuration name with user input, timestamp and metadata.
