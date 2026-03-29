@@ -1016,7 +1016,7 @@ class TestSuggestedActions(unittest.TestCase):
         default_option, hint = app._get_suggested_action()
 
         self.assertEqual(default_option, "4")
-        self.assertIn("Review tracked live nodes", hint)
+        self.assertIn("Review fleet status", hint)
 
 
 class TestTrackedLiveNodeMessaging(unittest.TestCase):
@@ -1196,7 +1196,7 @@ class TestActiveConfigurationRecovery(unittest.TestCase):
 
     def test_ensure_active_configuration_restores_before_prompting(self):
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)
-        app.check_hosts_config = MagicMock(side_effect=[False, True])
+        app.has_active_config_shell = MagicMock(side_effect=[False, True])
         app._restore_active_configuration_if_possible = MagicMock(return_value=True)
         app.print_header = MagicMock()
         app.print_colored = MagicMock()
@@ -1224,3 +1224,706 @@ class TestActiveConfigurationRecovery(unittest.TestCase):
 
             self.assertFalse(restored)
             app._load_config_by_name.assert_not_called()
+
+
+class TestHasActiveConfigShell(unittest.TestCase):
+    """Tests for has_active_config_shell() helper."""
+
+    def test_true_when_hosts_exist(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=True)
+        app.config_manager = MagicMock()
+
+        self.assertTrue(app.has_active_config_shell())
+
+    def test_true_for_zero_host_shell(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            configs_dir = Path(temp_dir) / "configs"
+            configs_dir.mkdir()
+            config_path = configs_dir / "my-config_20260329_1200_0n.yml"
+            config_path.write_text("all:\n  children:\n    gpu_nodes:\n      hosts: {}\n")
+
+            app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+            app.check_hosts_config = MagicMock(return_value=False)
+            app.config_manager = MagicMock()
+            app.config_manager.active_config = {"config_name": "my-config_20260329_1200_0n"}
+            app.config_manager.app = MagicMock()
+            app.config_manager.app.configs_dir = configs_dir
+
+            self.assertTrue(app.has_active_config_shell())
+
+    def test_false_when_no_config(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=False)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"config_name": None}
+
+        self.assertFalse(app.has_active_config_shell())
+
+    def test_false_when_config_file_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            configs_dir = Path(temp_dir) / "configs"
+            configs_dir.mkdir()
+
+            app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+            app.check_hosts_config = MagicMock(return_value=False)
+            app.config_manager = MagicMock()
+            app.config_manager.active_config = {"config_name": "nonexistent"}
+            app.config_manager.app = MagicMock()
+            app.config_manager.app.configs_dir = configs_dir
+
+            self.assertFalse(app.has_active_config_shell())
+
+
+class TestPhase0Wording(unittest.TestCase):
+    """Tests that Phase 0 UX wording updates are applied."""
+
+    def test_suggested_action_no_config_says_create_or_load(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=False)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "never_deployed"}
+        app.config_manager.get_fleet_state_copy = MagicMock(
+            return_value={"fleet": {"machines": {}, "instances": {}}}
+        )
+
+        _, hint = app._get_suggested_action()
+
+        self.assertIn("Create or load a configuration first", hint)
+
+    def test_suggested_action_never_deployed_says_instances(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=True)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "never_deployed"}
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {"node_status": "not_deployed"},
+                        }
+                    }
+                }
+            }
+        }
+
+        _, hint = app._get_suggested_action()
+
+        self.assertIn("Deploy your configured instances", hint)
+
+    def test_deployment_display_tracking_live_says_fleet_status(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "never_deployed"}
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {"node_status": "running"},
+                        }
+                    }
+                }
+            }
+        }
+
+        display = app._get_deployment_display_state()
+
+        self.assertEqual(display["state_key"], "tracking_live_nodes")
+        action_option, action_hint = display["suggested_action"]
+        self.assertEqual(action_option, "4")
+        self.assertIn("Review fleet status", action_hint)
+
+
+class TestSharedConfigCreationPrimitives(unittest.TestCase):
+    """Tests for Phase 1 shared config-creation primitives."""
+
+    def _make_config_manager(self):
+        """Build a minimal ConfigurationManager mock for primitive testing."""
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {}
+        cm.fleet_state = None
+        return cm
+
+    def test_prompt_new_config_name_returns_valid_name(self):
+        cm = self._make_config_manager()
+        cm.app.get_input = MagicMock(return_value="my-cluster")
+        result = cm._prompt_new_config_name()
+        self.assertEqual(result, "my-cluster")
+
+    def test_prompt_new_config_name_rejects_invalid_then_accepts(self):
+        cm = self._make_config_manager()
+        cm.app.get_input = MagicMock(side_effect=["bad name!", "good-name"])
+        result = cm._prompt_new_config_name()
+        self.assertEqual(result, "good-name")
+        self.assertEqual(cm.app.get_input.call_count, 2)
+
+    def test_prompt_new_config_environment_calls_set_mnl_app_env(self):
+        cm = self._make_config_manager()
+        cm.app._select_network_environment = MagicMock(return_value="testnet")
+        cm.set_mnl_app_env = MagicMock()
+        result = cm._prompt_new_config_environment()
+        self.assertEqual(result, "testnet")
+        cm.set_mnl_app_env.assert_called_once_with("testnet")
+
+    def test_prompt_node_count_returns_positive_int(self):
+        cm = self._make_config_manager()
+        cm.app.get_input = MagicMock(return_value="3")
+        result = cm._prompt_node_count()
+        self.assertEqual(result, 3)
+
+    def test_prompt_node_count_rejects_zero_then_accepts(self):
+        cm = self._make_config_manager()
+        cm.app.get_input = MagicMock(side_effect=["0", "2"])
+        result = cm._prompt_node_count()
+        self.assertEqual(result, 2)
+
+    def test_reset_inventory_for_new_config(self):
+        cm = self._make_config_manager()
+        cm.app.inventory = {"old": "data"}
+        cm._reset_inventory_for_new_config()
+        hosts = cm.app.inventory['all']['children']['gpu_nodes']['hosts']
+        self.assertEqual(hosts, {})
+
+    def test_collect_node_connection_entries_enforces_duplicate_check(self):
+        cm = self._make_config_manager()
+        cm.app.inventory = {
+            'all': {'vars': {}, 'children': {'gpu_nodes': {'hosts': {}}}}
+        }
+        # First call returns duplicate name, second returns unique name
+        cm.app._get_valid_hostname = MagicMock(side_effect=["node-1", "node-1", "node-2"])
+        cm.app._configure_single_node = MagicMock(
+            return_value={"ansible_host": "10.0.0.1", "ansible_user": "root"}
+        )
+        cm.app.print_section = MagicMock()
+        cm.app.print_colored = MagicMock()
+
+        hosts = cm._collect_node_connection_entries(
+            2, enforce_duplicate_check=True, show_progress=False
+        )
+
+        self.assertIn("node-1", hosts)
+        self.assertIn("node-2", hosts)
+        self.assertEqual(len(hosts), 2)
+
+    def test_collect_node_connection_entries_with_credential_reuse(self):
+        cm = self._make_config_manager()
+        cm.app.inventory = {
+            'all': {'vars': {}, 'children': {'gpu_nodes': {'hosts': {}}}}
+        }
+        cm.app._get_valid_hostname = MagicMock(side_effect=["node-1", "node-2"])
+        first_config = {"ansible_host": "10.0.0.1", "ansible_user": "root"}
+        second_config = {"ansible_host": "10.0.0.2", "ansible_user": "root"}
+        cm.app._configure_single_node = MagicMock(side_effect=[first_config, second_config])
+        cm.app.print_section = MagicMock()
+        cm.app.print_colored = MagicMock()
+
+        cm._collect_node_connection_entries(
+            2, allow_credential_reuse=True, show_progress=True
+        )
+
+        # Second call should pass previous_config
+        calls = cm.app._configure_single_node.call_args_list
+        self.assertEqual(calls[0], ((), {}))  # first call: no previous
+        self.assertEqual(calls[1], ((), {'previous_config': first_config}))
+
+    def test_finalize_new_config_save_delegates_and_prints(self):
+        cm = self._make_config_manager()
+        cm._save_config_with_metadata = MagicMock()
+        cm._finalize_new_config_save("test_20260329_1200_2n", "testnet", 2)
+        cm._save_config_with_metadata.assert_called_once_with(
+            "test_20260329_1200_2n", "testnet", 2, update_symlink=True,
+        )
+        cm.app.print_colored.assert_called_once()
+        self.assertIn("created and activated", cm.app.print_colored.call_args[0][0])
+
+    def test_generate_config_name_delegates_to_prompt_when_no_name(self):
+        cm = self._make_config_manager()
+        cm._prompt_new_config_name = MagicMock(return_value="auto-name")
+        result = cm._generate_config_name(3)
+        cm._prompt_new_config_name.assert_called_once()
+        self.assertIn("auto-name", result)
+        self.assertTrue(result.endswith("3n"))
+
+    def test_generate_config_name_skips_prompt_when_name_given(self):
+        cm = self._make_config_manager()
+        cm._prompt_new_config_name = MagicMock()
+        result = cm._generate_config_name(2, "explicit")
+        cm._prompt_new_config_name.assert_not_called()
+        self.assertIn("explicit", result)
+        self.assertTrue(result.endswith("2n"))
+
+
+class TestConfigCreationPathMigration(unittest.TestCase):
+    """Tests that migrated config-creation paths use shared primitives correctly."""
+
+    def test_path1_calls_set_mnl_app_env(self):
+        """Path 1 (_create_new_configuration_with_management) must persist env."""
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {}
+        cm.fleet_state = None
+
+        cm._prompt_new_config_name = MagicMock(return_value="test")
+        cm._prompt_new_config_environment = MagicMock(return_value="devnet")
+        cm._prompt_node_count = MagicMock(return_value=1)
+        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1n")
+        cm._reset_inventory_for_new_config = MagicMock()
+        cm._collect_node_connection_entries = MagicMock()
+        cm._finalize_new_config_save = MagicMock()
+        cm.app.get_input = MagicMock(return_value="n")  # decline deploy
+        cm.app.wait_for_enter = MagicMock()
+
+        cm._create_new_configuration_with_management()
+
+        cm._prompt_new_config_environment.assert_called_once()
+
+    def test_path1_enforces_duplicate_check(self):
+        """Path 1 must pass enforce_duplicate_check=True."""
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {}
+        cm.fleet_state = None
+
+        cm._prompt_new_config_name = MagicMock(return_value="test")
+        cm._prompt_new_config_environment = MagicMock(return_value="testnet")
+        cm._prompt_node_count = MagicMock(return_value=1)
+        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1n")
+        cm._reset_inventory_for_new_config = MagicMock()
+        cm._collect_node_connection_entries = MagicMock()
+        cm._finalize_new_config_save = MagicMock()
+        cm.app.get_input = MagicMock(return_value="n")
+        cm.app.wait_for_enter = MagicMock()
+
+        cm._create_new_configuration_with_management()
+
+        _, kwargs = cm._collect_node_connection_entries.call_args
+        self.assertTrue(kwargs.get('enforce_duplicate_check'))
+
+    def test_path2_uses_shared_primitives(self):
+        """Path 2 (_create_initial_configuration) delegates to shared primitives."""
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.print_section = MagicMock()
+        app.config_manager = MagicMock()
+        app.config_manager._prompt_new_config_name = MagicMock(return_value="initial")
+        app.config_manager._prompt_new_config_environment = MagicMock(return_value="mainnet")
+        app.config_manager._prompt_node_count = MagicMock(return_value=1)
+        app.config_manager._generate_config_name = MagicMock(return_value="initial_20260329_1200_1n")
+        app.config_manager._collect_node_connection_entries = MagicMock()
+        app.config_manager._finalize_new_config_save = MagicMock()
+
+        app._create_initial_configuration()
+
+        app.config_manager._prompt_new_config_name.assert_called_once()
+        app.config_manager._prompt_new_config_environment.assert_called_once()
+        app.config_manager._prompt_node_count.assert_called_once()
+        app.config_manager._collect_node_connection_entries.assert_called_once()
+        app.config_manager._finalize_new_config_save.assert_called_once()
+
+    def test_path3_resets_inventory_before_delegating(self):
+        """Path 3 (_create_new_configuration) uses shared reset."""
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.get_input = MagicMock(return_value="y")
+        app.config_file = MagicMock()
+        app.config_file.exists = MagicMock(return_value=False)
+        app.config_manager = MagicMock()
+        app._create_initial_configuration = MagicMock()
+
+        app._create_new_configuration()
+
+        app.config_manager._reset_inventory_for_new_config.assert_called_once()
+        app._create_initial_configuration.assert_called_once()
+
+
+class TestPhase2MachineFirstConfig(unittest.TestCase):
+    """Tests for Phase 2 machine-first configuration flow."""
+
+    def test_generate_config_name_with_unit_m(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        result = cm._generate_config_name(3, "fleet", unit='m')
+        self.assertIn("fleet", result)
+        self.assertTrue(result.endswith("3m"))
+
+    def test_generate_config_name_default_unit_n(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        result = cm._generate_config_name(2, "test")
+        self.assertTrue(result.endswith("2n"))
+
+    def test_prompt_machine_count_returns_positive(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.app.get_input = MagicMock(return_value="3")
+        self.assertEqual(cm._prompt_machine_count(), 3)
+
+    def test_collect_machine_registration_entries_registers_machines(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {"config_name": "test"}
+        cm.fleet_state = {"config_schema_version": 1, "fleet": {"machines": {}, "instances": {}}}
+
+        # Mock interactions: label, SSH config, decline probe
+        cm.app.get_input = MagicMock(side_effect=[
+            "my-machine",   # label for machine 1
+            "n",            # decline spec probe
+        ])
+        cm.app._configure_single_node = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "ansible_user": "root", "ansible_port": 22,
+        })
+        cm.app._extract_machine_access_config = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "ansible_user": "root", "ansible_port": 22,
+        })
+        cm.app.print_section = MagicMock()
+        cm.app.print_colored = MagicMock()
+
+        # Mock upsert to capture calls
+        cm.upsert_machine_record = MagicMock()
+
+        ids = cm._collect_machine_registration_entries(1)
+
+        self.assertEqual(ids, ["my-machine"])
+        cm.upsert_machine_record.assert_called_once()
+        call_args = cm.upsert_machine_record.call_args
+        self.assertEqual(call_args[0][0], "my-machine")
+        self.assertEqual(call_args[0][1]["topology_mode"], "standard")
+        self.assertEqual(call_args[0][1]["deployment_state"], "empty")
+
+    def test_collect_machine_registration_rejects_duplicate_labels(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {"config_name": "test"}
+        cm.fleet_state = {"config_schema_version": 1, "fleet": {"machines": {}, "instances": {}}}
+
+        # First machine: "dup", second attempt: "dup" (rejected), then "unique"
+        cm.app.get_input = MagicMock(side_effect=[
+            "dup",      # label for machine 1
+            "n",        # decline probe
+            "dup",      # label for machine 2 (rejected - duplicate)
+            "unique",   # retry for machine 2
+            "n",        # decline probe
+        ])
+        cm.app._configure_single_node = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "ansible_user": "root",
+        })
+        cm.app._extract_machine_access_config = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "ansible_user": "root",
+        })
+        cm.app.print_section = MagicMock()
+        cm.app.print_colored = MagicMock()
+        cm.upsert_machine_record = MagicMock()
+
+        ids = cm._collect_machine_registration_entries(2)
+
+        self.assertEqual(ids, ["dup", "unique"])
+
+    def test_create_machine_first_configuration_full_flow(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {}
+        cm.fleet_state = None
+
+        cm._prompt_new_config_name = MagicMock(return_value="prod")
+        cm._prompt_new_config_environment = MagicMock(return_value="mainnet")
+        cm._prompt_machine_count = MagicMock(return_value=2)
+        cm._generate_config_name = MagicMock(return_value="prod_20260329_1200_2m")
+        cm._reset_inventory_for_new_config = MagicMock()
+        cm.ensure_configuration_shell = MagicMock()
+        cm._collect_machine_registration_entries = MagicMock(return_value=["m-1", "m-2"])
+
+        cm._create_machine_first_configuration()
+
+        cm._generate_config_name.assert_called_once_with(2, "prod", unit='m')
+        cm._reset_inventory_for_new_config.assert_called_once()
+        cm.ensure_configuration_shell.assert_called_once_with("prod_20260329_1200_2m", "mainnet")
+        cm._collect_machine_registration_entries.assert_called_once_with(2)
+        # Verify summary output mentions machines
+        printed = [call[0][0] for call in cm.app.print_colored.call_args_list]
+        self.assertTrue(any("2 machine(s) registered" in p for p in printed))
+        self.assertTrue(any("0 instances" in p for p in printed))
+
+    def test_ensure_active_configuration_accepts_zero_host_shell(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.has_active_config_shell = MagicMock(return_value=True)
+        app.print_header = MagicMock()
+
+        result = app.ensure_active_configuration()
+
+        self.assertTrue(result)
+        app.print_header.assert_not_called()
+
+    def test_ensure_active_configuration_import_uses_has_active_config_shell(self):
+        """Import success check should use has_active_config_shell, not check_hosts_config."""
+        # Verify the method body references has_active_config_shell for import checks.
+        import inspect
+        src = inspect.getsource(r1setup.R1Setup.ensure_active_configuration)
+        # The import-success checks should use has_active_config_shell
+        self.assertIn("has_active_config_shell", src)
+
+
+class TestPhase3BatchDiscovery(unittest.TestCase):
+    """Tests for Phase 3 batch discovery and import primitives."""
+
+    def _make_cm(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {"config_name": "test_config"}
+        cm.fleet_state = {
+            "config_schema_version": 1,
+            "fleet": {
+                "machines": {
+                    "m-1": {"machine_id": "m-1", "ansible_host": "10.0.0.1", "ansible_user": "root"},
+                    "m-2": {"machine_id": "m-2", "ansible_host": "10.0.0.2", "ansible_user": "root"},
+                },
+                "instances": {},
+            },
+        }
+        return cm
+
+    def test_batch_discover_machines_classifies_results(self):
+        cm = self._make_cm()
+        # m-1 returns 1 candidate; m-2 returns clean
+        cm.app.discover_existing_edge_node_services = MagicMock(side_effect=[
+            {"status": "success", "candidates": [{"service_name": "edge_node"}]},
+            {"status": "success", "candidates": []},
+        ])
+        buffer = cm._batch_discover_machines(["m-1", "m-2"])
+        self.assertEqual(buffer["m-1"]["status"], "success")
+        self.assertEqual(len(buffer["m-1"]["candidates"]), 1)
+        self.assertEqual(buffer["m-2"]["status"], "success")
+        self.assertEqual(len(buffer["m-2"]["candidates"]), 0)
+
+    def test_batch_discover_machines_handles_error(self):
+        cm = self._make_cm()
+        cm.app.discover_existing_edge_node_services = MagicMock(
+            side_effect=Exception("connection refused"),
+        )
+        buffer = cm._batch_discover_machines(["m-1"])
+        self.assertEqual(buffer["m-1"]["status"], "error")
+        self.assertIn("connection refused", buffer["m-1"]["error"])
+
+    def test_batch_discover_machines_skips_unregistered(self):
+        cm = self._make_cm()
+        buffer = cm._batch_discover_machines(["nonexistent"])
+        self.assertEqual(buffer["nonexistent"]["status"], "skipped")
+
+    def test_persist_batch_discovery_calls_record_for_successful_only(self):
+        cm = self._make_cm()
+        cm.record_machine_discovery_scan = MagicMock()
+        scan_buffer = {
+            "m-1": {"status": "success", "candidates": [{"service_name": "edge_node"}]},
+            "m-2": {"status": "error", "candidates": [], "error": "fail"},
+            "m-3": {"status": "skipped", "candidates": [], "error": "not registered"},
+        }
+        cm._persist_batch_discovery_results(scan_buffer)
+        cm.record_machine_discovery_scan.assert_called_once_with("m-1", [{"service_name": "edge_node"}])
+
+    def test_classify_scan_results(self):
+        cm = self._make_cm()
+        scan_buffer = {
+            "m-1": {"status": "success", "candidates": [{"service_name": "x"}]},
+            "m-2": {"status": "success", "candidates": []},
+            "m-3": {"status": "error", "candidates": [], "error": "fail"},
+            "m-4": {"status": "skipped", "candidates": [], "error": "not registered"},
+        }
+        classified = cm._classify_scan_results(scan_buffer)
+        self.assertEqual(classified["discovered"], ["m-1"])
+        self.assertEqual(classified["clean"], ["m-2"])
+        self.assertEqual(classified["failed"], ["m-3"])
+        self.assertEqual(classified["skipped"], ["m-4"])
+
+    def test_onboarding_review_skips_when_no_env_match(self):
+        cm = self._make_cm()
+        candidates = [
+            {"service_name": "edge_node", "service_state": "active", "environment": "devnet"},
+        ]
+        result = cm._onboarding_review_machine_candidates("m-1", candidates, "testnet", "simple")
+        self.assertEqual(result["action"], "skipped")
+        self.assertEqual(result["imported_count"], 0)
+
+    def test_onboarding_review_simple_mode_guardrail_skip(self):
+        cm = self._make_cm()
+        # 2 services = needs expert; user chooses skip (default)
+        candidates = [
+            {"service_name": "edge_node", "service_state": "active", "environment": "testnet"},
+            {"service_name": "edge_node_2", "service_state": "active", "environment": "testnet"},
+        ]
+        cm.app.get_input = MagicMock(return_value="2")  # skip
+        result = cm._onboarding_review_machine_candidates("m-1", candidates, "testnet", "simple")
+        self.assertEqual(result["action"], "skipped")
+        self.assertIsNone(result["mode_switched_to"])
+
+    def test_onboarding_review_single_service_stays_standard(self):
+        cm = self._make_cm()
+        candidates = [
+            {"service_name": "edge_node", "service_state": "active", "environment": "testnet"},
+        ]
+        # User selects 'all' in candidate selection, provides name 'en1'
+        cm.app._select_discovery_candidates = MagicMock(return_value=candidates)
+        cm.find_runtime_identity_claims = MagicMock(return_value=[])
+        cm.upsert_machine_record = MagicMock()
+        cm.app._prompt_discovery_import_name = MagicMock(return_value="edge_node")
+        cm.app.import_discovery_candidates = MagicMock(return_value={
+            "status": "success", "imported_names": ["edge_node"], "topology_mode": "standard",
+        })
+        cm.app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {}}}}}
+
+        result = cm._onboarding_review_machine_candidates("m-1", candidates, "testnet", "simple")
+
+        self.assertEqual(result["action"], "imported")
+        self.assertEqual(result["imported_count"], 1)
+        self.assertIsNone(result["mode_switched_to"])
+        # Should NOT promote to expert for single service
+        cm.upsert_machine_record.assert_not_called()
+
+    def test_onboarding_batch_discovery_declined(self):
+        cm = self._make_cm()
+        cm.app.get_input = MagicMock(return_value="n")
+        result = cm._onboarding_batch_discovery_and_import(["m-1"], "testnet")
+        self.assertFalse(result["scanned"])
+        self.assertEqual(result["imported_total"], 0)
+
+    def test_create_machine_first_configuration_offers_discovery(self):
+        cm = self._make_cm()
+        cm._prompt_new_config_name = MagicMock(return_value="test")
+        cm._prompt_new_config_environment = MagicMock(return_value="testnet")
+        cm._prompt_machine_count = MagicMock(return_value=1)
+        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1m")
+        cm._reset_inventory_for_new_config = MagicMock()
+        cm.ensure_configuration_shell = MagicMock()
+        cm._collect_machine_registration_entries = MagicMock(return_value=["m-1"])
+        cm._onboarding_batch_discovery_and_import = MagicMock(
+            return_value={"scanned": True, "imported_total": 0, "session_mode": "simple"},
+        )
+        cm.app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {}}}}}
+        cm.app.wait_for_enter = MagicMock()
+
+        cm._create_machine_first_configuration()
+
+        cm._onboarding_batch_discovery_and_import.assert_called_once_with(["m-1"], "testnet")
+
+
+class TestPhase4GapFill(unittest.TestCase):
+    """Tests for Phase 4 safe gap fill for simple mode."""
+
+    def _make_cm(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {"config_name": "test_config"}
+        cm.fleet_state = {
+            "config_schema_version": 1,
+            "fleet": {
+                "machines": {
+                    "m-1": {
+                        "machine_id": "m-1",
+                        "ansible_host": "10.0.0.1",
+                        "ansible_user": "root",
+                        "ansible_port": 22,
+                        "topology_mode": "standard",
+                        "instance_names": [],
+                    },
+                },
+                "instances": {},
+            },
+        }
+        return cm
+
+    def test_build_fresh_host_entry_sets_standard_fields(self):
+        cm = self._make_cm()
+        cm.app._extract_machine_access_config = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "ansible_user": "root", "ansible_port": 22,
+        })
+        cm.apply_runtime_snapshot_to_host_config = MagicMock(return_value=False)
+
+        host = cm._build_fresh_host_entry("m-1", "my-node")
+
+        self.assertEqual(host["ansible_host"], "10.0.0.1")
+        self.assertEqual(host["r1setup_machine_id"], "m-1")
+        self.assertEqual(host["r1setup_topology_mode"], "standard")
+        self.assertEqual(host["r1setup_runtime_name_policy"], "normalize_to_target")
+        self.assertEqual(host["r1setup_instance_logical_name"], "my-node")
+        self.assertEqual(host["node_status"], "never_deployed")
+        self.assertEqual(host["r1setup_service_file_version"], r1setup.DEFAULT_SERVICE_FILE_VERSION)
+        cm.apply_runtime_snapshot_to_host_config.assert_called_once_with("my-node", host)
+
+    def test_build_fresh_host_entry_raises_for_unknown_machine(self):
+        cm = self._make_cm()
+        with self.assertRaises(ValueError):
+            cm._build_fresh_host_entry("nonexistent", "node-1")
+
+    def test_gap_fill_creates_instances_on_clean_machines(self):
+        cm = self._make_cm()
+        cm.app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {}}}}}
+        cm.app._get_valid_hostname = MagicMock(return_value="m-1")
+        cm._build_fresh_host_entry = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "node_status": "never_deployed",
+        })
+        cm.upsert_machine_record = MagicMock()
+        cm._save_config_with_metadata = MagicMock()
+        cm.app.get_input = MagicMock(return_value="Y")
+
+        count = cm._onboarding_gap_fill_clean_machines(["m-1"], "testnet")
+
+        self.assertEqual(count, 1)
+        cm._build_fresh_host_entry.assert_called_once_with("m-1", "m-1")
+        cm.upsert_machine_record.assert_called_once()
+        cm._save_config_with_metadata.assert_called_once()
+
+    def test_gap_fill_skips_when_declined(self):
+        cm = self._make_cm()
+        cm.app.get_input = MagicMock(return_value="n")
+
+        count = cm._onboarding_gap_fill_clean_machines(["m-1"], "testnet")
+
+        self.assertEqual(count, 0)
+
+    def test_gap_fill_skips_when_no_clean_machines(self):
+        cm = self._make_cm()
+
+        count = cm._onboarding_gap_fill_clean_machines([], "testnet")
+
+        self.assertEqual(count, 0)
+
+    def test_batch_discovery_returns_clean_machine_ids(self):
+        cm = self._make_cm()
+        cm.app.get_input = MagicMock(return_value="Y")
+        cm.app.discover_existing_edge_node_services = MagicMock(
+            return_value={"status": "success", "candidates": []},
+        )
+        cm.record_machine_discovery_scan = MagicMock()
+
+        result = cm._onboarding_batch_discovery_and_import(["m-1"], "testnet")
+
+        self.assertIn("clean_machine_ids", result)
+        self.assertEqual(result["clean_machine_ids"], ["m-1"])
+
+    def test_create_machine_first_deploys_only_for_fresh(self):
+        """Deploy prompt should only appear when fresh_count > 0."""
+        cm = self._make_cm()
+        cm._prompt_new_config_name = MagicMock(return_value="test")
+        cm._prompt_new_config_environment = MagicMock(return_value="testnet")
+        cm._prompt_machine_count = MagicMock(return_value=1)
+        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1m")
+        cm._reset_inventory_for_new_config = MagicMock()
+        cm.ensure_configuration_shell = MagicMock()
+        cm._collect_machine_registration_entries = MagicMock(return_value=["m-1"])
+        cm._onboarding_batch_discovery_and_import = MagicMock(return_value={
+            "scanned": True, "imported_total": 2, "session_mode": "simple",
+            "clean_machine_ids": [],
+        })
+        cm._onboarding_gap_fill_clean_machines = MagicMock(return_value=0)
+        cm.app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {"n1": {}, "n2": {}}}}}}
+        cm.app.wait_for_enter = MagicMock()
+        cm.app.get_input = MagicMock()
+
+        cm._create_machine_first_configuration()
+
+        # With 0 fresh, deploy prompt should NOT be shown (get_input not called for deploy)
+        # The only get_input calls are from mocked methods, not deploy prompt
+        deploy_calls = [
+            c for c in cm.app.get_input.call_args_list
+            if 'deploy' in str(c).lower()
+        ]
+        self.assertEqual(len(deploy_calls), 0)
