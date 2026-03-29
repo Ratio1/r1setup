@@ -1,7 +1,7 @@
 # Machine-First Configuration Flow
 
 Created At: `2026-03-29T12:00:00+03:00`
-Revised At: `2026-03-29T22:10:00+03:00`
+Revised At: `2026-03-29T22:40:00+03:00`
 
 ## Problem
 
@@ -97,6 +97,7 @@ Relevant fleet/discovery constraints from the current code:
 6. A batch scan helper must not delegate to a wrapper that rescans again.
 7. Fresh standard-mode instance creation is only safe on a machine whose scan succeeded and found zero candidates.
 8. If a scan fails, or if the operator declines import of discovered services, the machine should remain registered-only until the operator makes a separate explicit decision.
+9. A zero-host configuration shell must behave consistently across menus that currently equate "configured" with "has inventory hosts".
 
 ---
 
@@ -251,18 +252,52 @@ Goal:
 
 Approach:
 
-- extract shared helpers for:
-  - prompting config name
-  - selecting environment
-  - collecting repeated SSH entries with `previous_config`
-  - saving metadata consistently
-- keep the two top-level entry points for now
-- let wrappers keep any intentionally different post-save behavior until later phases
+- extract shared helpers with explicit ownership:
+  - `_prompt_new_config_name()` on `ConfigurationManager`
+  - `_prompt_new_config_environment()` on `ConfigurationManager`
+  - `_collect_node_connection_entries(...)` on `ConfigurationManager`
+  - `_reset_inventory_for_new_config()` on `ConfigurationManager`
+  - `_finalize_new_config_save(config_name, env, nodes_count, *, update_symlink=True)` on `ConfigurationManager`
+- the shared collection helper should take flags for:
+  - `allow_previous_config_reuse`
+  - `enforce_duplicate_name_check`
+  - `show_progress_summary`
+- keep the two top-level entry points for now, but make caller-specific behavior explicit
+
+Target behavior split:
+
+Shared in Phase 1:
+
+- config name prompt and validation
+- environment prompt
+- inventory reset helper
+- host-entry collection loop mechanics
+- duplicate-name validation
+- credential reuse support
+- metadata save path
+
+Caller-specific in Phase 1:
+
+- section/header copy (`Create New Configuration` vs `Initial Configuration Setup`)
+- whether progress summary is shown before each entry
+- whether an immediate deploy prompt is shown after save
+
+Normalized in Phase 1:
+
+- both paths must call `set_mnl_app_env(env)`
+- both paths must reject duplicate logical host names
+
+Deferred until later phases:
+
+- machine-first flow conversion
+- removal of the immediate deploy prompt from the management path
+- replacement of node-first prompts with machine-first prompts
 
 Important note:
 
 - do not jump straight to one giant `_run_config_creation_flow()` with all future machine-first behavior embedded
 - first consolidate primitives, then recompose behavior in later phases
+- Phase 1 should end with a documented small API surface, not with hidden inlined shared behavior
 
 Why:
 
@@ -288,6 +323,7 @@ Changes:
 - collect machine label + SSH details + optional spec probe
 - save a configuration shell with registered machine records and zero hosts
 - preserve explicit machine labels as `machine_id`
+- use machine count, not host count, for machine-first config naming
 
 Out of scope:
 
@@ -297,6 +333,22 @@ Out of scope:
 Why:
 
 - lands the core machine-first architecture with minimal branching
+
+Mandatory audit in this phase:
+
+- review every menu/path that currently uses "has hosts" as a proxy for "has usable configuration"
+- explicitly test and, if needed, adapt:
+  - main menu summary line
+  - configuration menu current-status block
+  - deployment menu entry behavior
+  - operations menu guards
+  - fleet summary for zero-host registered-machine configs
+
+Required zero-host config behavior:
+
+- a configuration shell with registered machines but zero hosts is a valid active configuration
+- Fleet Summary must show registered machines with `No Instances`
+- menus must not misreport this state as "no config exists"
 
 ### Phase 3: Batch Discovery Using Cached Candidates
 
@@ -310,12 +362,47 @@ Changes:
   - scans each registered machine once
   - persists scan results in fleet metadata
   - summarizes clean / discovered / failed / skipped states
-- add a new import helper that consumes cached candidates without rescanning
-- keep `discover_and_import_existing_services()` untouched for manual single-machine usage
+- extract the current discovery review/import UX into reusable pieces:
+  - one helper to load cached candidates for a machine
+  - one helper for candidate selection UI
+  - one helper for pre-import validation UI:
+    - environment mismatch confirmation
+    - cross-config claim warnings
+    - expert-mode confirmation when needed
+- add a new onboarding-facing import helper that consumes cached candidates without rescanning
+- keep `discover_and_import_existing_services()` untouched as the entry point for manual single-machine usage; refactor its internals to call the same shared selection/validation/import helpers after its live scan
+- add a simple-mode multi-candidate guardrail (see below)
+
+Simple-mode multi-candidate guardrail:
+
+A machine with 2+ running service instances is inherently an advanced/expert scenario. Simple mode means 1 machine = 1 service. Allowing import of just one service while ignoring the others creates a blind spot: those services are still running, consuming resources, and invisible to the tool.
+
+When the config is in simple mode and discovery finds 2+ candidates on a single machine, present an explicit decision:
+
+```
+Machine machine-1 has 2 running services.
+Simple mode supports only 1 service per machine.
+
+  1) Switch to Advanced mode to manage this machine properly
+  2) Skip this machine for now
+
+Select (1-2) [2]:
+```
+
+Behavior per choice:
+
+- Option 1: switch config mode to advanced; promote this machine to `expert` topology; proceed to candidate selection UI with multi-select
+- Option 2: leave machine registered-only; skip to next machine in batch (default - safe choice)
+
+There is no "import one and stay simple" option. A machine running multiple services must be managed in advanced mode or left for later.
+
+This guardrail only applies during batch onboarding discovery. The standalone `discover_and_import_existing_services()` flow (manual single-machine usage from Configuration Menu) keeps its existing reactive expert-mode promotion behavior.
 
 Result:
 
 - onboarding can reuse the discovery validations already present in import logic, but without the double-scan problem
+- simple-mode users are never silently pushed into expert topology during onboarding
+- multi-service machines are either managed properly (advanced) or deferred honestly (skip)
 
 ### Phase 4: Safe Gap Fill For Simple Mode
 
@@ -328,6 +415,12 @@ Changes:
 - offer fresh instance creation only for machines whose scan succeeded and returned zero candidates
 - for failed or skipped scans, leave machines registered-only
 - for discovered-but-not-imported machines, leave them registered-only
+- add a helper that builds a fresh inventory host entry from:
+  - machine record SSH/access fields
+  - logical instance name
+  - topology mode
+  - runtime naming policy
+  - derived runtime names
 - create one inventory host per scanned-clean machine when the operator confirms
 - mark those hosts as `never_deployed`
 - only after that, offer deploy-now with default `n`
@@ -336,6 +429,14 @@ Why:
 
 - this is the first phase where onboarding creates deployable instances again
 - the safety gate is explicit and testable
+
+Fresh-host builder requirements:
+
+- copy SSH access from the machine record, not from a new `_configure_single_node()` prompt
+- set `r1setup_machine_id` from the registered machine label
+- set `r1setup_topology_mode='standard'`
+- apply resolved standard runtime names
+- initialize status and runtime metadata exactly as a newly configured undeployed instance expects
 
 ### Phase 5: Advanced Mode / Expert Topology
 
@@ -349,6 +450,7 @@ Changes:
 - ask for desired instance count per machine
 - compute capacity guidance from spec probe results
 - after discovery import, calculate remaining capacity gap per machine
+- reuse the fresh-host builder from Phase 4 for expert-mode host synthesis
 - offer fresh instance creation only for the unfilled remainder on scanned-clean machines
 - keep expert-mode promotion explicit and visible
 
@@ -369,10 +471,12 @@ Changes:
 
 - share the same machine collection helper
 - keep standalone register-machine behavior as a thin wrapper around the shared primitive
+- decide at this phase whether `_add_node` remains a direct instance-creation flow or becomes machine-aware
 
 Why last:
 
 - do not couple first-run onboarding changes to the standalone registration menu earlier than necessary
+- ordering is soft; this phase could move earlier once Phase 2 is stable, but it is intentionally not on the critical path
 
 ### Phase 7: Docs, Smoke Tests, and Follow-On Cleanup
 
@@ -385,6 +489,13 @@ Changes:
 - update `mnl_factory/scripts/README_r1setup.md`
 - update any menu copy that still misdescribes machine-vs-instance behavior
 - add a dated design note if the final UX differs materially from this plan
+- document the settled future of `_add_node`
+
+`_add_node` policy until then:
+
+- `_add_node` remains unchanged through Phases 0-5
+- it continues to create an inventory host directly
+- a later phase may adapt it to ask whether the new instance should bind to an existing registered machine or create/register a new one
 
 ---
 
@@ -419,7 +530,7 @@ Do not bundle Phase 1 through Phase 5 into one branch.
 | `detect_runtime_collisions` | `ConfigurationManager` | Runtime collision detection |
 | `assess_machine_resource_recommendation` | `ConfigurationManager` | Capacity guidance |
 | `ensure_configuration_shell` | `ConfigurationManager` | Persist config shell with zero or more hosts |
-| `_run_with_spinner` | `MigrationPlanner` | CLI spinner for long-running tasks |
+| `_run_with_spinner` | `MigrationPlanner` | Optional progress UI for Phase 3 batch scan |
 
 ---
 
@@ -488,6 +599,7 @@ At every phase:
 - machine-first onboarding saves a config shell with machine records and zero hosts
 - operator-entered machine labels become `machine_id`
 - no inventory instances are created during registration-only completion
+- Fleet Summary shows registered machines with `No Instances` and no false running/deployed status
 
 ### Phase 3 Tests
 
@@ -495,6 +607,11 @@ At every phase:
 - cached scan results are persisted
 - import-from-cached-candidates does not rescan
 - partial scan failure does not block other machines
+- the existing manual single-machine discovery flow still works through the extracted shared UI/validation helpers
+- simple-mode machine with 2+ candidates triggers the mode decision prompt (switch to advanced or skip), not silent expert promotion
+- choosing "switch to advanced" promotes topology and enables multi-select import
+- choosing "skip" leaves machine registered-only and proceeds to the next machine
+- there is no "import one and stay simple" option for multi-service machines
 
 ### Phase 4 Tests
 
@@ -502,6 +619,7 @@ At every phase:
 - scan failure does not enable fresh instance creation
 - discovered-but-declined machines remain registered-only
 - deploy prompt is shown only when fresh instances were created
+- fresh host entries are synthesized from machine-record SSH fields plus resolved runtime names
 
 ### Phase 5 Tests
 
@@ -509,6 +627,7 @@ At every phase:
 - desired instance count is stored per machine during the flow
 - capacity recommendation math is correct
 - remaining gap is `desired - imported - already-created`
+- expert-mode fresh hosts are synthesized through the shared fresh-host builder
 
 ### Manual Smoke Matrix
 
@@ -532,4 +651,7 @@ At every phase:
 | Treat scan failure as "no services found"? | No | Unsafe for standard runtime defaults |
 | Always show a deploy prompt at the end? | No | Only makes sense when fresh deployable instances were created |
 | Broadly replace `node` wording with `machine` wording? | No | The product model is machine plus instance, not machine-only |
+| Should simple-mode onboarding silently promote to expert when discovery finds multiple services? | No | A multi-service machine must be managed in advanced mode or skipped; no "import one and stay simple" option |
+| Should `_generate_config_name()` stay `{count}n` for machine-first onboarding? | No | Machine-first flows should use machine count with an `m` suffix to avoid misleading `0n` names |
+| Does `_add_node` change immediately as part of machine-first onboarding? | No | Keep it stable through the early phases; revisit once the machine-first path is proven |
 | Land as one PR? | No | The risk is too high; phase the rollout |
