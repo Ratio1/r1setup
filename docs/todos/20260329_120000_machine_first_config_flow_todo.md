@@ -373,17 +373,38 @@ Changes:
 - keep `discover_and_import_existing_services()` untouched as the entry point for manual single-machine usage; refactor its internals to call the same shared selection/validation/import helpers after its live scan
 - add a simple-mode multi-candidate guardrail (see below)
 
-Simple-mode multi-candidate guardrail:
+Environment-aware candidate filtering:
 
-A machine with 2+ running service instances is inherently an advanced/expert scenario. Simple mode means 1 machine = 1 service. Allowing import of just one service while ignoring the others creates a blind spot: those services are still running, consuming resources, and invisible to the tool.
-
-When the config is in simple mode and discovery finds 2+ candidates on a single machine, present an explicit decision:
+During batch import, candidates must be filtered by the config environment before presenting the selection UI. Mismatched candidates are shown as informational context but are not selectable:
 
 ```
-Machine machine-1 has 2 running services.
-Simple mode supports only 1 service per machine.
+Machine machine-1 has 2 services:
+  edge_node        [running] testnet  ← matches this config
+  edge_node_devnet [running] devnet   ← different environment
 
-  1) Switch to Advanced mode to manage this machine properly
+Only testnet services can be imported into this config.
+To manage the devnet service, create a separate devnet config later.
+
+Import edge_node from machine-1? (Y/n) [Y]:
+```
+
+This replaces the current generic "environment mismatch, continue? (y/n)" prompt with a clearer explanation of why and what to do about it.
+
+Multi-service machine topology rule:
+
+If discovery finds 2+ total service instances on a machine (regardless of how many match the config environment), that machine must be registered with `expert` topology. This reflects the machine's real operational state: multiple services share its resources, even if this config only manages a subset of them.
+
+Example: a machine runs `edge_node` (testnet) and `edge_node_devnet` (devnet). A testnet config can only import `edge_node`, but the machine is still `expert` because two services are running on it. This prevents the tool from later treating it as a single-service machine for capacity planning, helper scripts, or gap fill.
+
+Simple-mode multi-service guardrail:
+
+When the config is in simple mode and a machine has 2+ total discovered services (across all environments), present an explicit decision:
+
+```
+Machine machine-1 has 2 running services (1 matches this config's environment).
+This machine requires Advanced mode because multiple services share its resources.
+
+  1) Switch to Advanced mode to import matching services
   2) Skip this machine for now
 
 Select (1-2) [2]:
@@ -391,16 +412,22 @@ Select (1-2) [2]:
 
 Behavior per choice:
 
-- Option 1: switch config mode to advanced; promote this machine to `expert` topology; proceed to candidate selection UI with multi-select
+- Option 1: switch config mode to advanced; register machine with `expert` topology; show only environment-matching candidates for import selection
 - Option 2: leave machine registered-only; skip to next machine in batch (default - safe choice)
 
-There is no "import one and stay simple" option. A machine running multiple services must be managed in advanced mode or left for later.
+There is no "import one and stay simple" option. A machine running multiple services is expert regardless of how many this config tracks.
+
+When the config is already in advanced mode, no mode-switch prompt is needed. The machine is simply registered as `expert` and environment-matching candidates are presented for import.
+
+When a machine has only 1 discovered service total, it stays `standard` topology and the matching service is offered for import normally.
 
 This guardrail only applies during batch onboarding discovery. The standalone `discover_and_import_existing_services()` flow (manual single-machine usage from Configuration Menu) keeps its existing reactive expert-mode promotion behavior.
 
 Result:
 
 - onboarding can reuse the discovery validations already present in import logic, but without the double-scan problem
+- environment filtering is automatic with clear explanation, not a confusing y/n prompt
+- machine topology reflects reality (multi-service = expert), not just what this config imports
 - simple-mode users are never silently pushed into expert topology during onboarding
 - multi-service machines are either managed properly (advanced) or deferred honestly (skip)
 
@@ -538,7 +565,13 @@ Do not bundle Phase 1 through Phase 5 into one branch.
 
 ### Cancellation During Machine Collection
 
-If the operator cancels before the configuration shell is saved, nothing is persisted.
+If the operator cancels (Ctrl-C) before the configuration shell is saved, nothing is persisted.
+
+### Partial Failure During Machine Collection
+
+If SSH validation or spec probe fails for one machine in a batch, save the machines that succeeded so far and report the failure. The operator can fix or add the failed machine later via Register Machine.
+
+Do not roll back previously registered machines on a mid-batch failure.
 
 ### Spec Probe Failure
 
@@ -555,6 +588,22 @@ If candidates were found and the operator imports none or only some:
 - imported services become tracked instances
 - the machine stays registered
 - no fresh instance is created automatically for the remaining discovered candidates in the same onboarding flow
+
+### All Machines Already Have Running Services
+
+If discovery finds running services on every machine and the user imports them all, the flow ends with zero fresh instances. This is a valid and common outcome for operators onboarding existing infrastructure.
+
+The messaging must feel like a success, not a dead end:
+
+```
+✅ All machines are already running edge_node services.
+   Your fleet is imported and ready to manage.
+
+💡 Use Fleet Summary to review your machines,
+   or Node Status & Info to check service health.
+```
+
+Do not show a deploy prompt in this case.
 
 ### Config Saved Before Gap Fill
 
@@ -608,9 +657,12 @@ At every phase:
 - import-from-cached-candidates does not rescan
 - partial scan failure does not block other machines
 - the existing manual single-machine discovery flow still works through the extracted shared UI/validation helpers
-- simple-mode machine with 2+ candidates triggers the mode decision prompt (switch to advanced or skip), not silent expert promotion
-- choosing "switch to advanced" promotes topology and enables multi-select import
+- candidates are filtered by config environment before selection; mismatched candidates shown as info-only
+- machine with 2+ total services (any env) is registered as `expert` topology regardless of import count
+- simple-mode machine with 2+ total services triggers mode decision prompt (switch to advanced or skip)
+- choosing "switch to advanced" promotes config mode, registers machine as expert, shows env-matching candidates
 - choosing "skip" leaves machine registered-only and proceeds to the next machine
+- machine with 1 total service stays `standard` topology, offered for import normally
 - there is no "import one and stay simple" option for multi-service machines
 
 ### Phase 4 Tests
@@ -639,6 +691,10 @@ At every phase:
 | Advanced mode, mixed machine states | imported services preserved, only clean remainder eligible for fresh creation |
 | Cancel before shell save | nothing persisted |
 | Cancel after shell save | machine-only shell remains valid and recoverable |
+| All machines have services | import all -> success messaging -> no deploy prompt |
+| Partial batch failure | successful machines saved, failed machine skipped with guidance |
+| Env mismatch on discovery | skip with explanation, suggest separate config |
+| Same machine in two configs | cross-config claim warning on import, both configs work independently |
 
 ---
 
@@ -655,3 +711,77 @@ At every phase:
 | Should `_generate_config_name()` stay `{count}n` for machine-first onboarding? | No | Machine-first flows should use machine count with an `m` suffix to avoid misleading `0n` names |
 | Does `_add_node` change immediately as part of machine-first onboarding? | No | Keep it stable through the early phases; revisit once the machine-first path is proven |
 | Land as one PR? | No | The risk is too high; phase the rollout |
+| Can one config contain machines from different network environments? | No | One config = one `mnl_app_env`. The Docker image tag is derived from this config-wide setting. Mixed envs on one physical machine require separate configs (already supported via cross-config model). |
+| Should discovery show env-mismatched candidates as selectable? | No | Filter by config env automatically; show mismatched ones as info-only with guidance to create a separate config |
+| If a machine has 2 services but only 1 matches the config env, is the machine still expert? | Yes | Topology reflects the machine's real state (multi-service = expert), not just what this config imports |
+| Is there a third config creation path? | Yes | `_create_new_configuration()` on R1Setup (~line 11738) is called from `configure_nodes_menu` option 4 when hosts already exist. Phase 1 must account for this path too. |
+
+---
+
+## Environment Rule
+
+One configuration = one network environment (`mainnet`, `testnet`, or `devnet`). This is an architectural constraint, not just a UX preference:
+
+- `mnl_app_env` is config-wide and drives the Docker image tag for all instances in that config
+- you cannot deploy node-1 as testnet and node-2 as devnet within the same config - they would pull the same image
+- this applies equally to simple and advanced mode
+
+For operators who run mixed environments on one physical machine (e.g. testnet + devnet):
+
+- create one config per environment
+- each config references the same machine but imports only its own environment's services
+- discovery already supports this via environment mismatch warnings and selective import
+- the cross-config claim detection warns when two configs track services on the same machine
+
+During onboarding, if discovery finds services that don't match the config environment, the flow should prominently explain:
+
+```
+Machine machine-1 is running devnet services, but this config is set to mainnet.
+
+These services belong in a separate devnet config.
+You can create one later and import them there.
+
+Skipping machine-1 for this config.
+```
+
+This is clearer than the current generic "environment mismatch, continue? (y/n)" prompt because it explains *why* and *what to do about it*.
+
+---
+
+## Post-Onboarding UX Gap: Add Machine vs Add Node
+
+After the machine-first flow ships, there is a known UX inconsistency for adding machines to an existing config:
+
+- `Register Machine` (Config Menu > 5): registers fleet machine only, no instance
+- `Add Node` (Config Menu > Configure Nodes > 1): creates an inventory host directly (old node-first flow)
+
+Neither matches the new machine-first-then-discover pattern. An operator who wants to add one more machine to an existing config must either:
+
+1. Use `Register Machine`, then separately use `Discover Services` - two steps, not obvious
+2. Use `Add Node`, which bypasses machine registration and discovery entirely
+
+This gap is acknowledged and deferred. Phase 6 begins addressing it. Phase 7 documents the settled behavior.
+
+A longer-term direction would be to unify these into a single "Add Machine" flow that registers, scans, and optionally creates instances - mirroring the onboarding flow for a single machine.
+
+---
+
+## Future Direction: Central Machine Registry
+
+The current model stores machine records per-config in fleet metadata. The same physical machine may appear independently in multiple configs with no shared state between them.
+
+A future improvement would introduce a central machine registry at `~/.ratio1/r1_setup/machines/` (or similar) where:
+
+- machines are registered once with SSH details, specs, and discovery cache
+- configs reference machines by ID instead of duplicating SSH details
+- discovery results are shared across configs
+- machine preparation state is tracked centrally
+
+This would:
+
+- eliminate duplicate SSH detail entry when the same machine appears in multiple configs
+- make cross-config claim detection trivial (central view of what's tracked where)
+- enable a unified "Machines" management view independent of any single config
+- allow "add machine to config" to pick from already-known machines
+
+This requires backward compatibility with the current per-config fleet model and is explicitly out of scope for the machine-first onboarding work. It should be planned separately once the per-config machine-first flow is proven.
