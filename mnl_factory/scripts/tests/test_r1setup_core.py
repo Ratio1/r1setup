@@ -1457,10 +1457,10 @@ class TestSharedConfigCreationPrimitives(unittest.TestCase):
 
 
 class TestConfigCreationPathMigration(unittest.TestCase):
-    """Tests that migrated config-creation paths use shared primitives correctly."""
+    """Tests that all config-creation entry points delegate to the machine-first flow."""
 
-    def test_path1_calls_set_mnl_app_env(self):
-        """Path 1 (_create_new_configuration_with_management) must persist env."""
+    def test_machine_first_flow_prompts_environment(self):
+        """Machine-first flow must call _prompt_new_config_environment."""
         cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
         cm.app = MagicMock()
         cm.active_config = {}
@@ -1468,73 +1468,68 @@ class TestConfigCreationPathMigration(unittest.TestCase):
 
         cm._prompt_new_config_name = MagicMock(return_value="test")
         cm._prompt_new_config_environment = MagicMock(return_value="devnet")
-        cm._prompt_node_count = MagicMock(return_value=1)
-        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1n")
+        cm._prompt_machine_count = MagicMock(return_value=1)
+        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1m")
         cm._reset_inventory_for_new_config = MagicMock()
-        cm._collect_node_connection_entries = MagicMock()
-        cm._finalize_new_config_save = MagicMock()
-        cm.app.get_input = MagicMock(return_value="n")  # decline deploy
+        cm.ensure_configuration_shell = MagicMock()
+        cm._collect_machine_registration_entries = MagicMock(return_value=["machine-1"])
+        cm._onboarding_batch_discovery_and_import = MagicMock(return_value={
+            'scanned': False, 'imported_total': 0, 'session_mode': 'simple', 'clean_machine_ids': [],
+        })
+        cm._onboarding_gap_fill_clean_machines = MagicMock(return_value=0)
+        cm.app.print_section = MagicMock()
+        cm.app.print_colored = MagicMock()
+        cm.app.get_input = MagicMock(return_value="n")
         cm.app.wait_for_enter = MagicMock()
 
-        cm._create_new_configuration_with_management()
+        cm._create_machine_first_configuration()
 
         cm._prompt_new_config_environment.assert_called_once()
 
-    def test_path1_enforces_duplicate_check(self):
-        """Path 1 must pass enforce_duplicate_check=True."""
+    def test_machine_first_flow_creates_config_shell_before_registration(self):
+        """Config shell must exist before machine registration."""
+        call_order = []
+
         cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
         cm.app = MagicMock()
         cm.active_config = {}
         cm.fleet_state = None
 
         cm._prompt_new_config_name = MagicMock(return_value="test")
-        cm._prompt_new_config_environment = MagicMock(return_value="testnet")
-        cm._prompt_node_count = MagicMock(return_value=1)
-        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1n")
+        cm._prompt_new_config_environment = MagicMock(return_value="mainnet")
+        cm._prompt_machine_count = MagicMock(return_value=1)
+        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1m")
         cm._reset_inventory_for_new_config = MagicMock()
-        cm._collect_node_connection_entries = MagicMock()
-        cm._finalize_new_config_save = MagicMock()
+        cm.ensure_configuration_shell = MagicMock(side_effect=lambda *a, **kw: call_order.append('shell'))
+        cm._collect_machine_registration_entries = MagicMock(
+            side_effect=lambda *a, **kw: (call_order.append('register'), ["machine-1"])[1],
+        )
+        cm._onboarding_batch_discovery_and_import = MagicMock(return_value={
+            'scanned': False, 'imported_total': 0, 'session_mode': 'simple', 'clean_machine_ids': [],
+        })
+        cm._onboarding_gap_fill_clean_machines = MagicMock(return_value=0)
+        cm.app.print_section = MagicMock()
+        cm.app.print_colored = MagicMock()
         cm.app.get_input = MagicMock(return_value="n")
         cm.app.wait_for_enter = MagicMock()
 
-        cm._create_new_configuration_with_management()
+        cm._create_machine_first_configuration()
 
-        _, kwargs = cm._collect_node_connection_entries.call_args
-        self.assertTrue(kwargs.get('enforce_duplicate_check'))
+        self.assertEqual(call_order, ['shell', 'register'])
 
-    def test_path2_uses_shared_primitives(self):
-        """Path 2 (_create_initial_configuration) delegates to shared primitives."""
-        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
-        app.print_section = MagicMock()
-        app.config_manager = MagicMock()
-        app.config_manager._prompt_new_config_name = MagicMock(return_value="initial")
-        app.config_manager._prompt_new_config_environment = MagicMock(return_value="mainnet")
-        app.config_manager._prompt_node_count = MagicMock(return_value=1)
-        app.config_manager._generate_config_name = MagicMock(return_value="initial_20260329_1200_1n")
-        app.config_manager._collect_node_connection_entries = MagicMock()
-        app.config_manager._finalize_new_config_save = MagicMock()
-
-        app._create_initial_configuration()
-
-        app.config_manager._prompt_new_config_name.assert_called_once()
-        app.config_manager._prompt_new_config_environment.assert_called_once()
-        app.config_manager._prompt_node_count.assert_called_once()
-        app.config_manager._collect_node_connection_entries.assert_called_once()
-        app.config_manager._finalize_new_config_save.assert_called_once()
-
-    def test_path3_resets_inventory_before_delegating(self):
-        """Path 3 (_create_new_configuration) uses shared reset."""
+    def test_create_new_configuration_resets_and_delegates_to_machine_first(self):
+        """_create_new_configuration backs up then delegates to machine-first flow."""
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)
         app.get_input = MagicMock(return_value="y")
         app.config_file = MagicMock()
         app.config_file.exists = MagicMock(return_value=False)
         app.config_manager = MagicMock()
-        app._create_initial_configuration = MagicMock()
+        app._create_machine_first_configuration = MagicMock()
 
         app._create_new_configuration()
 
         app.config_manager._reset_inventory_for_new_config.assert_called_once()
-        app._create_initial_configuration.assert_called_once()
+        app._create_machine_first_configuration.assert_called_once()
 
 
 class TestPhase2MachineFirstConfig(unittest.TestCase):

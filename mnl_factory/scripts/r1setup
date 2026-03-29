@@ -3813,34 +3813,6 @@ class ConfigurationManager:
                 self.app.print_colored("Invalid option. Valid choices are 0-9.", 'red')
                 self.app.wait_for_enter()
 
-    def _create_new_configuration_with_management(self) -> None:
-        """Create a new configuration with proper management"""
-        self.app.print_section("Create New Configuration")
-
-        custom_name = self._prompt_new_config_name()
-        env = self._prompt_new_config_environment()
-        num_nodes = self._prompt_node_count()
-        config_name = self._generate_config_name(num_nodes, custom_name)
-
-        self._reset_inventory_for_new_config()
-        self._collect_node_connection_entries(
-            num_nodes,
-            allow_credential_reuse=True,
-            enforce_duplicate_check=True,
-            show_progress=True,
-        )
-
-        self._finalize_new_config_save(config_name, env, num_nodes)
-
-        # Caller-specific: offer to deploy immediately
-        self.app.print_colored("\n\U0001f4a1 Your nodes are configured and ready for deployment!", 'cyan')
-        deploy_choice = self.app.get_input("Would you like to deploy now? (y/n)", "y")
-        if deploy_choice.lower() == 'y':
-            self.app.wait_for_enter("Press Enter to continue to deployment...")
-            self.app.deployment_menu()
-            return
-        self.app.wait_for_enter()
-
     def _switch_configuration(self, configs: List[Tuple[str, Dict]]) -> None:
         """Switch to a different configuration"""
         self.app.print_section("Switch Configuration")
@@ -9236,9 +9208,6 @@ class R1Setup:
     def manage_configurations_menu(self):
         return self.config_manager.manage_configurations_menu()
 
-    def _create_new_configuration_with_management(self):
-        return self.config_manager._create_new_configuration_with_management()
-
     def _switch_configuration(self, configs):
         return self.config_manager._switch_configuration(configs)
 
@@ -10882,7 +10851,7 @@ PY"""
                     '4',
                     '\U0001f4a1 Suggested: Review fleet status before deploying changes',
                 ),
-                'deployment_menu_default': '9',
+                'deployment_menu_default': '0',
             }
 
         return {
@@ -11118,7 +11087,7 @@ PY"""
                 break
             elif choice == '1':
                 if not hosts:
-                    self._create_initial_configuration()
+                    self._create_machine_first_configuration()
                 else:
                     self._add_node()
             elif choice == '2' and hosts:
@@ -11978,24 +11947,6 @@ PY"""
         
         self.wait_for_enter()
 
-    def _create_initial_configuration(self) -> None:
-        """Create initial configuration"""
-        self.print_section("Initial Configuration Setup")
-
-        custom_name = self.config_manager._prompt_new_config_name()
-        env = self.config_manager._prompt_new_config_environment()
-        num_nodes = self.config_manager._prompt_node_count()
-        config_name = self._generate_config_name(num_nodes, custom_name)
-
-        self.config_manager._collect_node_connection_entries(
-            num_nodes,
-            allow_credential_reuse=False,
-            enforce_duplicate_check=True,
-            show_progress=False,
-        )
-
-        self.config_manager._finalize_new_config_save(config_name, env, num_nodes)
-
     def _select_network_environment(self) -> str:
         """Select network environment"""
         self.print_colored("\nNetwork Environment Options:")
@@ -12534,7 +12485,7 @@ PY"""
                 self.print_colored(f"Configuration backed up to: {backup_file}", 'green')
 
             self.config_manager._reset_inventory_for_new_config()
-            self._create_initial_configuration()
+            self._create_machine_first_configuration()
 
     def view_configuration(self) -> None:
         """View current configuration"""
