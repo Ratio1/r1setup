@@ -1243,8 +1243,8 @@ Recommended per-phase closeout checklist:
 - Status: completed
 - Date: 2026-03-29
 - Test machines:
-  - machine-1: `vitalii@35.228.69.214` (r1-vi-g1, 4 CPU, 15.6 GiB RAM) — has 1 existing edge_node service
-  - machine-2: `vitalii@34.88.90.109` (r1-vi-g2, 4 CPU, 15.6 GiB RAM) — clean, no services
+  - machine-1: GCP instance (4 CPU, 15.6 GiB RAM) — has 1 existing edge_node service
+  - machine-2: GCP instance (4 CPU, 15.6 GiB RAM) — clean, no services
 - Test suite: `tests/e2e/test_machine_first_onboarding.py` (13 tests)
 - Results: all 13 passed (35.5s total)
   - Test01 SSH Connectivity: both machines reachable
@@ -1317,8 +1317,8 @@ Recommended per-phase closeout checklist:
 - Status: completed
 - Date: 2026-03-29
 - Test machines:
-  - machine-1: `vitalii@35.228.69.214` (r1-vi-g1, 4 CPU, 15.6 GiB RAM) — has 1 existing edge_node service
-  - machine-2: `vitalii@34.88.90.109` (r1-vi-g2, 4 CPU, 15.6 GiB RAM) — clean, no services
+  - machine-1: GCP instance (4 CPU, 15.6 GiB RAM) — has 1 existing edge_node service
+  - machine-2: GCP instance (4 CPU, 15.6 GiB RAM) — clean, no services
 - Test suite: `tests/e2e/test_machine_first_onboarding.py` (26 tests)
 - Results: all 26 passed (40.2s total)
   - Test01 SSH Connectivity: both machines reachable

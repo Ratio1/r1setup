@@ -22,10 +22,16 @@ python3 -m unittest tests.e2e.test_machine_first_onboarding -v   # stdlib
 
 ## Test Machines
 
-| Label | Host | User | Purpose |
-|-------|------|------|---------|
-| machine-1 | 35.228.69.214 | vitalii | GCP instance, clean |
-| machine-2 | 34.88.90.109 | vitalii | GCP instance, clean |
+Machines are configured via environment variables (or a `.env` file):
+
+```bash
+export E2E_MACHINE1_HOST=<ip-or-hostname>
+export E2E_MACHINE1_USER=<ssh-user>
+export E2E_MACHINE2_HOST=<ip-or-hostname>
+export E2E_MACHINE2_USER=<ssh-user>
+```
+
+Tests auto-skip when these variables are not set.
 
 ## What Is Tested
 

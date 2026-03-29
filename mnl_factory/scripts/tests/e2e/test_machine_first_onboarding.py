@@ -26,11 +26,30 @@ from unittest.mock import MagicMock, patch
 from tests.support import r1setup
 
 # ---------------------------------------------------------------------------
-# Test machines — update these if the IPs change
+# Test machines — override via environment variables or .env file:
+#   E2E_MACHINE1_HOST, E2E_MACHINE1_USER
+#   E2E_MACHINE2_HOST, E2E_MACHINE2_USER
 # ---------------------------------------------------------------------------
+_ENV_FILE = Path(__file__).resolve().parent / ".env"
+if _ENV_FILE.exists():
+    for line in _ENV_FILE.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip())
 MACHINES = [
-    {"label": "machine-1", "host": "35.228.69.214", "user": "vitalii", "port": 22},
-    {"label": "machine-2", "host": "34.88.90.109", "user": "vitalii", "port": 22},
+    {
+        "label": "machine-1",
+        "host": os.environ.get("E2E_MACHINE1_HOST", ""),
+        "user": os.environ.get("E2E_MACHINE1_USER", ""),
+        "port": 22,
+    },
+    {
+        "label": "machine-2",
+        "host": os.environ.get("E2E_MACHINE2_HOST", ""),
+        "user": os.environ.get("E2E_MACHINE2_USER", ""),
+        "port": 22,
+    },
 ]
 
 SSH_TIMEOUT = 15  # seconds
@@ -54,7 +73,12 @@ def _ssh_reachable(host: str, user: str, port: int = 22) -> bool:
 
 
 def _require_ssh():
-    """Skip the entire test class if machines are unreachable."""
+    """Skip the entire test class if machines are unreachable or not configured."""
+    for m in MACHINES:
+        if not m["host"] or not m["user"]:
+            raise unittest.SkipTest(
+                "E2E_MACHINE*_HOST / E2E_MACHINE*_USER env vars not set — skipping e2e tests"
+            )
     for m in MACHINES:
         if not _ssh_reachable(m["host"], m["user"], m["port"]):
             raise unittest.SkipTest(
@@ -274,8 +298,8 @@ class Test05MachineRegistration(unittest.TestCase):
             self.assertEqual(len(machines), 2)
             self.assertIn("machine-1", machines)
             self.assertIn("machine-2", machines)
-            self.assertEqual(machines["machine-1"]["ansible_host"], "35.228.69.214")
-            self.assertEqual(machines["machine-2"]["ansible_host"], "34.88.90.109")
+            self.assertEqual(machines["machine-1"]["ansible_host"], MACHINES[0]["host"])
+            self.assertEqual(machines["machine-2"]["ansible_host"], MACHINES[1]["host"])
             self.assertEqual(machines["machine-1"]["topology_mode"], "standard")
 
             # Verify metadata persisted machines_count
@@ -357,7 +381,7 @@ class Test07FreshHostBuilding(unittest.TestCase):
                 "topology_mode": "standard",
                 "deployment_state": "empty",
                 "instance_names": [],
-                "ansible_host": "35.228.69.214",
+                "ansible_host": "192.0.2.10",
                 "ansible_user": "vitalii",
                 "ansible_port": 22,
             })
@@ -366,7 +390,7 @@ class Test07FreshHostBuilding(unittest.TestCase):
             host = cm._build_fresh_host_entry("machine-1", "machine-1")
 
             # Verify SSH fields copied from machine record
-            self.assertEqual(host["ansible_host"], "35.228.69.214")
+            self.assertEqual(host["ansible_host"], "192.0.2.10")
             self.assertEqual(host["ansible_user"], "vitalii")
             self.assertEqual(host["ansible_port"], 22)
 
@@ -690,7 +714,7 @@ class Test13AdvancedGapFillMultiInstance(unittest.TestCase):
                 "topology_mode": "standard",
                 "deployment_state": "empty",
                 "instance_names": [],
-                "ansible_host": "35.228.69.214",
+                "ansible_host": "192.0.2.10",
                 "ansible_user": "vitalii",
                 "ansible_port": 22,
             })
