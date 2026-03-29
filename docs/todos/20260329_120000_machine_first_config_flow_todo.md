@@ -415,7 +415,11 @@ Approach:
   - `allow_previous_config_reuse`
   - `enforce_duplicate_name_check`
   - `show_progress_summary`
-- keep the two top-level entry points for now, but make caller-specific behavior explicit
+- all three existing config creation entry points must migrate to these shared primitives:
+  1. `ConfigurationManager._create_new_configuration_with_management` - called from startup recovery and config management flows
+  2. `R1Setup._create_initial_configuration` - called from `configure_nodes_menu` when no hosts exist
+  3. `R1Setup._create_new_configuration` (~line 11738) - called from `configure_nodes_menu` option 4 when hosts already exist and the user wants a fresh config
+- keep the three top-level entry points for now, but make caller-specific behavior explicit
 
 Target behavior split:
 
@@ -438,8 +442,8 @@ Caller-specific in Phase 1:
 
 Normalized in Phase 1:
 
-- both paths must call `set_mnl_app_env(env)`
-- both paths must reject duplicate logical host names
+- all three paths must call `set_mnl_app_env(env)`
+- all three paths must reject duplicate logical host names
 - old configs with missing new metadata fields must be normalized forward without user action
 
 Deferred until later phases:
