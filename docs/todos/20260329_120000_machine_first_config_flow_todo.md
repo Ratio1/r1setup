@@ -58,6 +58,7 @@ Stable rules:
 - old configs do not need a manual export/import cycle
 - additive metadata/schema changes are allowed only when they auto-normalize on load and auto-persist forward on the next save
 - old config filenames do not need to be renamed retroactively
+- imported already-running services must preserve their current live identity unless the operator performs an explicit rename workflow
 
 ### Compatibility Model
 
@@ -197,6 +198,7 @@ This is why the new shell-valid helper must exist alongside the old host-valid h
 - Config-wide simple/advanced state should remain derived, not authoritative, during the early rollout phases.
 - Inventory host keys may remain stable internal identifiers even when the operator chooses a separate display/runtime name for an instance.
 - In expert mode, the operator should be able to choose a logical name for each `edge_node` instance; that logical name is displayed in the UI and applied as the runtime `EE_ID`.
+- Machine labels are the primary operator-facing IDs in early phases; later introduction of a hidden immutable machine UUID remains optional future work, not a rollout prerequisite.
 
 ---
 
@@ -242,6 +244,8 @@ Relevant fleet/discovery constraints from the current code:
     - operator-visible logical/display name
     - runtime/service env identity (`EE_ID`)
 12. Old configs missing logical instance names must normalize safely by defaulting the logical/display/runtime name to the existing inventory host key.
+13. Gap fill must rely on a fresh-enough discovery result from the current onboarding scan, not on arbitrarily old cached scan data.
+14. Per-config machine metadata can diverge across configs until a central machine registry exists; the rollout must tolerate that duplication explicitly.
 
 ---
 
@@ -544,6 +548,7 @@ Persistence rule for Phase 3:
 - onboarding batch scan must not call the current immediate-save persistence path once per machine as its primary control flow
 - prefer a buffered helper or explicit "save all scans" boundary so an abandoned batch does not leave a half-updated discovery cache by accident
 - the existing manual single-machine discovery flow may keep immediate-save behavior because it is already a one-machine action
+- gap fill in later phases should only trust scan results produced in the current onboarding session, or explicitly marked fresh by a timestamp/recency rule
 
 Environment-aware candidate filtering:
 
@@ -599,6 +604,12 @@ Expert-mode import naming rule:
 - default that prompt to the discovered service/runtime name so existing deployments remain recognizable
 - persist the chosen value as `r1setup_instance_logical_name`
 - use that logical name for grouped UI display and runtime `EE_ID`, with fallback to the prior host key for legacy instances
+
+Imported-running-service identity rule:
+
+- importing an already-running service must not be treated as an immediate live rename
+- a different logical name may result in a different rendered `EE_ID` in the service file, but the running service keeps its current live identity unless the operator performs the dedicated rename workflow
+- explicit rename remains a separate managed operation
 
 This guardrail only applies during batch onboarding discovery. The standalone `discover_and_import_existing_services()` flow (manual single-machine usage from Configuration Menu) keeps its existing reactive expert-mode promotion behavior.
 
@@ -693,6 +704,12 @@ Migration rule:
 - old configs that do not have `r1setup_instance_logical_name` must auto-normalize it to the existing host key
 - this keeps legacy display and runtime identity unchanged until the operator explicitly renames an instance
 
+Machine-label stability rule:
+
+- machine labels are treated as stable identifiers throughout Phases 0-5
+- do not add machine-label rename semantics implicitly as part of this rollout
+- if machine-label rename is needed later, it should be designed as a separate migration-safe feature, or backed by a hidden immutable machine ID
+
 Why later:
 
 - advanced mode compounds the naming, collision, and helper-mode complexity
@@ -774,6 +791,15 @@ Do not bundle Phase 1 through Phase 5 into one branch.
 ---
 
 ## Error Handling and Recovery
+
+### Concurrent Config Writes
+
+The machine-first flow increases the number of metadata-only save points. The implementation should assume that concurrent `r1setup` sessions against the same config are possible.
+
+Minimum requirement:
+
+- avoid silent clobbering where feasible
+- if true locking is not added in the early phases, document last-writer-wins behavior and warn when stale in-memory state is about to overwrite newer disk state
 
 ### Cancellation During Machine Collection
 
@@ -883,6 +909,7 @@ At every phase:
 - partial scan failure does not block other machines
 - the existing manual single-machine discovery flow still works through the extracted shared UI/validation helpers
 - candidates are filtered by config environment before selection; mismatched candidates shown as info-only
+- gap fill is only enabled from current-session or otherwise explicitly fresh scan results
 - machine with 2+ total services (any env) is registered as `expert` topology regardless of import count
 - simple-mode machine with 2+ total services triggers mode decision prompt (switch to advanced or skip)
 - choosing "switch to advanced" updates the onboarding session mode, registers machine as expert, shows env-matching candidates
@@ -890,6 +917,7 @@ At every phase:
 - machine with 1 total service stays `standard` topology, offered for import normally
 - there is no "import one and stay simple" option for multi-service machines
 - imported expert-mode candidates prompt for a logical/display name and persist it as `r1setup_instance_logical_name`
+- importing an already-running service with a different logical name does not by itself count as a live rename
 
 ### Phase 4 Tests
 
@@ -910,6 +938,7 @@ At every phase:
 - `r1setup_instance_logical_name` is persisted and displayed in fleet views
 - rendered runtime identity uses logical name for `EE_ID` with fallback to `inventory_hostname` for legacy instances
 - legacy expert instances without `r1setup_instance_logical_name` normalize forward without changing visible/runtime identity unexpectedly
+- machine-label rename is not introduced implicitly in this phase
 
 ### Manual Smoke Matrix
 
@@ -920,6 +949,7 @@ At every phase:
 | Simple mode, scan failure | machine remains registered-only |
 | Advanced mode, mixed machine states | imported services preserved, only clean remainder eligible for fresh creation |
 | Advanced mode, operator-chosen instance names | logical names appear in UI and map to runtime `EE_ID` while internal host keys remain stable |
+| Imported running service with new logical name | tracked logical name may differ from current live identity until explicit rename workflow is run |
 | Cancel before shell save | nothing persisted |
 | Cancel after shell save | machine-only shell remains valid and recoverable |
 | All machines have services | import all -> success messaging -> no deploy prompt |
@@ -949,6 +979,9 @@ At every phase:
 | Should early phases persist an authoritative config-wide `configuration_mode` field? | No | Keep config mode derived from topology until all expert-producing flows are unified |
 | In expert mode, can the operator choose a per-instance displayed/runtime name separate from the inventory host key? | Yes | Persist `r1setup_instance_logical_name`; use it for UI and `EE_ID` with legacy fallback |
 | Should expert-mode `EE_ID` keep following `inventory_hostname`? | No | `EE_ID` should follow the logical instance name, while `inventory_hostname` remains the stable internal host key |
+| Does importing a running service with a different logical name immediately rename the live service identity? | No | Live identity is preserved until the operator performs the dedicated rename workflow; service-file `EE_ID` changes alone are not treated as an immediate rename |
+| Can gap fill rely on old cached discovery data? | No | Fresh instance creation should depend on discovery results from the current onboarding scan, or a clearly defined recency policy |
+| Are machine labels expected to be freely mutable in early phases? | No | Treat them as stable identifiers for now; if later rename support is needed, design it separately or introduce a hidden immutable ID |
 | Is there a third config creation path? | Yes | `_create_new_configuration()` on R1Setup (~line 11738) is called from `configure_nodes_menu` option 4 when hosts already exist. Phase 1 must account for this path too. |
 | If new persisted machine-first metadata is added, do old configs need manual migration? | No | Old configs must auto-normalize on load and be rewritten forward on next save/activation |
 
@@ -999,6 +1032,15 @@ Neither matches the new machine-first-then-discover pattern. An operator who wan
 This gap is acknowledged and deferred. Phase 6 begins addressing it. Phase 7 documents the settled behavior.
 
 A longer-term direction would be to unify these into a single "Add Machine" flow that registers, scans, and optionally creates instances - mirroring the onboarding flow for a single machine.
+
+---
+
+## Additional Long-Term Safeguards
+
+- Cache freshness: discovery cache should carry enough timestamp/session context to distinguish "scanned just now during onboarding" from "stale historical scan."
+- Cross-config duplication: until a central registry exists, the same machine can still have divergent SSH details, spec probes, and cached discovery results in different configs. This is acceptable short term, but the UI and docs should not imply a global source of truth.
+- Concurrency: if file locking is deferred, add explicit warnings or conflict detection around save points that normalize metadata and write buffered scan results.
+- Secret handling: machine-first shells store SSH-access data even when no deployable hosts exist yet. Export, backup, debug, and support flows should treat those shells as sensitive configs, not as harmless empty shells.
 
 ---
 
