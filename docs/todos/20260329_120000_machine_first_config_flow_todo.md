@@ -1154,7 +1154,7 @@ Recommended per-phase closeout checklist:
   - New tests added to `tests/test_r1setup_core.py`:
     - `TestSharedConfigCreationPrimitives` (11 tests): prompt_new_config_name valid/invalid, prompt_new_config_environment calls set_mnl_app_env, prompt_node_count valid/zero, reset_inventory, collect_node_connection_entries duplicate_check/credential_reuse, finalize_new_config_save, generate_config_name delegation
     - `TestConfigCreationPathMigration` (4 tests): path1_calls_set_mnl_app_env, path1_enforces_duplicate_check, path2_uses_shared_primitives, path3_resets_inventory_before_delegating
-- Commit(s): (pending)
+- Commit(s): 0954ab0
 - Follow-up notes: No behavioral regressions. All three entry points preserve their caller-specific behavior while sharing mechanics.
 
 #### Phase 2
