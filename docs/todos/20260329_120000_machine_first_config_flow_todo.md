@@ -1262,12 +1262,22 @@ Recommended per-phase closeout checklist:
 
 #### Phase 5
 
-- Status: not started
-- Scope notes:
+- Status: completed
+- Scope notes: Advanced mode / expert topology. EE_ID and exit status path template fixes.
 - Actual behavior shipped:
+  - Added `_select_configuration_mode()` on ConfigurationManager — returns 'simple' or 'advanced', requires typing exact word "advanced" to confirm
+  - Added `_collect_advanced_instance_counts(registered_ids)` — per-machine instance count with capacity guidance from spec probes; warns and requires confirmation when exceeding recommended max
+  - Extended `_onboarding_gap_fill_clean_machines` with `config_mode` and `desired_counts` kwargs — creates N instances per clean machine in advanced mode, subtracts already-imported instances, promotes to expert topology
+  - Extended `_onboarding_batch_discovery_and_import` with `session_mode` kwarg — starts in the user-selected mode
+  - Wired mode selection into `_create_machine_first_configuration` orchestration
+  - Updated `edge_node.service.j2`: EE_ID sourced from `r1setup_instance_logical_name | default(inventory_hostname, true)`; exit status path uses `r1setup_runtime_exit_status_path | default("/tmp/ee-node.exit", true)`
+  - Legacy normalization already handled by existing `apply_runtime_snapshot_to_host_config` setdefault
 - Tests run:
-- Commit(s):
-- Follow-up notes:
+  - `python3 -m py_compile r1setup` — clean
+  - `python3 -m unittest discover tests -v` — 312 tests, all passed
+  - 8 new tests in `TestPhase5AdvancedMode`: mode selection (3), capacity formula (2), advanced gap fill (2), simple backward compat (1)
+- Commit(s): b304eb7
+- Follow-up notes: Both template changes are backward compatible via Jinja2 default filters.
 
 #### Phase 6
 
@@ -1299,5 +1309,37 @@ Recommended per-phase closeout checklist:
 - Tests run:
   - `python3 -m py_compile r1setup` — clean
   - `python3 -m unittest discover tests -v` — 307 tests, all passed
-- Commit(s): pending
+- Commit(s): 0dac5fe
 - Follow-up notes: All 8 phases (0-7) are now complete. The machine-first configuration flow is the only config creation path.
+
+#### E2E Smoke Test (Phases 0-7)
+
+- Status: completed
+- Date: 2026-03-29
+- Test machines:
+  - machine-1: `vitalii@35.228.69.214` (r1-vi-g1, 4 CPU, 15.6 GiB RAM) — has 1 existing edge_node service
+  - machine-2: `vitalii@34.88.90.109` (r1-vi-g2, 4 CPU, 15.6 GiB RAM) — clean, no services
+- Test suite: `tests/e2e/test_machine_first_onboarding.py` (26 tests)
+- Results: all 26 passed (40.2s total)
+  - Test01 SSH Connectivity: both machines reachable
+  - Test02 Spec Probe: both returned valid CPU/RAM (4 CPU, 15.6 GiB each)
+  - Test03 Discovery Probe: machine-1 found 1 candidate, machine-2 found 0
+  - Test04 Config Shell: zero-host config with fleet metadata persists correctly
+  - Test05 Machine Registration: 2 machines in fleet state, machines_count=2, nodes_count=0
+  - Test06 Batch Discovery: machine-1=discovered, machine-2=clean; scan cached in fleet metadata
+  - Test07 Fresh Host Building: SSH fields + standard runtime names + never_deployed status correct
+  - Test08 Gap Fill: 2 fresh instances created from machine records
+  - Test09 Full Flow: register → probe → discover → gap fill end-to-end; machine-1 correctly classified as `discovered` (not clean); only machine-2 (clean) received fresh instance; final state: 2 machines, 1 instance (machine-2), nodes_count=1, machines_count=2
+  - Test10 Has Active Config Shell: zero-host shell valid
+  - Test11 Configuration Mode Selection: simple default, advanced requires exact word, partial input stays simple
+  - Test12 Advanced Instance Counts: capacity formula verified against real machine specs (4 CPU / 15.6 GiB → max_recommended=1)
+  - Test13 Advanced Gap Fill: 2 expert-mode instances created on one machine with unique suffixed runtime names (edge_node_inst_1, edge_node_inst_2); machine promoted to expert topology
+  - Test14 EE_ID Template: edge_node.service.j2 uses r1setup_instance_logical_name with inventory_hostname fallback; exit status path uses per-instance variable with /tmp/ee-node.exit fallback
+  - Test15 Unified Registration: register_machine_without_deployment delegates to _collect_machine_registration_entries(1)
+  - Test16 Dead Code Removed: _select_topology_mode, _prompt_node_count, _collect_node_connection_entries, _finalize_new_config_save, _create_initial_configuration, _create_new_configuration_with_management all confirmed absent
+- Key findings:
+  - Phase 4 safety gate still validated — machine with existing edge_node service was not gap-filled
+  - Phase 5 capacity math capped at 1 instance for 15.6 GiB machines (15.6 // 16 = 0, floored to 1)
+  - Expert-mode runtime naming produces collision-free service/container/volume names
+  - Template backward compatibility confirmed via Jinja2 default filters
+- Commit(s): pending

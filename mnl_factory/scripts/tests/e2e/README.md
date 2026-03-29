@@ -1,6 +1,6 @@
 # E2E Tests for Machine-First Onboarding Flow
 
-These tests exercise the Phases 0–4 machine-first onboarding flow against real
+These tests exercise the Phases 0–7 machine-first onboarding flow against real
 remote machines.  They require SSH access and are **not** part of the regular
 `python3 -m unittest discover tests` run (they live in a separate `e2e/`
 subdirectory that the default `discover` does not recurse into).
@@ -29,6 +29,8 @@ python3 -m unittest tests.e2e.test_machine_first_onboarding -v   # stdlib
 
 ## What Is Tested
 
+### Phases 0-4
+
 1. **SSH connectivity** — verify both machines are reachable
 2. **Spec probe** — verify CPU/RAM extraction works
 3. **Discovery probe** — verify remote discovery script runs and returns valid JSON
@@ -37,6 +39,14 @@ python3 -m unittest tests.e2e.test_machine_first_onboarding -v   # stdlib
 6. **Discovery scan** — verify scan results are cached in fleet metadata
 7. **Fresh host building** — verify inventory host entry is synthesized correctly
 8. **Gap fill** — verify fresh instances are added to inventory from machine records
-9. **Full onboarding flow** — verify the complete _create_machine_first_configuration
-   orchestration with real SSH connections
-10. **Cleanup** — all test state is created in temp directories; no side effects
+9. **Full onboarding flow** — verify complete orchestration with real SSH connections
+10. **Zero-host shell** — verify config shell validity without inventory hosts
+
+### Phases 5-7
+
+11. **Mode selection gate** — verify simple/advanced mode selection with exact-word confirmation
+12. **Advanced instance counts** — verify capacity math against real machine specs
+13. **Advanced gap fill** — verify multi-instance expert-mode creation with unique runtime names
+14. **EE_ID template** — verify edge_node.service.j2 uses logical name with fallback
+15. **Unified registration** — verify standalone register_machine delegates to shared helper
+16. **Dead code removal** — verify node-first methods are removed from codebase

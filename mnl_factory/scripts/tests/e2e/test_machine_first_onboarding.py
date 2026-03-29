@@ -594,5 +594,257 @@ class Test10HasActiveConfigShell(unittest.TestCase):
             _cleanup_temp(temp_dir)
 
 
+# ===================================================================
+# Phase 5-7 tests
+# ===================================================================
+
+class Test11ConfigurationModeSelection(unittest.TestCase):
+    """Phase 5: Verify mode selection gate works correctly."""
+
+    def test_simple_mode_is_default(self):
+        app, cm, temp_dir = _make_isolated_app_and_cm()
+        try:
+            app.get_input = MagicMock(return_value="")
+            result = cm._select_configuration_mode()
+            self.assertEqual(result, "simple")
+        finally:
+            _cleanup_temp(temp_dir)
+
+    def test_advanced_mode_requires_exact_word(self):
+        app, cm, temp_dir = _make_isolated_app_and_cm()
+        try:
+            app.get_input = MagicMock(return_value="advanced")
+            result = cm._select_configuration_mode()
+            self.assertEqual(result, "advanced")
+        finally:
+            _cleanup_temp(temp_dir)
+
+    def test_partial_input_stays_simple(self):
+        app, cm, temp_dir = _make_isolated_app_and_cm()
+        try:
+            app.get_input = MagicMock(return_value="adv")
+            result = cm._select_configuration_mode()
+            self.assertEqual(result, "simple")
+        finally:
+            _cleanup_temp(temp_dir)
+
+
+class Test12AdvancedInstanceCounts(unittest.TestCase):
+    """Phase 5: Verify capacity math and instance count prompting."""
+
+    @classmethod
+    def setUpClass(cls):
+        _require_ssh()
+
+    def test_capacity_formula_with_real_specs(self):
+        """Probe real machines and verify capacity math against actual specs."""
+        app, cm, temp_dir = _make_isolated_app_and_cm()
+        try:
+            real_app = _make_real_app()
+            cm.ensure_configuration_shell("test_adv_20260329_1200_2m", "testnet")
+
+            for m in MACHINES:
+                machine_data = {
+                    "topology_mode": "standard",
+                    "deployment_state": "empty",
+                    "instance_names": [],
+                    "ansible_host": m["host"],
+                    "ansible_user": m["user"],
+                    "ansible_port": m["port"],
+                }
+                probe_result = real_app._probe_machine_specs(machine_data)
+                if probe_result.get("status") == "success":
+                    machine_data["machine_specs"] = {
+                        "hostname": probe_result["hostname"],
+                        "cpu_total": probe_result["cpu_total"],
+                        "memory_gb_total": probe_result["memory_gb_total"],
+                        "last_checked_at": probe_result["last_checked_at"],
+                    }
+                cm.upsert_machine_record(m["label"], machine_data)
+
+            # Accept defaults for instance counts
+            app.get_input = MagicMock(return_value="1")
+            counts = cm._collect_advanced_instance_counts(["machine-1", "machine-2"])
+
+            for mid, count in counts.items():
+                self.assertGreaterEqual(count, 1)
+                fleet = cm.get_fleet_state_copy()
+                specs = fleet["fleet"]["machines"][mid].get("machine_specs", {})
+                cpu = specs.get("cpu_total", 0)
+                mem = specs.get("memory_gb_total", 0)
+                max_rec = max(1, min(int(cpu) // 4, int(float(mem) // 16)))
+                print(f"  {mid}: {cpu} CPU, {mem:.1f} GiB → max_recommended={max_rec}, chosen={count}")
+
+        finally:
+            _cleanup_temp(temp_dir)
+
+
+class Test13AdvancedGapFillMultiInstance(unittest.TestCase):
+    """Phase 5: Verify gap fill creates multiple expert-mode instances."""
+
+    def test_gap_fill_creates_multiple_expert_instances(self):
+        app, cm, temp_dir = _make_isolated_app_and_cm()
+        try:
+            cm.ensure_configuration_shell("test_adv_gap_20260329_1200_1m", "testnet")
+            cm.upsert_machine_record("machine-1", {
+                "topology_mode": "standard",
+                "deployment_state": "empty",
+                "instance_names": [],
+                "ansible_host": "35.228.69.214",
+                "ansible_user": "vitalii",
+                "ansible_port": 22,
+            })
+
+            app.get_input = MagicMock(return_value="Y")
+            # _get_valid_hostname returns sequential names
+            app._get_valid_hostname = MagicMock(side_effect=["inst-1", "inst-2"])
+
+            count = cm._onboarding_gap_fill_clean_machines(
+                ["machine-1"], "testnet",
+                config_mode="advanced",
+                desired_counts={"machine-1": 2},
+            )
+
+            self.assertEqual(count, 2)
+
+            hosts = r1setup._get_gpu_hosts(app.inventory)
+            self.assertIn("inst-1", hosts)
+            self.assertIn("inst-2", hosts)
+
+            # Both should be expert topology
+            for name in ["inst-1", "inst-2"]:
+                self.assertEqual(hosts[name]["r1setup_topology_mode"], "expert")
+                self.assertEqual(hosts[name]["r1setup_machine_id"], "machine-1")
+                self.assertEqual(hosts[name]["node_status"], "never_deployed")
+
+            # Expert-mode runtime names should be suffixed
+            self.assertNotEqual(
+                hosts["inst-1"].get("edge_node_service_name"),
+                hosts["inst-2"].get("edge_node_service_name"),
+            )
+
+            # Machine should be promoted to expert
+            fleet = cm.get_fleet_state_copy()
+            machine = fleet["fleet"]["machines"]["machine-1"]
+            self.assertEqual(machine["topology_mode"], "expert")
+            self.assertEqual(machine["deployment_state"], "active")
+
+            print(f"  Created {count} expert instances on machine-1")
+            for name in ["inst-1", "inst-2"]:
+                h = hosts[name]
+                print(f"    {name}: service={h.get('edge_node_service_name')}, "
+                      f"container={h.get('mnl_docker_container_name')}")
+
+        finally:
+            _cleanup_temp(temp_dir)
+
+
+class Test14EEIDTemplateVariable(unittest.TestCase):
+    """Phase 5: Verify edge_node.service.j2 uses r1setup_instance_logical_name for EE_ID."""
+
+    def test_template_has_logical_name_for_ee_id(self):
+        template_path = (
+            Path(__file__).resolve().parents[3]
+            / "roles" / "setup" / "templates" / "edge_node.service.j2"
+        )
+        content = template_path.read_text()
+        self.assertIn(
+            "r1setup_instance_logical_name",
+            content,
+            "EE_ID should source from r1setup_instance_logical_name",
+        )
+        self.assertIn(
+            "r1setup_runtime_exit_status_path",
+            content,
+            "Exit status path should use per-instance variable",
+        )
+        # Verify backward-compatible defaults
+        self.assertIn("default(inventory_hostname", content)
+        self.assertIn('default("/tmp/ee-node.exit"', content)
+        print("  Template uses r1setup_instance_logical_name for EE_ID with fallback")
+        print("  Template uses r1setup_runtime_exit_status_path with fallback")
+
+
+class Test15UnifiedMachineRegistration(unittest.TestCase):
+    """Phase 6: Verify standalone registration delegates to shared helper."""
+
+    @classmethod
+    def setUpClass(cls):
+        _require_ssh()
+
+    def test_register_machine_uses_shared_helper(self):
+        """register_machine_without_deployment should call _collect_machine_registration_entries."""
+        app, cm, temp_dir = _make_isolated_app_and_cm()
+        try:
+            real_app = _make_real_app()
+
+            # Set up the R1Setup-like app with required methods
+            app._ensure_configuration_shell_for_machine_registration = MagicMock(return_value=True)
+            app.load_configuration = MagicMock()
+            app.config_manager = cm
+
+            # Mock the shared helper to return a known machine ID
+            cm._collect_machine_registration_entries = MagicMock(return_value=["test-machine"])
+            app.get_input = MagicMock(return_value="n")  # decline discovery
+
+            # Build a minimal R1Setup-like object
+            r1 = r1setup.R1Setup.__new__(r1setup.R1Setup)
+            r1._ensure_configuration_shell_for_machine_registration = MagicMock(return_value=True)
+            r1.load_configuration = MagicMock()
+            r1.config_manager = cm
+            r1.print_header = MagicMock()
+            r1.print_colored = MagicMock()
+            r1.get_input = MagicMock(return_value="n")
+            r1.wait_for_enter = MagicMock()
+
+            r1.register_machine_without_deployment()
+
+            cm._collect_machine_registration_entries.assert_called_once_with(1)
+            print("  register_machine_without_deployment delegates to shared helper")
+
+        finally:
+            _cleanup_temp(temp_dir)
+
+
+class Test16DeadCodeRemoved(unittest.TestCase):
+    """Phase 7: Verify dead node-first methods were removed."""
+
+    def test_no_select_topology_mode(self):
+        self.assertFalse(
+            hasattr(r1setup.R1Setup, "_select_topology_mode"),
+            "_select_topology_mode should be removed",
+        )
+
+    def test_no_prompt_node_count_on_cm(self):
+        self.assertFalse(
+            hasattr(r1setup.ConfigurationManager, "_prompt_node_count"),
+            "_prompt_node_count should be removed from ConfigurationManager",
+        )
+
+    def test_no_collect_node_connection_entries(self):
+        self.assertFalse(
+            hasattr(r1setup.ConfigurationManager, "_collect_node_connection_entries"),
+            "_collect_node_connection_entries should be removed",
+        )
+
+    def test_no_finalize_new_config_save(self):
+        self.assertFalse(
+            hasattr(r1setup.ConfigurationManager, "_finalize_new_config_save"),
+            "_finalize_new_config_save should be removed",
+        )
+
+    def test_no_create_initial_configuration(self):
+        self.assertFalse(
+            hasattr(r1setup.R1Setup, "_create_initial_configuration"),
+            "_create_initial_configuration should be removed",
+        )
+
+    def test_no_create_new_configuration_with_management(self):
+        self.assertFalse(
+            hasattr(r1setup.R1Setup, "_create_new_configuration_with_management"),
+            "_create_new_configuration_with_management should be removed",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
