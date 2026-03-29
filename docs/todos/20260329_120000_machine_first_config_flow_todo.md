@@ -3,6 +3,8 @@
 Created At: `2026-03-29T12:00:00+03:00`
 Revised At: `2026-03-29T23:25:00+03:00`
 
+> **Status: Phases 0-4 complete.** Phases 5, 6, 7 not started.
+
 ## Problem
 
 The current config creation flow is still node-first:
@@ -1125,7 +1127,7 @@ Recommended per-phase closeout checklist:
     - `TestHasActiveConfigShell` (4 tests): true_when_hosts_exist, true_for_zero_host_shell, false_when_no_config, false_when_config_file_missing
     - `TestPhase0Wording` (3 tests): suggested_action_no_config_says_create_or_load, suggested_action_never_deployed_says_instances, deployment_display_tracking_live_says_fleet_status
   - Updated existing `test_suggested_action_prefers_review_for_tracked_live_nodes` to match new wording
-- Commit(s): 97921ed
+- Commit(s): 97921ed, 88357b6 (deployment_menu_default '9' → '0' for tracking_live_nodes)
 - Follow-up notes: None. All changes are additive or string-only. No behavioral regressions.
 
 #### Phase 1
@@ -1171,7 +1173,7 @@ Recommended per-phase closeout checklist:
   - Wired `_create_machine_first_configuration` into all 4 previous `_create_new_configuration_with_management` call sites:
     - `manage_configurations_menu` choice 1
     - `ensure_active_configuration` single-config fallback, multi-config choice 2, no-config choice 1
-  - `_create_new_configuration_with_management` retained as method (used by configure-nodes-menu paths)
+  - `_create_new_configuration_with_management` retained as method (used by configure-nodes-menu paths); later removed in 88357b6 when all paths were unified
   - Updated `ensure_active_configuration` gates: `check_hosts_config()` → `has_active_config_shell()` at initial check, after restore, and at both import-success validation points
   - Updated config listing display to show `"N machine(s), 0 instances"` when `machines_count > 0` and `nodes_count == 0` (single-config and multi-config views)
   - Updated `show_main_menu`: loads configuration for zero-host shells; shows `"Machines: N registered, 0 instances"` line
@@ -1182,8 +1184,8 @@ Recommended per-phase closeout checklist:
   - `python3 -m py_compile r1setup` — clean
   - `python3 -m unittest discover tests -v` — 275 tests, all passed
   - New tests in `TestPhase2MachineFirstConfig` (8 tests): generate_config_name unit_m/default_n, prompt_machine_count, collect_machine_registration_entries (basic + duplicate rejection), create_machine_first_configuration full flow, ensure_active_configuration accepts zero-host shell, ensure_active_configuration import uses has_active_config_shell
-- Commit(s): caaf990
-- Follow-up notes: All existing node-operation guards still use `check_hosts_config()` correctly. Fleet Summary already handled machines with no instances. `_add_node` and `_create_initial_configuration` remain unchanged per plan.
+- Commit(s): caaf990, 88357b6 (wired configure_nodes_menu and _create_new_configuration to machine-first flow; removed dead _create_new_configuration_with_management and _create_initial_configuration)
+- Follow-up notes: All existing node-operation guards still use `check_hosts_config()` correctly. Fleet Summary already handled machines with no instances. `_add_node` remains unchanged per plan. As of 88357b6, all config creation entry points converge on `_create_machine_first_configuration`.
 
 #### Phase 3
 

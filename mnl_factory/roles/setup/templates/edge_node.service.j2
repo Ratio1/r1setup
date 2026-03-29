@@ -26,11 +26,11 @@ ExecStart=/bin/sh -c '/usr/bin/docker run \
     --privileged \
     --cgroupns=host \
     --name {{ mnl_docker_container_name }} \
-    -e EE_ID={{ inventory_hostname }} \
+    -e EE_ID={{ r1setup_instance_logical_name | default(inventory_hostname, true) }} \
     -e R1SETUP_METADATA_PATH={{ mnl_r1setup_metadata_container_path }} \
     -v {{ mnl_docker_volume_path }}:{{ mnl_docker_persistent_folder }} \
     {{ mnl_docker_image_url }}; \
-    echo $? > /tmp/ee-node.exit'
+    echo $? > {{ r1setup_runtime_exit_status_path | default("/tmp/ee-node.exit", true) }}'
 
 ExecStartPost=-/bin/sh -c 'sleep 30; /usr/bin/docker image prune -a -f --filter "until=120h"'
 
@@ -38,7 +38,7 @@ ExecStartPost=-/bin/sh -c 'sleep 30; /usr/bin/docker image prune -a -f --filter 
 ExecStop=/usr/bin/docker stop -t 20 {{ mnl_docker_container_name }}
 
 # Exit code 10 causes a system reboot
-{{ mnl_commented_restart | default('') }}ExecStopPost=/bin/sh -c 'EXIT_STATUS=$(cat /tmp/ee-node.exit); if [ "$EXIT_STATUS" -eq 10 ]; then shutdown -r now; fi'
+{{ mnl_commented_restart | default('') }}ExecStopPost=/bin/sh -c 'EXIT_STATUS=$(cat {{ r1setup_runtime_exit_status_path | default("/tmp/ee-node.exit", true) }}); if [ "$EXIT_STATUS" -eq 10 ]; then shutdown -r now; fi'
 
 [Install]
 WantedBy=multi-user.target

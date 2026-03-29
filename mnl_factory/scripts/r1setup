@@ -1309,7 +1309,22 @@ class ConfigurationManager:
         self._save_config_with_metadata(config_name, env, nodes_count, update_symlink=update_symlink)
         self.app.print_colored(f"Configuration '{config_name}' created and activated!", 'green')
 
-    # -- Machine-first config-creation primitives (Phase 2) --
+    # -- Machine-first config-creation primitives (Phase 2+) --
+
+    def _select_configuration_mode(self) -> str:
+        """Prompt the operator for simple or advanced configuration mode.
+
+        Returns ``'simple'`` or ``'advanced'``.
+        """
+        self.app.print_colored("\nConfiguration Mode:", 'cyan', bold=True)
+        self.app.print_colored("  Simple   — One edge node instance per machine (recommended)", 'white')
+        self.app.print_colored("  Advanced — Multiple edge node instances per machine", 'white')
+        choice = self.app.get_input(
+            "\nType 'advanced' to enable advanced mode, or press Enter for simple", "",
+        ).strip().lower()
+        if choice == 'advanced':
+            return 'advanced'
+        return 'simple'
 
     def _prompt_machine_count(self) -> int:
         """Prompt the operator for the number of machines to register."""
@@ -1392,12 +1407,75 @@ class ConfigurationManager:
 
         return registered_ids
 
+    def _collect_advanced_instance_counts(self, registered_ids: List[str]) -> Dict[str, int]:
+        """For advanced mode, ask for desired instance count per machine.
+
+        Uses spec probe results to compute recommended max.
+        Returns ``{machine_id: desired_count}``.
+        """
+        counts: Dict[str, int] = {}
+        fleet_state = self._normalize_fleet_state(self.get_fleet_state_copy())
+        for mid in registered_ids:
+            machine = fleet_state['fleet']['machines'].get(mid, {})
+            specs = machine.get('machine_specs') or {}
+            cpu = specs.get('cpu_total')
+            mem = specs.get('memory_gb_total')
+
+            max_recommended = 1
+            specs_available = False
+            if cpu is not None and mem is not None:
+                try:
+                    max_recommended = max(1, min(
+                        int(cpu) // MIN_RECOMMENDED_NODE_CPU_CORES,
+                        int(float(mem) // MIN_RECOMMENDED_NODE_MEMORY_GIB),
+                    ))
+                    specs_available = True
+                except (TypeError, ValueError):
+                    pass
+
+            if specs_available:
+                specs_summary = self._format_machine_specs_summary(specs)
+                self.app.print_colored(
+                    f"\nMachine '{mid}': {specs_summary}", 'cyan',
+                )
+                self.app.print_colored(
+                    f"  Recommended max: {max_recommended} instance(s) "
+                    f"({MIN_RECOMMENDED_NODE_CPU_CORES} CPU / {MIN_RECOMMENDED_NODE_MEMORY_GIB:.0f} GiB each)",
+                    'cyan',
+                )
+            else:
+                self.app.print_colored(
+                    f"\nMachine '{mid}': specs unavailable — enter desired count manually.", 'yellow',
+                )
+
+            while True:
+                try:
+                    default = str(max_recommended) if specs_available else "1"
+                    count = int(self.app.get_input(
+                        f"How many instances on '{mid}'", default,
+                    ))
+                    if count < 1:
+                        self.app.print_colored("Must be at least 1.", 'red')
+                        continue
+                    if count > max_recommended and specs_available:
+                        confirm = self.app.get_input(
+                            f"  This exceeds the recommended max ({max_recommended}). Continue? (y/n)", "n",
+                        )
+                        if confirm.lower() != 'y':
+                            continue
+                    counts[mid] = count
+                    break
+                except ValueError:
+                    self.app.print_colored("Please enter a valid number.", 'red')
+        return counts
+
     def _create_machine_first_configuration(self) -> None:
         """Create a machine-first configuration: register machines, zero hosts."""
         self.app.print_section("Create New Configuration")
 
         custom_name = self._prompt_new_config_name()
         env = self._prompt_new_config_environment()
+        config_mode = self._select_configuration_mode()
         num_machines = self._prompt_machine_count()
         config_name = self._generate_config_name(num_machines, custom_name, unit='m')
 
@@ -1409,12 +1487,21 @@ class ConfigurationManager:
         # Register machines
         registered_ids = self._collect_machine_registration_entries(num_machines)
 
+        # Advanced mode: collect desired instance counts per machine
+        desired_counts: Dict[str, int] = {}
+        if config_mode == 'advanced':
+            desired_counts = self._collect_advanced_instance_counts(registered_ids)
+
         # Offer batch discovery and import
-        discovery_result = self._onboarding_batch_discovery_and_import(registered_ids, env)
+        discovery_result = self._onboarding_batch_discovery_and_import(
+            registered_ids, env, session_mode=config_mode,
+        )
 
         # Gap fill: create fresh instances on scanned-clean machines
         fresh_count = self._onboarding_gap_fill_clean_machines(
             discovery_result.get('clean_machine_ids', []), env,
+            config_mode=config_mode,
+            desired_counts=desired_counts,
         )
 
         imported = discovery_result.get('imported_total', 0)
@@ -1633,16 +1720,18 @@ class ConfigurationManager:
         self,
         registered_ids: List[str],
         config_env: str,
+        *,
+        session_mode: str = 'simple',
     ) -> Dict[str, Any]:
         """Offer batch discovery and import during onboarding.
 
-        Returns ``{scanned, imported_total, session_mode}``.
+        Returns ``{scanned, imported_total, session_mode, clean_machine_ids}``.
         """
         scan_choice = self.app.get_input(
             "Check these machines for existing edge_node services now? (Y/n)", "Y",
         )
         if scan_choice.lower() == 'n':
-            return {'scanned': False, 'imported_total': 0, 'session_mode': 'simple', 'clean_machine_ids': []}
+            return {'scanned': False, 'imported_total': 0, 'session_mode': session_mode, 'clean_machine_ids': []}
 
         # Batch scan
         self.app.print_section("Scanning Machines")
@@ -1666,7 +1755,6 @@ class ConfigurationManager:
             self.app.print_colored(f"  \u23ed Skipped: {', '.join(classified['skipped'])}", 'yellow')
 
         # Import flow for machines with candidates
-        session_mode = 'simple'
         imported_total = 0
         for mid in classified['discovered']:
             candidates = scan_buffer[mid]['candidates']
@@ -1711,13 +1799,25 @@ class ConfigurationManager:
 
         return host_config
 
-    def _onboarding_gap_fill_clean_machines(self, clean_ids: List[str], config_env: str) -> int:
+    def _onboarding_gap_fill_clean_machines(
+        self,
+        clean_ids: List[str],
+        config_env: str,
+        *,
+        config_mode: str = 'simple',
+        desired_counts: Optional[Dict[str, int]] = None,
+    ) -> int:
         """Offer to create fresh instances on scanned-clean machines.
+
+        In simple mode, creates one instance per machine.
+        In advanced mode, creates N instances per machine (from *desired_counts*),
+        minus any already-imported instances.
 
         Returns the number of fresh instances created.
         """
         if not clean_ids:
             return 0
+        desired_counts = desired_counts or {}
 
         self.app.print_section("Fresh Instance Creation")
         self.app.print_colored(
@@ -1725,10 +1825,12 @@ class ConfigurationManager:
             'cyan',
         )
         for mid in clean_ids:
-            self.app.print_colored(f"  {mid}", 'white')
+            target = desired_counts.get(mid, 1)
+            label = f"  {mid}" if target <= 1 else f"  {mid} ({target} planned)"
+            self.app.print_colored(label, 'white')
 
         create_choice = self.app.get_input(
-            "Create a fresh edge_node instance on each clean machine? (Y/n)", "Y",
+            "Create fresh edge_node instance(s) on clean machines? (Y/n)", "Y",
         )
         if create_choice.lower() == 'n':
             return 0
@@ -1736,37 +1838,56 @@ class ConfigurationManager:
         created_count = 0
         hosts = _get_gpu_hosts(self.app.inventory)
         for mid in clean_ids:
-            # Default host name = machine label (avoid collisions)
-            default_name = mid
-            if default_name in hosts:
-                suffix = 2
-                while f"{default_name}_{suffix}" in hosts:
-                    suffix += 1
-                default_name = f"{default_name}_{suffix}"
-
-            host_name = self.app._get_valid_hostname(
-                f"Instance name for machine '{mid}'", default_name,
+            # Determine how many instances to create
+            fleet_state = self._normalize_fleet_state(self.get_fleet_state_copy())
+            existing_count = len(
+                fleet_state.get('fleet', {}).get('machines', {}).get(mid, {}).get('instance_names', [])
             )
-            while host_name in hosts:
-                self.app.print_colored(f"Instance '{host_name}' already exists.", 'red')
+            instance_target = max(0, desired_counts.get(mid, 1) - existing_count)
+            if instance_target <= 0:
+                continue
+
+            is_expert = config_mode == 'advanced' and instance_target > 1
+            topology = 'expert' if is_expert else 'standard'
+
+            if is_expert:
+                self.upsert_machine_record(mid, {'topology_mode': 'expert'})
+
+            for j in range(instance_target):
+                # Generate default name
+                if instance_target == 1:
+                    default_name = mid
+                else:
+                    default_name = f"{mid}-{j + 1}"
+                if default_name in hosts:
+                    suffix = 2
+                    while f"{default_name}_{suffix}" in hosts:
+                        suffix += 1
+                    default_name = f"{default_name}_{suffix}"
+
                 host_name = self.app._get_valid_hostname(
                     f"Instance name for machine '{mid}'", default_name,
                 )
+                while host_name in hosts:
+                    self.app.print_colored(f"Instance '{host_name}' already exists.", 'red')
+                    host_name = self.app._get_valid_hostname(
+                        f"Instance name for machine '{mid}'", default_name,
+                    )
 
-            host_config = self._build_fresh_host_entry(mid, host_name)
-            hosts[host_name] = host_config
+                host_config = self._build_fresh_host_entry(mid, host_name, topology_mode=topology)
+                hosts[host_name] = host_config
 
-            # Update fleet: link instance to machine, mark active
-            self.upsert_machine_record(mid, {
-                'deployment_state': 'active',
-                'instance_names': sorted(set(
-                    self.get_fleet_state_copy()['fleet']['machines'].get(mid, {}).get('instance_names', [])
-                    + [host_name]
-                )),
-            })
+                # Update fleet: link instance to machine, mark active
+                self.upsert_machine_record(mid, {
+                    'deployment_state': 'active',
+                    'instance_names': sorted(set(
+                        self.get_fleet_state_copy()['fleet']['machines'].get(mid, {}).get('instance_names', [])
+                        + [host_name]
+                    )),
+                })
 
-            self.app.print_colored(f"  \u2713 Instance '{host_name}' created on machine '{mid}'.", 'green')
-            created_count += 1
+                self.app.print_colored(f"  \u2713 Instance '{host_name}' created on machine '{mid}'.", 'green')
+                created_count += 1
 
         # Save inventory with new hosts
         config_name = self.active_config.get('config_name')
