@@ -1,7 +1,7 @@
 # Machine-First Configuration Flow
 
 Created At: `2026-03-29T12:00:00+03:00`
-Revised At: `2026-03-29T22:40:00+03:00`
+Revised At: `2026-03-29T23:25:00+03:00`
 
 ## Problem
 
@@ -42,11 +42,145 @@ After this change:
 
 ## Non-Goals
 
-- changing the fleet-state schema
+- breaking existing saved configurations
 - changing the existing discovery candidate normalization logic
 - changing migration planning/execution
 - changing `register_machine_without_deployment` in the same PR as the onboarding refactor
 - rewriting every menu in one step from "node" to "machine"
+
+## Backward Compatibility And Migration Strategy
+
+Compatibility is mandatory. The machine-first rollout must not strand operators with older saved configs.
+
+Stable rules:
+
+- existing configs must continue to load successfully after upgrade
+- old configs do not need a manual export/import cycle
+- additive metadata/schema changes are allowed only when they auto-normalize on load and auto-persist forward on the next save
+- old config filenames do not need to be renamed retroactively
+
+### Compatibility Model
+
+Keep the current distinction explicit:
+
+- `check_hosts_config()` continues to mean: "this config has deployable inventory hosts"
+- a new helper should be introduced for the broader concept: "this config has a valid active configuration shell, even if it currently has zero hosts"
+
+Recommended helper names:
+
+- `has_active_config_shell()`
+- or `check_active_configuration_shell()`
+
+Do not silently redefine `check_hosts_config()` to return true for zero-host shells. Too much existing code already uses it to gate host/instance operations.
+
+### Schema Evolution Policy
+
+If the final design introduces new persisted config metadata such as:
+
+- `config_creation_style`
+- `machines_count`
+- other machine-first-only config fields
+
+then:
+
+1. bump `CONFIG_SCHEMA_VERSION`
+2. add one normalization helper for config metadata, similar in spirit to the existing fleet-state normalization path
+3. run that normalization on:
+   - active-config load
+   - named-config load
+   - normal config load
+   - config save
+4. rewrite normalized metadata back to disk on the next save/activation
+
+Recommended normalization entry point:
+
+- `_normalize_config_metadata(metadata, inventory)`
+
+This should:
+
+- backfill missing new fields for legacy configs
+- infer safe defaults from existing persisted state
+- avoid destructive rewrites of inventory hosts
+
+### Config Mode Compatibility
+
+For Phases 0-5, do not introduce an authoritative persisted config-wide `configuration_mode` field.
+
+Compatibility-safe rule:
+
+- the persisted truth remains per-machine `topology_mode` plus per-host `r1setup_topology_mode`
+- onboarding may track `simple` vs `advanced` as flow/session state while the wizard is running
+- any config-wide "mode" shown in UI should be derived from normalized persisted state, not treated as a separate source of truth
+
+Derived rule:
+
+- `advanced` if any machine in fleet metadata is `expert`
+- `advanced` if any persisted or derived host has `r1setup_topology_mode='expert'`
+- otherwise `simple`
+
+This avoids introducing a second authoritative mode flag that older flows such as manual discovery and `_add_node` could fail to maintain.
+
+### Legacy Config Mode Inference
+
+If a persisted config-level mode is introduced in a later cleanup phase, old configs missing that field should be inferred as follows:
+
+- `advanced` if any machine in fleet metadata is already `expert`
+- `advanced` if any persisted or derived host has `r1setup_topology_mode='expert'`
+- otherwise `simple`
+
+This preserves the meaning of already-existing expert-mode deployments without requiring manual migration.
+
+### Metadata Naming Compatibility
+
+Keep existing `nodes_count` semantics unchanged for backward compatibility:
+
+- `nodes_count` continues to mean deployable inventory host count
+- machine-first flows may legitimately have `nodes_count=0` after registration-only completion
+
+Additive machine-first metadata is allowed:
+
+- introduce `machines_count` as the count of registered machines in fleet metadata
+- old configs missing `machines_count` should infer it from normalized fleet metadata, or `0` if no machines are registered
+
+UI guidance:
+
+- config lists and summary lines must not present a machine-first shell as merely `0 node(s)` without context
+- when `machines_count > 0` and `nodes_count == 0`, prefer wording such as `3 machines, 0 instances`
+- older views that still rely on `nodes_count` alone should be updated rather than redefining the field
+
+### Config Naming Compatibility
+
+Do not globally redefine `_generate_config_name()` in a way that rewrites old assumptions for every caller.
+
+Preferred implementation:
+
+- extend `_generate_config_name(count, custom_name, *, unit='n')`
+- default stays `unit='n'` for existing node-first callers
+- machine-first flows call it with `unit='m'`
+
+Result:
+
+- old config names stay unchanged
+- machine-first shells avoid misleading names like `0n`
+- rename/restore flows remain backward compatible
+
+### Zero-Host Shell Compatibility
+
+A machine-only configuration shell must be considered valid for:
+
+- startup activation
+- config restore/relink
+- config switching
+- fleet summary
+- machine registration/discovery flows
+
+But it must still be considered insufficient for:
+
+- node operations
+- node log streaming
+- node deployment status actions that require inventory hosts
+
+This is why the new shell-valid helper must exist alongside the old host-valid helper.
 
 ## Product Decisions
 
@@ -59,6 +193,10 @@ After this change:
 - Discovery/import must stay explicit and selective.
 - Fresh instance creation must not happen after a failed scan or after the user declined import of discovered services.
 - Existing saved configs remain backward compatible.
+- If additive metadata fields are introduced, old configs will be auto-normalized to the new format on load/save.
+- Config-wide simple/advanced state should remain derived, not authoritative, during the early rollout phases.
+- Inventory host keys may remain stable internal identifiers even when the operator chooses a separate display/runtime name for an instance.
+- In expert mode, the operator should be able to choose a logical name for each `edge_node` instance; that logical name is displayed in the UI and applied as the runtime `EE_ID`.
 
 ---
 
@@ -98,6 +236,12 @@ Relevant fleet/discovery constraints from the current code:
 7. Fresh standard-mode instance creation is only safe on a machine whose scan succeeded and found zero candidates.
 8. If a scan fails, or if the operator declines import of discovered services, the machine should remain registered-only until the operator makes a separate explicit decision.
 9. A zero-host configuration shell must behave consistently across menus that currently equate "configured" with "has inventory hosts".
+10. Startup/recovery flows currently depend on `check_hosts_config()` as well, so zero-host shell support must cover activation and restore paths, not only interactive menus.
+11. Expert-mode instance naming must distinguish between:
+    - stable internal inventory host key
+    - operator-visible logical/display name
+    - runtime/service env identity (`EE_ID`)
+12. Old configs missing logical instance names must normalize safely by defaulting the logical/display/runtime name to the existing inventory host key.
 
 ---
 
@@ -130,6 +274,7 @@ Relevant fleet/discovery constraints from the current code:
 9. Gap fill:
    - simple mode: offer fresh instance creation only on scanned-clean machines
    - advanced mode: offer fresh instance creation for the remaining planned capacity only on scanned-clean machines
+   - advanced mode: prompt for a logical/display name for each created instance
 10. If no fresh instances were created:
    - do not show a deploy prompt
    - send the operator to Fleet Summary / Node Status guidance instead
@@ -141,6 +286,7 @@ Relevant fleet/discovery constraints from the current code:
 - Use `machine` for SSH registration, fleet summaries, and discovery scan steps.
 - Use `instance` for deployable logical entries that become inventory hosts.
 - Avoid changing existing low-level SSH prompts inside `_configure_single_node`; those are connection prompts, not topology prompts.
+- In expert mode, distinguish `inventory key` from `instance name` in prompts and summaries. The operator-facing name is the logical/display/runtime name, not necessarily the internal inventory host key.
 
 ---
 
@@ -231,6 +377,7 @@ Changes:
 - in `_get_deployment_display_state()`, keep the tracked-live-nodes posture but default the deployment menu to review/status instead of deploy
 - update operator-facing hint text so tracked-live configurations steer toward review first
 - avoid over-broad "machines" wording in deployment guidance; prefer `instances` or `configuration`
+- introduce a shell-valid helper without changing the meaning of `check_hosts_config()`
 
 Suggested copy:
 
@@ -243,6 +390,7 @@ Why first:
 - very low risk
 - aligns the UI with the current discovery/import reality
 - easy to test independently
+- establishes the helper split needed for later zero-host-shell support
 
 ### Phase 1: Shared Config-Creation Primitives
 
@@ -258,6 +406,7 @@ Approach:
   - `_collect_node_connection_entries(...)` on `ConfigurationManager`
   - `_reset_inventory_for_new_config()` on `ConfigurationManager`
   - `_finalize_new_config_save(config_name, env, nodes_count, *, update_symlink=True)` on `ConfigurationManager`
+  - `_normalize_config_metadata(metadata, inventory)` on `ConfigurationManager` if new persisted metadata fields are introduced
 - the shared collection helper should take flags for:
   - `allow_previous_config_reuse`
   - `enforce_duplicate_name_check`
@@ -275,6 +424,7 @@ Shared in Phase 1:
 - duplicate-name validation
 - credential reuse support
 - metadata save path
+- config-metadata normalization path for backward compatibility
 
 Caller-specific in Phase 1:
 
@@ -286,6 +436,7 @@ Normalized in Phase 1:
 
 - both paths must call `set_mnl_app_env(env)`
 - both paths must reject duplicate logical host names
+- old configs with missing new metadata fields must be normalized forward without user action
 
 Deferred until later phases:
 
@@ -324,6 +475,10 @@ Changes:
 - save a configuration shell with registered machine records and zero hosts
 - preserve explicit machine labels as `machine_id`
 - use machine count, not host count, for machine-first config naming
+- initialize additive metadata for machine-first shells:
+  - `nodes_count=0`
+  - `machines_count=<registered machine count>`
+  - optional `config_creation_style='machine_first'`
 
 Out of scope:
 
@@ -338,6 +493,13 @@ Mandatory audit in this phase:
 
 - review every menu/path that currently uses "has hosts" as a proxy for "has usable configuration"
 - explicitly test and, if needed, adapt:
+  - every current `check_hosts_config()` gate, classifying it as:
+    - "must still require deployable hosts"
+    - or "should accept a valid zero-host shell"
+  - `ensure_active_configuration()`
+  - active-config restore/relink behavior
+  - import/restore success checks that currently re-check `check_hosts_config()`
+  - startup status-refresh and startup service-update guards
   - main menu summary line
   - configuration menu current-status block
   - deployment menu entry behavior
@@ -349,6 +511,7 @@ Required zero-host config behavior:
 - a configuration shell with registered machines but zero hosts is a valid active configuration
 - Fleet Summary must show registered machines with `No Instances`
 - menus must not misreport this state as "no config exists"
+- startup must not force-create or re-select another config just because the active shell currently has zero hosts
 
 ### Phase 3: Batch Discovery Using Cached Candidates
 
@@ -360,7 +523,8 @@ Changes:
 
 - add batch scan helper that:
   - scans each registered machine once
-  - persists scan results in fleet metadata
+  - buffers scan results in memory during the batch
+  - persists scan results in fleet metadata at one explicit save boundary after the scan phase completes
   - summarizes clean / discovered / failed / skipped states
 - extract the current discovery review/import UX into reusable pieces:
   - one helper to load cached candidates for a machine
@@ -369,9 +533,17 @@ Changes:
     - environment mismatch confirmation
     - cross-config claim warnings
     - expert-mode confirmation when needed
+    - expert-mode logical-name prompt for imported instances
 - add a new onboarding-facing import helper that consumes cached candidates without rescanning
 - keep `discover_and_import_existing_services()` untouched as the entry point for manual single-machine usage; refactor its internals to call the same shared selection/validation/import helpers after its live scan
 - add a simple-mode multi-candidate guardrail (see below)
+- keep config mode derived from topology rather than persisting an authoritative `configuration_mode` field in this phase
+
+Persistence rule for Phase 3:
+
+- onboarding batch scan must not call the current immediate-save persistence path once per machine as its primary control flow
+- prefer a buffered helper or explicit "save all scans" boundary so an abandoned batch does not leave a half-updated discovery cache by accident
+- the existing manual single-machine discovery flow may keep immediate-save behavior because it is already a one-machine action
 
 Environment-aware candidate filtering:
 
@@ -412,7 +584,7 @@ Select (1-2) [2]:
 
 Behavior per choice:
 
-- Option 1: switch config mode to advanced; register machine with `expert` topology; show only environment-matching candidates for import selection
+- Option 1: switch the onboarding flow to advanced for the remainder of the session; register machine with `expert` topology; show only environment-matching candidates for import selection
 - Option 2: leave machine registered-only; skip to next machine in batch (default - safe choice)
 
 There is no "import one and stay simple" option. A machine running multiple services is expert regardless of how many this config tracks.
@@ -421,7 +593,25 @@ When the config is already in advanced mode, no mode-switch prompt is needed. Th
 
 When a machine has only 1 discovered service total, it stays `standard` topology and the matching service is offered for import normally.
 
+Expert-mode import naming rule:
+
+- when importing an instance onto an expert-topology machine, prompt for an operator-visible logical name
+- default that prompt to the discovered service/runtime name so existing deployments remain recognizable
+- persist the chosen value as `r1setup_instance_logical_name`
+- use that logical name for grouped UI display and runtime `EE_ID`, with fallback to the prior host key for legacy instances
+
 This guardrail only applies during batch onboarding discovery. The standalone `discover_and_import_existing_services()` flow (manual single-machine usage from Configuration Menu) keeps its existing reactive expert-mode promotion behavior.
+
+This difference is intentional for rollout safety:
+
+- onboarding is opinionated and conservative
+- manual discovery remains backward compatible in early phases
+- a later cleanup phase may choose to align the two flows once the machine-first path is proven
+
+Temporary compatibility note:
+
+- after Phase 3, onboarding discovery and manual discovery intentionally do not behave identically on multi-service machines
+- this must be documented in operator docs and release notes until the flows are unified
 
 Result:
 
@@ -462,8 +652,10 @@ Fresh-host builder requirements:
 - copy SSH access from the machine record, not from a new `_configure_single_node()` prompt
 - set `r1setup_machine_id` from the registered machine label
 - set `r1setup_topology_mode='standard'`
+- set `r1setup_instance_logical_name` to the operator-visible instance name; default to inventory host key for legacy/simple behavior
 - apply resolved standard runtime names
 - initialize status and runtime metadata exactly as a newly configured undeployed instance expects
+- persist through the same normalized metadata/save path used by old configs so upgraded configs remain structurally valid
 
 ### Phase 5: Advanced Mode / Expert Topology
 
@@ -475,11 +667,31 @@ Changes:
 
 - add explicit advanced-mode confirmation
 - ask for desired instance count per machine
+- for each expert-mode instance to import or create, prompt for a logical/display name the operator chooses
 - compute capacity guidance from spec probe results
 - after discovery import, calculate remaining capacity gap per machine
 - reuse the fresh-host builder from Phase 4 for expert-mode host synthesis
 - offer fresh instance creation only for the unfilled remainder on scanned-clean machines
 - keep expert-mode promotion explicit and visible
+
+Expert-mode naming rules:
+
+- preserve a stable internal inventory host key for persistence and references
+- store the operator-chosen instance name in `r1setup_instance_logical_name`
+- use `r1setup_instance_logical_name` in grouped fleet views and other operator-facing summaries
+- use `r1setup_instance_logical_name` as the default source for runtime `EE_ID`
+- keep backward-compatible fallback to `inventory_hostname` when `r1setup_instance_logical_name` is missing
+
+Implementation surfaces to align in this phase:
+
+- inventory host synthesis and import paths must preserve or prompt for `r1setup_instance_logical_name`
+- `edge_node.service` rendering must source `EE_ID` from `r1setup_instance_logical_name | default(inventory_hostname, true)`
+- startup-config / rename maintenance paths that currently rewrite `EE_ID` from `inventory_hostname` must be updated to use the logical name instead
+
+Migration rule:
+
+- old configs that do not have `r1setup_instance_logical_name` must auto-normalize it to the existing host key
+- this keeps legacy display and runtime identity unchanged until the operator explicitly renames an instance
 
 Why later:
 
@@ -569,9 +781,15 @@ If the operator cancels (Ctrl-C) before the configuration shell is saved, nothin
 
 ### Partial Failure During Machine Collection
 
-If SSH validation or spec probe fails for one machine in a batch, save the machines that succeeded so far and report the failure. The operator can fix or add the failed machine later via Register Machine.
+Collection should stay in memory until the normal save boundary.
 
-Do not roll back previously registered machines on a mid-batch failure.
+Recommended behavior on one-machine failure:
+
+- offer retry for that machine
+- allow skip of that machine and continue the batch
+- only persist the successfully collected machines when the operator completes the batch normally
+
+Do not silently persist a partial shell in the middle of the collection loop unless the user explicitly completes or confirms that outcome.
 
 ### Spec Probe Failure
 
@@ -635,6 +853,7 @@ At every phase:
 - tracked-live deployment menu default points to review/status
 - suggested-action wording is updated
 - no-config guidance uses configuration wording
+- shell-valid helper exists and does not change `check_hosts_config()` semantics
 
 ### Phase 1 Tests
 
@@ -642,6 +861,8 @@ At every phase:
 - environment persistence stays correct
 - duplicate-name validation stays correct
 - credential reuse stays correct
+- legacy configs missing new metadata fields normalize forward on load/save without inventory loss
+- derived config mode remains consistent with persisted topology; no separate authoritative config-mode write is required
 
 ### Phase 2 Tests
 
@@ -649,21 +870,26 @@ At every phase:
 - operator-entered machine labels become `machine_id`
 - no inventory instances are created during registration-only completion
 - Fleet Summary shows registered machines with `No Instances` and no false running/deployed status
+- `ensure_active_configuration()` accepts a valid zero-host active shell
+- restore/import paths do not reject a zero-host shell as "no config"
+- config summaries show machine-aware metadata such as `N machines, 0 instances` rather than only `0 node(s)`
 
 ### Phase 3 Tests
 
 - batch scan scans each machine once
 - cached scan results are persisted
+- batch scan persists through one explicit save boundary, not accidental per-machine partial writes
 - import-from-cached-candidates does not rescan
 - partial scan failure does not block other machines
 - the existing manual single-machine discovery flow still works through the extracted shared UI/validation helpers
 - candidates are filtered by config environment before selection; mismatched candidates shown as info-only
 - machine with 2+ total services (any env) is registered as `expert` topology regardless of import count
 - simple-mode machine with 2+ total services triggers mode decision prompt (switch to advanced or skip)
-- choosing "switch to advanced" promotes config mode, registers machine as expert, shows env-matching candidates
+- choosing "switch to advanced" updates the onboarding session mode, registers machine as expert, shows env-matching candidates
 - choosing "skip" leaves machine registered-only and proceeds to the next machine
 - machine with 1 total service stays `standard` topology, offered for import normally
 - there is no "import one and stay simple" option for multi-service machines
+- imported expert-mode candidates prompt for a logical/display name and persist it as `r1setup_instance_logical_name`
 
 ### Phase 4 Tests
 
@@ -680,6 +906,10 @@ At every phase:
 - capacity recommendation math is correct
 - remaining gap is `desired - imported - already-created`
 - expert-mode fresh hosts are synthesized through the shared fresh-host builder
+- expert-mode prompts capture an operator-visible logical instance name
+- `r1setup_instance_logical_name` is persisted and displayed in fleet views
+- rendered runtime identity uses logical name for `EE_ID` with fallback to `inventory_hostname` for legacy instances
+- legacy expert instances without `r1setup_instance_logical_name` normalize forward without changing visible/runtime identity unexpectedly
 
 ### Manual Smoke Matrix
 
@@ -689,6 +919,7 @@ At every phase:
 | Simple mode, existing services | import path only -> no deploy prompt unless fresh instances were also created |
 | Simple mode, scan failure | machine remains registered-only |
 | Advanced mode, mixed machine states | imported services preserved, only clean remainder eligible for fresh creation |
+| Advanced mode, operator-chosen instance names | logical names appear in UI and map to runtime `EE_ID` while internal host keys remain stable |
 | Cancel before shell save | nothing persisted |
 | Cancel after shell save | machine-only shell remains valid and recoverable |
 | All machines have services | import all -> success messaging -> no deploy prompt |
@@ -709,12 +940,17 @@ At every phase:
 | Broadly replace `node` wording with `machine` wording? | No | The product model is machine plus instance, not machine-only |
 | Should simple-mode onboarding silently promote to expert when discovery finds multiple services? | No | A multi-service machine must be managed in advanced mode or skipped; no "import one and stay simple" option |
 | Should `_generate_config_name()` stay `{count}n` for machine-first onboarding? | No | Machine-first flows should use machine count with an `m` suffix to avoid misleading `0n` names |
+| Should `nodes_count` be redefined to mean machines for machine-first shells? | No | Keep `nodes_count` as deployable-instance count; add `machines_count` instead |
 | Does `_add_node` change immediately as part of machine-first onboarding? | No | Keep it stable through the early phases; revisit once the machine-first path is proven |
 | Land as one PR? | No | The risk is too high; phase the rollout |
 | Can one config contain machines from different network environments? | No | One config = one `mnl_app_env`. The Docker image tag is derived from this config-wide setting. Mixed envs on one physical machine require separate configs (already supported via cross-config model). |
 | Should discovery show env-mismatched candidates as selectable? | No | Filter by config env automatically; show mismatched ones as info-only with guidance to create a separate config |
 | If a machine has 2 services but only 1 matches the config env, is the machine still expert? | Yes | Topology reflects the machine's real state (multi-service = expert), not just what this config imports |
+| Should early phases persist an authoritative config-wide `configuration_mode` field? | No | Keep config mode derived from topology until all expert-producing flows are unified |
+| In expert mode, can the operator choose a per-instance displayed/runtime name separate from the inventory host key? | Yes | Persist `r1setup_instance_logical_name`; use it for UI and `EE_ID` with legacy fallback |
+| Should expert-mode `EE_ID` keep following `inventory_hostname`? | No | `EE_ID` should follow the logical instance name, while `inventory_hostname` remains the stable internal host key |
 | Is there a third config creation path? | Yes | `_create_new_configuration()` on R1Setup (~line 11738) is called from `configure_nodes_menu` option 4 when hosts already exist. Phase 1 must account for this path too. |
+| If new persisted machine-first metadata is added, do old configs need manual migration? | No | Old configs must auto-normalize on load and be rewritten forward on next save/activation |
 
 ---
 
