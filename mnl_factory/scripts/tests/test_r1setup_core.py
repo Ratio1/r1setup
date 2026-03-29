@@ -1661,3 +1661,145 @@ class TestPhase2MachineFirstConfig(unittest.TestCase):
         src = inspect.getsource(r1setup.R1Setup.ensure_active_configuration)
         # The import-success checks should use has_active_config_shell
         self.assertIn("has_active_config_shell", src)
+
+
+class TestPhase3BatchDiscovery(unittest.TestCase):
+    """Tests for Phase 3 batch discovery and import primitives."""
+
+    def _make_cm(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {"config_name": "test_config"}
+        cm.fleet_state = {
+            "config_schema_version": 1,
+            "fleet": {
+                "machines": {
+                    "m-1": {"machine_id": "m-1", "ansible_host": "10.0.0.1", "ansible_user": "root"},
+                    "m-2": {"machine_id": "m-2", "ansible_host": "10.0.0.2", "ansible_user": "root"},
+                },
+                "instances": {},
+            },
+        }
+        return cm
+
+    def test_batch_discover_machines_classifies_results(self):
+        cm = self._make_cm()
+        # m-1 returns 1 candidate; m-2 returns clean
+        cm.app.discover_existing_edge_node_services = MagicMock(side_effect=[
+            {"status": "success", "candidates": [{"service_name": "edge_node"}]},
+            {"status": "success", "candidates": []},
+        ])
+        buffer = cm._batch_discover_machines(["m-1", "m-2"])
+        self.assertEqual(buffer["m-1"]["status"], "success")
+        self.assertEqual(len(buffer["m-1"]["candidates"]), 1)
+        self.assertEqual(buffer["m-2"]["status"], "success")
+        self.assertEqual(len(buffer["m-2"]["candidates"]), 0)
+
+    def test_batch_discover_machines_handles_error(self):
+        cm = self._make_cm()
+        cm.app.discover_existing_edge_node_services = MagicMock(
+            side_effect=Exception("connection refused"),
+        )
+        buffer = cm._batch_discover_machines(["m-1"])
+        self.assertEqual(buffer["m-1"]["status"], "error")
+        self.assertIn("connection refused", buffer["m-1"]["error"])
+
+    def test_batch_discover_machines_skips_unregistered(self):
+        cm = self._make_cm()
+        buffer = cm._batch_discover_machines(["nonexistent"])
+        self.assertEqual(buffer["nonexistent"]["status"], "skipped")
+
+    def test_persist_batch_discovery_calls_record_for_successful_only(self):
+        cm = self._make_cm()
+        cm.record_machine_discovery_scan = MagicMock()
+        scan_buffer = {
+            "m-1": {"status": "success", "candidates": [{"service_name": "edge_node"}]},
+            "m-2": {"status": "error", "candidates": [], "error": "fail"},
+            "m-3": {"status": "skipped", "candidates": [], "error": "not registered"},
+        }
+        cm._persist_batch_discovery_results(scan_buffer)
+        cm.record_machine_discovery_scan.assert_called_once_with("m-1", [{"service_name": "edge_node"}])
+
+    def test_classify_scan_results(self):
+        cm = self._make_cm()
+        scan_buffer = {
+            "m-1": {"status": "success", "candidates": [{"service_name": "x"}]},
+            "m-2": {"status": "success", "candidates": []},
+            "m-3": {"status": "error", "candidates": [], "error": "fail"},
+            "m-4": {"status": "skipped", "candidates": [], "error": "not registered"},
+        }
+        classified = cm._classify_scan_results(scan_buffer)
+        self.assertEqual(classified["discovered"], ["m-1"])
+        self.assertEqual(classified["clean"], ["m-2"])
+        self.assertEqual(classified["failed"], ["m-3"])
+        self.assertEqual(classified["skipped"], ["m-4"])
+
+    def test_onboarding_review_skips_when_no_env_match(self):
+        cm = self._make_cm()
+        candidates = [
+            {"service_name": "edge_node", "service_state": "active", "environment": "devnet"},
+        ]
+        result = cm._onboarding_review_machine_candidates("m-1", candidates, "testnet", "simple")
+        self.assertEqual(result["action"], "skipped")
+        self.assertEqual(result["imported_count"], 0)
+
+    def test_onboarding_review_simple_mode_guardrail_skip(self):
+        cm = self._make_cm()
+        # 2 services = needs expert; user chooses skip (default)
+        candidates = [
+            {"service_name": "edge_node", "service_state": "active", "environment": "testnet"},
+            {"service_name": "edge_node_2", "service_state": "active", "environment": "testnet"},
+        ]
+        cm.app.get_input = MagicMock(return_value="2")  # skip
+        result = cm._onboarding_review_machine_candidates("m-1", candidates, "testnet", "simple")
+        self.assertEqual(result["action"], "skipped")
+        self.assertIsNone(result["mode_switched_to"])
+
+    def test_onboarding_review_single_service_stays_standard(self):
+        cm = self._make_cm()
+        candidates = [
+            {"service_name": "edge_node", "service_state": "active", "environment": "testnet"},
+        ]
+        # User selects 'all' in candidate selection, provides name 'en1'
+        cm.app._select_discovery_candidates = MagicMock(return_value=candidates)
+        cm.find_runtime_identity_claims = MagicMock(return_value=[])
+        cm.upsert_machine_record = MagicMock()
+        cm.app._prompt_discovery_import_name = MagicMock(return_value="edge_node")
+        cm.app.import_discovery_candidates = MagicMock(return_value={
+            "status": "success", "imported_names": ["edge_node"], "topology_mode": "standard",
+        })
+        cm.app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {}}}}}
+
+        result = cm._onboarding_review_machine_candidates("m-1", candidates, "testnet", "simple")
+
+        self.assertEqual(result["action"], "imported")
+        self.assertEqual(result["imported_count"], 1)
+        self.assertIsNone(result["mode_switched_to"])
+        # Should NOT promote to expert for single service
+        cm.upsert_machine_record.assert_not_called()
+
+    def test_onboarding_batch_discovery_declined(self):
+        cm = self._make_cm()
+        cm.app.get_input = MagicMock(return_value="n")
+        result = cm._onboarding_batch_discovery_and_import(["m-1"], "testnet")
+        self.assertFalse(result["scanned"])
+        self.assertEqual(result["imported_total"], 0)
+
+    def test_create_machine_first_configuration_offers_discovery(self):
+        cm = self._make_cm()
+        cm._prompt_new_config_name = MagicMock(return_value="test")
+        cm._prompt_new_config_environment = MagicMock(return_value="testnet")
+        cm._prompt_machine_count = MagicMock(return_value=1)
+        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1m")
+        cm._reset_inventory_for_new_config = MagicMock()
+        cm.ensure_configuration_shell = MagicMock()
+        cm._collect_machine_registration_entries = MagicMock(return_value=["m-1"])
+        cm._onboarding_batch_discovery_and_import = MagicMock(
+            return_value={"scanned": True, "imported_total": 0, "session_mode": "simple"},
+        )
+        cm.app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {}}}}}
+        cm.app.wait_for_enter = MagicMock()
+
+        cm._create_machine_first_configuration()
+
+        cm._onboarding_batch_discovery_and_import.assert_called_once_with(["m-1"], "testnet")

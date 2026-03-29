@@ -1187,12 +1187,28 @@ Recommended per-phase closeout checklist:
 
 #### Phase 3
 
-- Status: not started
-- Scope notes:
+- Status: completed
+- Scope notes: Batch discovery using cached candidates. Reuses existing single-machine discovery/import infrastructure without modifying it.
 - Actual behavior shipped:
+  - Added 5 new methods on `ConfigurationManager`:
+    - `_batch_discover_machines(machine_ids)` — scans all registered machines, buffers results in memory without persisting during scan
+    - `_persist_batch_discovery_results(scan_buffer)` — one-shot persistence after all scans complete
+    - `_classify_scan_results(scan_buffer)` — categorizes machines into clean/discovered/failed/skipped
+    - `_onboarding_review_machine_candidates(machine_id, candidates, config_env, session_mode)` — per-machine import flow with env filtering, multi-service topology rule, simple-mode guardrail (switch to advanced or skip), cross-config warnings, logical name mapping, and import execution
+    - `_onboarding_batch_discovery_and_import(registered_ids, config_env)` — top-level orchestrator: offers scan, scans, persists, shows summary, drives per-machine import
+  - Updated `_create_machine_first_configuration` to call `_onboarding_batch_discovery_and_import` after machine registration
+  - Final summary is dynamic: shows imported count when imports occurred, shows guidance when no imports
+  - Environment filtering: candidates are automatically filtered by config env; mismatched shown as info-only
+  - Multi-service rule: machine with 2+ total services (any env) triggers expert topology requirement
+  - Simple-mode guardrail: 2-choice prompt (switch to advanced or skip); no "import one and stay simple" option
+  - Expert-mode import: reuses existing `_prompt_discovery_import_name` for logical name mapping
+  - Existing `discover_and_import_existing_services()` untouched as manual single-machine entry
 - Tests run:
-- Commit(s):
-- Follow-up notes:
+  - `python3 -m py_compile r1setup` — clean
+  - `python3 -m unittest discover tests -v` — 285 tests, all passed
+  - New tests in `TestPhase3BatchDiscovery` (10 tests): batch_discover classifies/handles_error/skips_unregistered, persist calls record for successful only, classify_scan_results, onboarding_review skips no env match/simple guardrail skip/single service stays standard, batch discovery declined, create_machine_first offers discovery
+- Commit(s): 1642565
+- Follow-up notes: The existing manual single-machine `discover_and_import_existing_services()` was not refactored to share the same UI helpers. This is intentional per the plan: onboarding is opinionated and conservative, manual discovery remains backward compatible. A later cleanup phase may unify the two flows.
 
 #### Phase 4
 

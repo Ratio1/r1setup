@@ -1409,16 +1409,252 @@ class ConfigurationManager:
         # Register machines
         registered_ids = self._collect_machine_registration_entries(num_machines)
 
+        # Offer batch discovery and import
+        discovery_result = self._onboarding_batch_discovery_and_import(registered_ids, env)
+
         # Final summary
         self.app.print_section("Configuration Summary")
         self.app.print_colored(f"Configuration '{config_name}' created and activated.", 'green')
-        self.app.print_colored(f"  {len(registered_ids)} machine(s) registered, 0 instances.", 'cyan')
-        self.app.print_colored(
-            "\n\U0001f4a1 Use 'Discover Services' to scan for existing edge_node services,\n"
-            "   or 'Fleet Summary' to review your registered machines.",
-            'cyan',
-        )
+        imported = discovery_result.get('imported_total', 0)
+        if imported > 0:
+            self.app.print_colored(
+                f"  {len(registered_ids)} machine(s), {imported} imported instance(s).", 'cyan',
+            )
+        else:
+            self.app.print_colored(
+                f"  {len(registered_ids)} machine(s) registered, 0 instances.", 'cyan',
+            )
+            self.app.print_colored(
+                "\n\U0001f4a1 Use 'Discover Services' to scan for existing edge_node services,\n"
+                "   or 'Fleet Summary' to review your registered machines.",
+                'cyan',
+            )
         self.app.wait_for_enter()
+
+    # -- Batch discovery primitives (Phase 3) --
+
+    def _batch_discover_machines(self, machine_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Scan registered machines for existing edge_node services.
+
+        Returns ``{machine_id: {status, candidates, error}}`` without persisting.
+        """
+        fleet_state = self._normalize_fleet_state(self.get_fleet_state_copy())
+        scan_buffer: Dict[str, Dict[str, Any]] = {}
+        for mid in machine_ids:
+            machine_record = fleet_state['fleet']['machines'].get(mid)
+            if not machine_record:
+                scan_buffer[mid] = {'status': 'skipped', 'candidates': [], 'error': 'not registered'}
+                continue
+            self.app.print_colored(f"  Scanning {mid}...", 'cyan', end='')
+            try:
+                result = self.app.discover_existing_edge_node_services(machine_record)
+                if result.get('status') == 'success':
+                    candidates = result.get('candidates', [])
+                    self.app.print_colored(
+                        f" \u2713 {len(candidates)} service(s) found" if candidates else " \u2713 clean",
+                        'green',
+                    )
+                    scan_buffer[mid] = {'status': 'success', 'candidates': candidates, 'error': None}
+                else:
+                    msg = result.get('message', 'unknown error')
+                    self.app.print_colored(f" \u2717 {msg}", 'red')
+                    scan_buffer[mid] = {'status': 'error', 'candidates': [], 'error': msg}
+            except Exception as e:
+                self.app.print_colored(f" \u2717 {e}", 'red')
+                scan_buffer[mid] = {'status': 'error', 'candidates': [], 'error': str(e)}
+        return scan_buffer
+
+    def _persist_batch_discovery_results(self, scan_buffer: Dict[str, Dict[str, Any]]) -> None:
+        """Persist all successful scan results after the batch completes."""
+        for mid, result in scan_buffer.items():
+            if result['status'] == 'success':
+                self.record_machine_discovery_scan(mid, result['candidates'])
+
+    def _classify_scan_results(self, scan_buffer: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
+        """Categorize scan results into clean / discovered / failed / skipped."""
+        classified: Dict[str, List[str]] = {'clean': [], 'discovered': [], 'failed': [], 'skipped': []}
+        for mid, data in scan_buffer.items():
+            if data['status'] == 'skipped':
+                classified['skipped'].append(mid)
+            elif data['status'] == 'error':
+                classified['failed'].append(mid)
+            elif data['candidates']:
+                classified['discovered'].append(mid)
+            else:
+                classified['clean'].append(mid)
+        return classified
+
+    def _onboarding_review_machine_candidates(
+        self,
+        machine_id: str,
+        candidates: List[Dict[str, Any]],
+        config_env: str,
+        session_mode: str,
+    ) -> Dict[str, Any]:
+        """Review and optionally import cached candidates for one machine during onboarding.
+
+        *session_mode* is ``'simple'`` or ``'advanced'``.
+        Returns ``{action, imported_count, mode_switched_to}``.
+        """
+        # 1. Separate env-matching vs mismatched candidates
+        matching = [
+            c for c in candidates
+            if c.get('environment') == config_env or c.get('environment') in ('', 'unknown')
+        ]
+        mismatched = [c for c in candidates if c not in matching]
+        total_count = len(candidates)
+
+        # 2. Display summary with env filtering
+        self.app.print_section(f"Machine {machine_id}: {total_count} service(s) found")
+        for c in matching:
+            self.app.print_colored(
+                f"  {c['service_name']} [{c['service_state']}] {c.get('environment', '?')}"
+                f"  \u2190 matches this config",
+                'green',
+            )
+        for c in mismatched:
+            self.app.print_colored(
+                f"  {c['service_name']} [{c['service_state']}] {c.get('environment', '?')}"
+                f"  \u2190 different environment",
+                'yellow',
+            )
+        if mismatched and matching:
+            self.app.print_colored(
+                f"\nOnly {config_env} services can be imported into this config.", 'white',
+            )
+
+        if not matching:
+            self.app.print_colored(
+                f"\nNo {config_env} services on this machine. Skipping.", 'yellow',
+            )
+            return {'action': 'skipped', 'imported_count': 0, 'mode_switched_to': None}
+
+        # 3. Multi-service topology rule: 2+ total services = expert
+        needs_expert = total_count >= 2
+
+        # 4. Simple-mode guardrail
+        if needs_expert and session_mode == 'simple':
+            self.app.print_colored(
+                f"\nMachine {machine_id} has {total_count} running services "
+                f"({len(matching)} match this config's environment).\n"
+                "This machine requires Advanced mode because multiple services share its resources.",
+                'yellow',
+            )
+            self.app.print_colored("\n  1) Switch to Advanced mode to import matching services")
+            self.app.print_colored("  2) Skip this machine for now")
+            choice = self.app.get_input("\nSelect (1-2)", "2")
+            if choice != '1':
+                return {'action': 'skipped', 'imported_count': 0, 'mode_switched_to': None}
+            session_mode = 'advanced'
+
+        # 5. Candidate selection (reuse existing UI)
+        fleet_state = self._normalize_fleet_state(self.get_fleet_state_copy())
+        machine_record = fleet_state['fleet']['machines'].get(machine_id, {})
+        selected = self.app._select_discovery_candidates(machine_record, matching)
+        if not selected:
+            return {
+                'action': 'skipped', 'imported_count': 0,
+                'mode_switched_to': 'advanced' if needs_expert and session_mode == 'advanced' else None,
+            }
+
+        # 6. Cross-config duplicate warnings
+        claims_warnings: List[str] = []
+        for candidate in selected:
+            claims = self.find_runtime_identity_claims(
+                machine_record, candidate['service_name'],
+                exclude_config_name=self.active_config.get('config_name'),
+            )
+            if claims:
+                for claim in claims:
+                    claims_warnings.append(
+                        f"  {candidate['service_name']} is also tracked in "
+                        f"'{claim['config_name']}' as '{claim['instance_name']}'"
+                    )
+        if claims_warnings:
+            self.app.print_colored("\n\u26a0 Cross-config warnings:", 'yellow')
+            for w in claims_warnings:
+                self.app.print_colored(w, 'yellow')
+            if self.app.get_input("Continue with import? (y/n)", "y").lower() != 'y':
+                return {'action': 'skipped', 'imported_count': 0, 'mode_switched_to': None}
+
+        # 7. Topology promotion if needed
+        final_topology = 'expert' if needs_expert else str(machine_record.get('topology_mode') or 'standard')
+        existing_instances = machine_record.get('instance_names', [])
+        if final_topology != 'expert' and (len(existing_instances) + len(selected)) > 1:
+            final_topology = 'expert'
+
+        if final_topology == 'expert' and str(machine_record.get('topology_mode') or 'standard') != 'expert':
+            self.upsert_machine_record(machine_id, {'topology_mode': 'expert'})
+
+        # 8. Logical name mapping
+        hosts = _get_gpu_hosts(self.app.inventory)
+        logical_name_map: Dict[str, str] = {}
+        for candidate in selected:
+            name = self.app._prompt_discovery_import_name(candidate, hosts)
+            if name is None:
+                return {'action': 'cancelled', 'imported_count': 0, 'mode_switched_to': None}
+            logical_name_map[candidate['service_name']] = name
+            hosts[name] = {}  # Reserve to prevent duplicates
+
+        # 9. Import
+        result = self.app.import_discovery_candidates(machine_id, selected, logical_name_map)
+        imported_count = len(result.get('imported_names', [])) if result.get('status') == 'success' else 0
+
+        return {
+            'action': 'imported',
+            'imported_count': imported_count,
+            'mode_switched_to': 'advanced' if needs_expert else None,
+        }
+
+    def _onboarding_batch_discovery_and_import(
+        self,
+        registered_ids: List[str],
+        config_env: str,
+    ) -> Dict[str, Any]:
+        """Offer batch discovery and import during onboarding.
+
+        Returns ``{scanned, imported_total, session_mode}``.
+        """
+        scan_choice = self.app.get_input(
+            "Check these machines for existing edge_node services now? (Y/n)", "Y",
+        )
+        if scan_choice.lower() == 'n':
+            return {'scanned': False, 'imported_total': 0, 'session_mode': 'simple'}
+
+        # Batch scan
+        self.app.print_section("Scanning Machines")
+        scan_buffer = self._batch_discover_machines(registered_ids)
+
+        # Persist all scan results after the batch completes
+        self._persist_batch_discovery_results(scan_buffer)
+
+        # Summary
+        classified = self._classify_scan_results(scan_buffer)
+        self.app.print_section("Discovery Summary")
+        if classified['clean']:
+            self.app.print_colored(f"  \u2713 Clean: {', '.join(classified['clean'])}", 'green')
+        if classified['discovered']:
+            for mid in classified['discovered']:
+                count = len(scan_buffer[mid]['candidates'])
+                self.app.print_colored(f"  \U0001f4e1 Found services: {mid} ({count} service(s))", 'cyan')
+        if classified['failed']:
+            self.app.print_colored(f"  \u2717 Failed: {', '.join(classified['failed'])}", 'red')
+        if classified['skipped']:
+            self.app.print_colored(f"  \u23ed Skipped: {', '.join(classified['skipped'])}", 'yellow')
+
+        # Import flow for machines with candidates
+        session_mode = 'simple'
+        imported_total = 0
+        for mid in classified['discovered']:
+            candidates = scan_buffer[mid]['candidates']
+            result = self._onboarding_review_machine_candidates(
+                mid, candidates, config_env, session_mode,
+            )
+            imported_total += result.get('imported_count', 0)
+            if result.get('mode_switched_to') == 'advanced':
+                session_mode = 'advanced'
+
+        return {'scanned': True, 'imported_total': imported_total, 'session_mode': session_mode}
 
     def _generate_config_name(self, nodes_count: int, custom_name: str = None, *, unit: str = 'n') -> str:
         """Generate a configuration name with user input, timestamp and metadata.
