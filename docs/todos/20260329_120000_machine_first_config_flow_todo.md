@@ -1041,6 +1041,15 @@ A longer-term direction would be to unify these into a single "Add Machine" flow
 - Cross-config duplication: until a central registry exists, the same machine can still have divergent SSH details, spec probes, and cached discovery results in different configs. This is acceptable short term, but the UI and docs should not imply a global source of truth.
 - Concurrency: if file locking is deferred, add explicit warnings or conflict detection around save points that normalize metadata and write buffered scan results.
 - Secret handling: machine-first shells store SSH-access data even when no deployable hosts exist yet. Export, backup, debug, and support flows should treat those shells as sensitive configs, not as harmless empty shells.
+- Phase 1 scope discipline: keep shared-helper extraction separate from machine-first behavior changes. If a Phase 1 PR starts changing onboarding semantics, split it.
+- Zero-host-shell support is a behavioral invariant, not just a UX cleanup. Startup, restore, relink, and activation paths must keep treating a valid zero-host shell as a real configuration.
+- Name semantics must stay explicit during implementation:
+  - `inventory_hostname` = stable internal inventory key
+  - `r1setup_instance_logical_name` = operator-facing logical/display name
+  - `EE_ID` = rendered runtime identity for future starts and explicit rename workflows
+- When the expert-name phase lands, update every `EE_ID` writer together, not only one template. At minimum this includes `edge_node.service.j2` and `update_node_names.yml`.
+- Downgrade expectations should be documented once machine-first additive metadata is introduced. Forward normalization is required; backward CLI compatibility should be treated as an explicit policy decision, not an assumption.
+- Even if true file locking is deferred, add tests or at least guarded code paths for stale-write/concurrent-save scenarios so metadata writes do not silently clobber newer disk state.
 
 ---
 
@@ -1063,3 +1072,107 @@ This would:
 - allow "add machine to config" to pick from already-known machines
 
 This requires backward compatibility with the current per-config fleet model and is explicitly out of scope for the machine-first onboarding work. It should be planned separately once the per-config machine-first flow is proven.
+
+---
+
+## Implementation Tracking
+
+This file is not only the design plan. It should also serve as the implementation ledger for the rollout.
+
+Process rule:
+
+- after each phase lands, update this file before or together with the code PR
+- record what actually shipped, what changed from the original phase plan, what tests were run, and the resulting commit SHA
+- if a phase is split into sub-PRs, record each sub-PR separately under that phase
+- if the implementation diverges materially from the planned behavior, add a short note explaining why
+
+Clean-history rule:
+
+- complete one phase at a time
+- run the relevant regression and phase-specific tests at the end of that phase
+- make a commit after the phase is green, before starting the next phase
+- do not batch multiple phases into one mixed implementation commit unless the plan is explicitly revised first
+
+Recommended per-phase closeout checklist:
+
+- phase behavior implemented
+- docs/plan updated to reflect actual shipped behavior
+- `python3 -m py_compile r1setup`
+- `python3 -m unittest discover tests -v`
+- targeted tests for the phase-specific surfaces
+- manual smoke check if the phase changes user-facing flow
+- commit created with a phase-scoped message
+
+### Implementation Log
+
+#### Phase 0
+
+- Status: not started
+- Scope notes:
+- Actual behavior shipped:
+- Tests run:
+- Commit(s):
+- Follow-up notes:
+
+#### Phase 1
+
+- Status: not started
+- Scope notes:
+- Actual behavior shipped:
+- Tests run:
+- Commit(s):
+- Follow-up notes:
+
+#### Phase 2
+
+- Status: not started
+- Scope notes:
+- Actual behavior shipped:
+- Tests run:
+- Commit(s):
+- Follow-up notes:
+
+#### Phase 3
+
+- Status: not started
+- Scope notes:
+- Actual behavior shipped:
+- Tests run:
+- Commit(s):
+- Follow-up notes:
+
+#### Phase 4
+
+- Status: not started
+- Scope notes:
+- Actual behavior shipped:
+- Tests run:
+- Commit(s):
+- Follow-up notes:
+
+#### Phase 5
+
+- Status: not started
+- Scope notes:
+- Actual behavior shipped:
+- Tests run:
+- Commit(s):
+- Follow-up notes:
+
+#### Phase 6
+
+- Status: not started
+- Scope notes:
+- Actual behavior shipped:
+- Tests run:
+- Commit(s):
+- Follow-up notes:
+
+#### Phase 7
+
+- Status: not started
+- Scope notes:
+- Actual behavior shipped:
+- Tests run:
+- Commit(s):
+- Follow-up notes:
