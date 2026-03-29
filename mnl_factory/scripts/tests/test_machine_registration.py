@@ -87,7 +87,6 @@ class TestMachineRegistrationPersistence(unittest.TestCase):
         app.print_debug = MagicMock()
         app.wait_for_enter = MagicMock()
         app._ensure_configuration_shell_for_machine_registration = MagicMock(return_value=True)
-        app._select_topology_mode = MagicMock(return_value="standard")
         app._extract_machine_access_config = MagicMock(return_value={
             "ansible_host": "10.0.0.9",
             "ansible_user": "root",

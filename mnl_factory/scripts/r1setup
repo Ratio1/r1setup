@@ -1386,6 +1386,9 @@ class ConfigurationManager:
                         f"  \u2713 {probe_result['hostname']}: {probe_result['cpu_total']} CPU, "
                         f"{probe_result['memory_gb_total']:.1f} GiB RAM", 'green',
                     )
+                    recommendation = self.assess_machine_resource_recommendation(machine_specs)
+                    if recommendation.get('status') != 'meets_recommendation':
+                        self.app.print_colored(f"  {recommendation['message']}", recommendation['color'])
                 else:
                     self.app.print_colored(
                         f"  \u26a0 Spec probe failed: {probe_result.get('message', 'unknown error')}", 'yellow',
@@ -9796,20 +9799,6 @@ class R1Setup:
 
         return success, output, execution_host_names, execution_inventory
 
-    def _select_topology_mode(self) -> str:
-        """Select the machine topology mode."""
-        self.print_colored("\nTopology Mode Options:")
-        self.print_colored("  1) standard  - One edge node per machine (recommended)")
-        self.print_colored("  2) expert    - Multiple edge nodes may share one machine")
-
-        while True:
-            choice = self.get_input("Select topology mode (1-2)", "1")
-            if choice == '1':
-                return 'standard'
-            if choice == '2':
-                return 'expert'
-            self.print_colored("Invalid choice. Please enter 1 or 2", 'red')
-
     def _build_machine_group_display_lines(
         self,
         machine_views: List[Dict[str, Any]],
@@ -10804,53 +10793,17 @@ PY"""
 
         self.print_header("Register Machine")
         self.load_configuration()
-        fleet_state = self.get_fleet_state_copy()
-        existing_machine_ids = set(fleet_state['fleet']['machines'].keys())
 
         self.print_colored("This flow registers a machine in the fleet without deploying an Edge Node.", 'cyan')
         self.print_colored("You can prepare it now and assign or migrate an instance later.", 'white')
         print()
 
-        while True:
-            machine_id = self._get_valid_hostname("Enter machine label", f"machine-{len(existing_machine_ids) + 1}")
-            if machine_id in existing_machine_ids:
-                self.print_colored(f"Machine '{machine_id}' already exists. Choose a different label.", 'red')
-                continue
-            break
+        registered_ids = self.config_manager._collect_machine_registration_entries(1)
+        if not registered_ids:
+            self.wait_for_enter()
+            return
 
-        topology_mode = self._select_topology_mode()
-        self.print_colored("\nCollecting SSH access details for this machine.", 'cyan')
-        machine_access = self._extract_machine_access_config(self._configure_single_node())
-
-        specs = {}
-        if self.get_input("Probe machine specs now? (Y/n)", "Y").lower() == 'y':
-            specs = self._probe_machine_specs(machine_access)
-            if specs.get('status') == 'success':
-                self.print_colored(
-                    f"Detected {specs['cpu_total']} CPU cores and {self.config_manager._format_machine_memory_gib(specs['memory_gb_total'])} GiB RAM on {specs['hostname']}.",
-                    'green',
-                )
-                recommendation = self.config_manager.assess_machine_resource_recommendation(specs)
-                self.print_colored(recommendation['message'], recommendation['color'])
-            else:
-                self.print_colored(f"Spec probe unavailable: {specs.get('message', 'unknown error')}", 'yellow')
-
-        machine_record = dict(machine_access)
-        machine_record.update({
-            'machine_id': machine_id,
-            'topology_mode': topology_mode,
-            'deployment_state': 'empty',
-            'instance_names': [],
-        })
-        if specs.get('status') == 'success':
-            machine_record['machine_specs'] = {
-                'hostname': specs['hostname'],
-                'cpu_total': specs['cpu_total'],
-                'memory_gb_total': specs['memory_gb_total'],
-                'last_checked_at': specs['last_checked_at'],
-            }
-
-        self.upsert_machine_record(machine_id, machine_record)
+        machine_id = registered_ids[0]
         self.print_colored(f"Machine '{machine_id}' registered successfully.", 'green')
         if self.get_input("Discover existing edge-node services on this machine now? (y/n)", "n").lower() == 'y':
             self.discover_and_import_existing_services(machine_id)

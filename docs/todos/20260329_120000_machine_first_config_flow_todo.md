@@ -1272,11 +1272,19 @@ Recommended per-phase closeout checklist:
 #### Phase 6
 
 - Status: not started
-- Scope notes:
+- Scope notes: Unify standalone machine registration with onboarding primitives. Remove duplicated per-machine registration logic.
 - Actual behavior shipped:
+  - `register_machine_without_deployment` now delegates to shared `_collect_machine_registration_entries(1)` for registration
+  - Removed duplicated label prompt, SSH collection, spec probe, and machine record building from standalone flow
+  - Added resource recommendation display to shared `_collect_machine_registration_entries` (shown when below nominal recommendation)
+  - Removed dead `_select_topology_mode` method (no callers remain — expert-mode promotion is now handled dynamically during discovery import)
+  - Cleaned up stale `_select_topology_mode` mocks from test fixtures
+  - `_add_node` remains unchanged per plan — stays as direct instance-creation flow
 - Tests run:
-- Commit(s):
-- Follow-up notes:
+  - `python3 -m py_compile r1setup` — clean
+  - `python3 -m unittest discover tests -v` — 312 tests, all passed
+- Commit(s): pending
+- Follow-up notes: `_add_node` policy is deferred to Phase 7 documentation. Standalone registration no longer offers upfront topology mode selection; expert promotion happens naturally during discovery import when multi-service machines are detected.
 
 #### Phase 7
 
