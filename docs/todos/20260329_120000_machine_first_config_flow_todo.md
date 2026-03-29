@@ -1125,7 +1125,7 @@ Recommended per-phase closeout checklist:
     - `TestHasActiveConfigShell` (4 tests): true_when_hosts_exist, true_for_zero_host_shell, false_when_no_config, false_when_config_file_missing
     - `TestPhase0Wording` (3 tests): suggested_action_no_config_says_create_or_load, suggested_action_never_deployed_says_instances, deployment_display_tracking_live_says_fleet_status
   - Updated existing `test_suggested_action_prefers_review_for_tracked_live_nodes` to match new wording
-- Commit(s): (pending)
+- Commit(s): 97921ed
 - Follow-up notes: None. All changes are additive or string-only. No behavioral regressions.
 
 #### Phase 1
