@@ -129,16 +129,22 @@ class TestMigrationExecution(unittest.TestCase):
 
             planner.execute_saved_migration_plan()
 
-            planner._copy_from_machine.assert_called_once_with(
+            planner._copy_from_machine.assert_called_once()
+            copy_from_args = planner._copy_from_machine.call_args
+            self.assertEqual(copy_from_args.args, (
                 {"machine_id": "machine-a", "ansible_host": "10.0.0.1", "ansible_user": "root"},
                 "/tmp/r1setup_migration_node-1.tar.gz",
                 str(Path(temp_dir) / "node-1.tar.gz"),
-            )
-            planner._copy_to_machine.assert_called_once_with(
+            ))
+            self.assertIn("timeout", copy_from_args.kwargs)
+            planner._copy_to_machine.assert_called_once()
+            copy_to_args = planner._copy_to_machine.call_args
+            self.assertEqual(copy_to_args.args, (
                 {"machine_id": "machine-b", "ansible_host": "10.0.0.2", "ansible_user": "root"},
                 str(Path(temp_dir) / "node-1.tar.gz"),
                 "/tmp/r1setup_migration_node-1.tar.gz",
-            )
+            ))
+            self.assertIn("timeout", copy_to_args.kwargs)
             app.finalize_instance_migration.assert_called_once()
             finalize_kwargs = app.finalize_instance_migration.call_args.kwargs
             self.assertEqual(finalize_kwargs["runtime_name_policy"], "preserve")

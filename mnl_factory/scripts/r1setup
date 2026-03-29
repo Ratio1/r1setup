@@ -52,6 +52,7 @@ import shutil
 import tempfile
 import stat
 import ssl
+import threading
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 
@@ -63,7 +64,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.4.20"
+    CLI_VERSION = "1.4.21"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -5829,6 +5830,14 @@ class MigrationPlanner:
         """Timeout for shorter migration verification probes."""
         return self.app.connection_timeout * 2
 
+    def _migration_transfer_timeout(self) -> int:
+        """Timeout for migration data-transfer phases (archive, SCP, extract).
+
+        These can run for a very long time on large volumes, so the floor is
+        1800 seconds (30 minutes).
+        """
+        return DeploymentService._phase_timeout(self.app.connection_timeout, 1800)
+
     def plan_instance_migration(self) -> None:
         """Interactively build and optionally persist a migration plan."""
         if not self.app.active_config.get('config_name'):
@@ -5980,8 +5989,9 @@ class MigrationPlanner:
             return ['sshpass', '-p', machine_record['ansible_ssh_pass']] + scp_cmd
         return scp_cmd
 
-    def _copy_from_machine(self, machine_record: Dict[str, Any], remote_path: str, local_path: str) -> Dict[str, Any]:
+    def _copy_from_machine(self, machine_record: Dict[str, Any], remote_path: str, local_path: str, *, timeout: Optional[int] = None) -> Dict[str, Any]:
         """Copy a file from a machine to the controller."""
+        effective_timeout = timeout or self.app.connection_timeout * 4
         try:
             scp_cmd = self._build_scp_command(machine_record, remote_path, local_path, download=True)
         except ValueError as e:
@@ -5991,20 +6001,21 @@ class MigrationPlanner:
                 scp_cmd,
                 capture_output=True,
                 text=True,
-                timeout=self.app.connection_timeout * 4,
+                timeout=effective_timeout,
                 check=False,
             )
         except FileNotFoundError as e:
             return {'status': 'error', 'message': str(e)}
         except subprocess.TimeoutExpired:
-            return {'status': 'error', 'message': f'SCP download timed out after {self.app.connection_timeout * 4} seconds'}
+            return {'status': 'error', 'message': f'SCP download timed out after {effective_timeout} seconds'}
 
         if result.returncode != 0:
             return {'status': 'error', 'message': result.stderr.strip() or result.stdout.strip() or 'SCP download failed'}
         return {'status': 'success'}
 
-    def _copy_to_machine(self, machine_record: Dict[str, Any], local_path: str, remote_path: str) -> Dict[str, Any]:
+    def _copy_to_machine(self, machine_record: Dict[str, Any], local_path: str, remote_path: str, *, timeout: Optional[int] = None) -> Dict[str, Any]:
         """Copy a file from the controller to a machine."""
+        effective_timeout = timeout or self.app.connection_timeout * 4
         try:
             scp_cmd = self._build_scp_command(machine_record, local_path, remote_path, download=False)
         except ValueError as e:
@@ -6014,13 +6025,13 @@ class MigrationPlanner:
                 scp_cmd,
                 capture_output=True,
                 text=True,
-                timeout=self.app.connection_timeout * 4,
+                timeout=effective_timeout,
                 check=False,
             )
         except FileNotFoundError as e:
             return {'status': 'error', 'message': str(e)}
         except subprocess.TimeoutExpired:
-            return {'status': 'error', 'message': f'SCP upload timed out after {self.app.connection_timeout * 4} seconds'}
+            return {'status': 'error', 'message': f'SCP upload timed out after {effective_timeout} seconds'}
 
         if result.returncode != 0:
             return {'status': 'error', 'message': result.stderr.strip() or result.stdout.strip() or 'SCP upload failed'}
@@ -6067,6 +6078,48 @@ class MigrationPlanner:
             return {'status': 'success', 'uid': uid, 'gid': gid, 'mode': mode}
         except ValueError:
             return {'status': 'error', 'message': 'Unexpected remote stat format'}
+
+    def _probe_remote_file_size(self, machine_record: Dict[str, Any], remote_path: str, *, timeout: int = 10) -> Dict[str, Any]:
+        """Return the size (bytes) of a remote file, or 0 if it does not exist yet."""
+        remote_command = self._build_remote_root_shell_command(
+            machine_record,
+            f"stat -c '%s' {shlex.quote(remote_path)} 2>/dev/null || echo 0",
+        )
+        result = self._run_machine_command(machine_record, remote_command, timeout=timeout)
+        if result.get('status') != 'success':
+            return result
+        try:
+            size = int((result.get('stdout') or '').strip().splitlines()[0])
+            return {'status': 'success', 'size': size}
+        except (ValueError, IndexError):
+            return {'status': 'error', 'message': 'Unable to parse remote file size'}
+
+    def _probe_remote_dir_size(self, machine_record: Dict[str, Any], remote_path: str, *, timeout: int = 15) -> Dict[str, Any]:
+        """Return the total size (bytes) of a remote directory."""
+        remote_command = self._build_remote_root_shell_command(
+            machine_record,
+            f"du -sb {shlex.quote(remote_path)} 2>/dev/null | awk '{{print $1}}'",
+        )
+        result = self._run_machine_command(machine_record, remote_command, timeout=timeout)
+        if result.get('status') != 'success':
+            return result
+        try:
+            size = int((result.get('stdout') or '').strip().splitlines()[0])
+            return {'status': 'success', 'size': size}
+        except (ValueError, IndexError):
+            return {'status': 'error', 'message': 'Unable to parse remote directory size'}
+
+    @staticmethod
+    def _format_bytes(size) -> str:
+        """Format a byte count into a human-readable string."""
+        if size is None:
+            return 'unknown'
+        size = float(size)
+        for unit in ('B', 'KB', 'MB', 'GB'):
+            if abs(size) < 1024:
+                return f"{size:.1f} {unit}"
+            size /= 1024
+        return f"{size:.1f} TB"
 
     def _ensure_local_temp_dir(self, path: Path) -> None:
         """Ensure controller temp directory exists with restricted permissions."""
@@ -6125,7 +6178,7 @@ class MigrationPlanner:
                 f"tar -C {shlex.quote(source_volume_path)} -czf {shlex.quote(archive_path)} ."
             ),
         )
-        return self._run_machine_command(machine_record, remote_command, timeout=self.app.connection_timeout * 6)
+        return self._run_machine_command(machine_record, remote_command, timeout=self._migration_transfer_timeout())
 
     def _prepare_target_volume_root(
         self,
@@ -6167,7 +6220,7 @@ class MigrationPlanner:
             machine_record,
             f"mkdir -p {shlex.quote(target_volume_path)} && tar -xzf {shlex.quote(archive_path)} -C {shlex.quote(target_volume_path)}",
         )
-        return self._run_machine_command(machine_record, remote_command, timeout=self.app.connection_timeout * 6)
+        return self._run_machine_command(machine_record, remote_command, timeout=self._migration_transfer_timeout())
 
     def _build_target_execution_inventory(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """Build an explicit execution inventory for the migrated target instance."""
@@ -6350,6 +6403,58 @@ class MigrationPlanner:
         """Print a visible progress marker for long-running migration phases."""
         self.app.print_colored(f"[{step_number}/{total_steps}] {title}", 'cyan', bold=True)
         self.app.print_colored(detail, 'white')
+
+    def _run_with_spinner(self, label: str, func, *args, progress_fn=None, progress_poll_secs: float = 5.0, **kwargs):
+        """Run *func* while displaying a CLI spinner (with optional progress) on stdout.
+
+        Parameters
+        ----------
+        progress_fn : callable, optional
+            Called periodically; should return ``(current_bytes, total_bytes)``
+            or ``(current_bytes, None)`` when the total is unknown.  Return
+            ``None`` to skip the update.
+        progress_poll_secs : float
+            How often (in seconds) to call *progress_fn*.  Remote probes
+            should use ~5 s; local file-size checks can use ~1 s.
+        """
+        result_container: list = []
+        done_event = threading.Event()
+
+        def _worker():
+            result_container.append(func(*args, **kwargs))
+            done_event.set()
+
+        worker = threading.Thread(target=_worker, daemon=True)
+        worker.start()
+
+        frames = ['|', '/', '-', '\\']
+        idx = 0
+        poll_every = max(1, int(progress_poll_secs / 0.25))
+        last_progress = ''
+        while not done_event.wait(timeout=0.25):
+            if progress_fn and idx % poll_every == 0 and idx > 0:
+                try:
+                    info = progress_fn()
+                    if info is not None:
+                        current, total = info
+                        if total and total > 0:
+                            pct = min(100, int(current * 100 / total))
+                            last_progress = f" {self._format_bytes(current)} / {self._format_bytes(total)} ({pct}%)"
+                        elif current and current > 0:
+                            last_progress = f" {self._format_bytes(current)}"
+                except Exception:
+                    pass
+            line = f"\r  {frames[idx % len(frames)]} {label}{last_progress}"
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            idx += 1
+
+        # Clear the spinner line
+        sys.stdout.write(f"\r{' ' * (len(label) + len(last_progress) + 6)}\r")
+        sys.stdout.flush()
+
+        worker.join()
+        return result_container[0]
 
     def _cleanup_local_archive(self, archive_path: Path) -> Dict[str, Any]:
         """Remove a local archive path if it exists."""
@@ -6909,11 +7014,33 @@ class MigrationPlanner:
         self.app._update_node_status(executing_plan['instance_name'], 'stopped')
         executing_plan = self._persist_plan_step(executing_plan, 'source_stopped')
 
+        transfer_timeout = self._migration_transfer_timeout()
+        source_vol_path = source_runtime.get('volume_path', '')
+        source_archive_path = transfer.get('source_archive_path', '')
+        target_archive_path = transfer.get('target_archive_path', '')
+        target_vol_path = target_runtime.get('volume_path', '')
+
         self._announce_migration_phase(3, total_steps, "Archive Source Volume", "Creating the transfer archive on the source machine and verifying its checksum.")
-        archive_result = self._create_source_archive(
+        source_vol_size_result = self._probe_remote_dir_size(source_machine, source_vol_path)
+        source_vol_size = source_vol_size_result.get('size', 0) if source_vol_size_result.get('status') == 'success' else 0
+        if source_vol_size > 0:
+            self.app.print_colored(f"Source volume size: {self._format_bytes(source_vol_size)}.  Timeout: {transfer_timeout}s.", 'cyan')
+        else:
+            self.app.print_colored(f"This may take a while for large volumes. Timeout: {transfer_timeout}s.", 'cyan')
+
+        def _archive_progress():
+            r = self._probe_remote_file_size(source_machine, source_archive_path)
+            if r.get('status') == 'success':
+                return (r['size'], None)
+            return None
+
+        archive_result = self._run_with_spinner(
+            "Archiving source volume...",
+            self._create_source_archive,
             source_machine,
-            source_runtime.get('volume_path', ''),
-            transfer.get('source_archive_path', ''),
+            source_vol_path,
+            source_archive_path,
+            progress_fn=_archive_progress,
         )
         if archive_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, archive_result.get('message', 'Source archive failed'))
@@ -6922,7 +7049,12 @@ class MigrationPlanner:
             return
         executing_plan = self._persist_plan_step(executing_plan, 'source_archived')
 
-        source_checksum_result = self._compute_remote_checksum(source_machine, transfer.get('source_archive_path', ''))
+        archive_size_result = self._probe_remote_file_size(source_machine, source_archive_path)
+        archive_size = archive_size_result.get('size', 0) if archive_size_result.get('status') == 'success' else 0
+        if archive_size > 0:
+            self.app.print_colored(f"Archive size: {self._format_bytes(archive_size)}", 'cyan')
+
+        source_checksum_result = self._compute_remote_checksum(source_machine, source_archive_path)
         if source_checksum_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, source_checksum_result.get('message', 'Source checksum failed'))
             self.app.print_colored(source_checksum_result.get('message', 'Source checksum failed'), 'red')
@@ -6931,7 +7063,23 @@ class MigrationPlanner:
         source_checksum = source_checksum_result['checksum']
 
         self._announce_migration_phase(4, total_steps, "Download To Controller", "Copying the archive to the local controller temp folder and validating integrity.")
-        download_result = self._copy_from_machine(source_machine, transfer.get('source_archive_path', ''), str(local_archive_path))
+
+        def _download_progress():
+            try:
+                return (local_archive_path.stat().st_size, archive_size or None)
+            except OSError:
+                return None
+
+        download_result = self._run_with_spinner(
+            "Downloading archive from source...",
+            self._copy_from_machine,
+            source_machine,
+            source_archive_path,
+            str(local_archive_path),
+            timeout=transfer_timeout,
+            progress_fn=_download_progress if archive_size else None,
+            progress_poll_secs=1.0,
+        )
         if download_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, download_result.get('message', 'Archive download failed'))
             self.app.print_colored(download_result.get('message', 'Archive download failed'), 'red')
@@ -6947,14 +7095,30 @@ class MigrationPlanner:
         executing_plan = self._persist_plan_step(executing_plan, 'archive_downloaded')
 
         self._announce_migration_phase(5, total_steps, "Upload To Target", "Transferring the verified archive from the controller to the target machine.")
-        upload_result = self._copy_to_machine(target_machine, str(local_archive_path), transfer.get('target_archive_path', ''))
+
+        def _upload_progress():
+            r = self._probe_remote_file_size(target_machine, target_archive_path)
+            if r.get('status') == 'success':
+                return (r['size'], archive_size or None)
+            return None
+
+        upload_result = self._run_with_spinner(
+            "Uploading archive to target...",
+            self._copy_to_machine,
+            target_machine,
+            str(local_archive_path),
+            target_archive_path,
+            timeout=transfer_timeout,
+            progress_fn=_upload_progress,
+            progress_poll_secs=10.0,
+        )
         if upload_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, upload_result.get('message', 'Archive upload failed'))
             self.app.print_colored(upload_result.get('message', 'Archive upload failed'), 'red')
             self.app.wait_for_enter()
             return
 
-        target_checksum_result = self._compute_remote_checksum(target_machine, transfer.get('target_archive_path', ''))
+        target_checksum_result = self._compute_remote_checksum(target_machine, target_archive_path)
         if target_checksum_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, target_checksum_result.get('message', 'Target checksum failed'))
             self.app.print_colored(target_checksum_result.get('message', 'Target checksum failed'), 'red')
@@ -6971,8 +7135,8 @@ class MigrationPlanner:
         prepare_volume_result = self._prepare_target_volume_root(
             source_machine,
             target_machine,
-            source_runtime.get('volume_path', ''),
-            target_runtime.get('volume_path', ''),
+            source_vol_path,
+            target_vol_path,
         )
         if prepare_volume_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, prepare_volume_result.get('message', 'Target volume preparation failed'))
@@ -6982,10 +7146,21 @@ class MigrationPlanner:
         executing_plan = self._persist_plan_step(executing_plan, 'target_volume_prepared')
 
         self._announce_migration_phase(7, total_steps, "Extract On Target", "Restoring the transferred archive into the target volume path.")
-        extract_result = self._extract_archive_on_target(
+
+        def _extract_progress():
+            r = self._probe_remote_dir_size(target_machine, target_vol_path)
+            if r.get('status') == 'success':
+                return (r['size'], source_vol_size or None)
+            return None
+
+        extract_result = self._run_with_spinner(
+            "Extracting archive on target...",
+            self._extract_archive_on_target,
             target_machine,
-            transfer.get('target_archive_path', ''),
-            target_runtime.get('volume_path', ''),
+            target_archive_path,
+            target_vol_path,
+            progress_fn=_extract_progress if source_vol_size else None,
+            progress_poll_secs=10.0,
         )
         if extract_result.get('status') != 'success':
             self._mark_migration_failure(executing_plan, extract_result.get('message', 'Target extract failed'))
