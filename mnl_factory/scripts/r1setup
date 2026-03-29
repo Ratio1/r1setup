@@ -1309,8 +1309,124 @@ class ConfigurationManager:
         self._save_config_with_metadata(config_name, env, nodes_count, update_symlink=update_symlink)
         self.app.print_colored(f"Configuration '{config_name}' created and activated!", 'green')
 
-    def _generate_config_name(self, nodes_count: int, custom_name: str = None) -> str:
-        """Generate a configuration name with user input, timestamp and metadata"""
+    # -- Machine-first config-creation primitives (Phase 2) --
+
+    def _prompt_machine_count(self) -> int:
+        """Prompt the operator for the number of machines to register."""
+        while True:
+            try:
+                num_machines = int(self.app.get_input("How many machines do you want to register", "1"))
+                if num_machines <= 0:
+                    self.app.print_colored("Please enter a positive number", 'red')
+                    continue
+                return num_machines
+            except ValueError:
+                self.app.print_colored("Please enter a valid number", 'red')
+
+    def _collect_machine_registration_entries(self, num_machines: int) -> List[str]:
+        """Register machines interactively. Returns list of registered machine_ids."""
+        registered_ids = []
+        fleet_state = self._normalize_fleet_state(self.get_fleet_state_copy())
+        existing_ids = set(fleet_state.get('fleet', {}).get('machines', {}).keys())
+
+        for i in range(num_machines):
+            self.app.print_section(f"Registering Machine {i + 1} of {num_machines}")
+
+            # Machine label
+            default_label = f"machine-{i + 1}"
+            while True:
+                label = self.app.get_input(
+                    f"Enter label for machine {i + 1}", default_label, required=True,
+                ).strip()
+                if not re.match(r'^[a-zA-Z0-9_-]+$', label):
+                    self.app.print_colored(
+                        "Invalid label. Use only letters, numbers, hyphens (-), and underscores (_).", 'red',
+                    )
+                    continue
+                if label in existing_ids or label in registered_ids:
+                    self.app.print_colored(
+                        f"Machine '{label}' already registered. Choose a different label.", 'red',
+                    )
+                    continue
+                break
+
+            # SSH details
+            node_config = self.app._configure_single_node()
+            machine_access = self.app._extract_machine_access_config(node_config)
+
+            # Optional spec probe
+            machine_specs = None
+            probe_choice = self.app.get_input("Probe machine specs? (y/n)", "y")
+            if probe_choice.lower() == 'y':
+                self.app.print_colored("  Probing machine specs...", 'cyan')
+                probe_result = self.app._probe_machine_specs(node_config)
+                if probe_result.get('status') == 'success':
+                    machine_specs = {
+                        'hostname': probe_result['hostname'],
+                        'cpu_total': probe_result['cpu_total'],
+                        'memory_gb_total': probe_result['memory_gb_total'],
+                        'last_checked_at': probe_result['last_checked_at'],
+                    }
+                    self.app.print_colored(
+                        f"  \u2713 {probe_result['hostname']}: {probe_result['cpu_total']} CPU, "
+                        f"{probe_result['memory_gb_total']:.1f} GiB RAM", 'green',
+                    )
+                else:
+                    self.app.print_colored(
+                        f"  \u26a0 Spec probe failed: {probe_result.get('message', 'unknown error')}", 'yellow',
+                    )
+
+            # Build and persist machine record
+            machine_data = {
+                'topology_mode': 'standard',
+                'deployment_state': 'empty',
+                'instance_names': [],
+                **machine_access,
+            }
+            if machine_specs:
+                machine_data['machine_specs'] = machine_specs
+
+            self.upsert_machine_record(label, machine_data)
+            registered_ids.append(label)
+            self.app.print_colored(f"\u2713 Machine '{label}' registered.", 'green')
+
+        return registered_ids
+
+    def _create_machine_first_configuration(self) -> None:
+        """Create a machine-first configuration: register machines, zero hosts."""
+        self.app.print_section("Create New Configuration")
+
+        custom_name = self._prompt_new_config_name()
+        env = self._prompt_new_config_environment()
+        num_machines = self._prompt_machine_count()
+        config_name = self._generate_config_name(num_machines, custom_name, unit='m')
+
+        self._reset_inventory_for_new_config()
+
+        # Save config shell first (required before upsert_machine_record)
+        self.ensure_configuration_shell(config_name, env)
+
+        # Register machines
+        registered_ids = self._collect_machine_registration_entries(num_machines)
+
+        # Final summary
+        self.app.print_section("Configuration Summary")
+        self.app.print_colored(f"Configuration '{config_name}' created and activated.", 'green')
+        self.app.print_colored(f"  {len(registered_ids)} machine(s) registered, 0 instances.", 'cyan')
+        self.app.print_colored(
+            "\n\U0001f4a1 Use 'Discover Services' to scan for existing edge_node services,\n"
+            "   or 'Fleet Summary' to review your registered machines.",
+            'cyan',
+        )
+        self.app.wait_for_enter()
+
+    def _generate_config_name(self, nodes_count: int, custom_name: str = None, *, unit: str = 'n') -> str:
+        """Generate a configuration name with user input, timestamp and metadata.
+
+        The *unit* suffix defaults to ``'n'`` (node count) for existing callers.
+        Machine-first flows pass ``unit='m'`` so the resulting name reflects
+        machine count instead of the (initially zero) node count.
+        """
         if not custom_name:
             custom_name = self._prompt_new_config_name()
 
@@ -1319,8 +1435,7 @@ class ConfigurationManager:
         date_str = now.strftime('%Y%m%d')  # YYYYMMDD
         time_str = now.strftime('%H%M')    # HHMM
 
-        # Create the final config name: customname_YYYYMMDD_HHMM_Nnodes
-        config_name = f"{custom_name}_{date_str}_{time_str}_{nodes_count}n"
+        config_name = f"{custom_name}_{date_str}_{time_str}_{nodes_count}{unit}"
 
         return config_name
 
@@ -2145,7 +2260,9 @@ class ConfigurationManager:
         metadata['environment'] = environment
         metadata['nodes_count'] = nodes_count
         metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
-        metadata['fleet_state'] = self._merge_fleet_state(self.fleet_state or metadata.get('fleet_state'), self.app.inventory)
+        fleet_for_save = self._merge_fleet_state(self.fleet_state or metadata.get('fleet_state'), self.app.inventory)
+        metadata['machines_count'] = len(fleet_for_save.get('fleet', {}).get('machines', {}))
+        metadata['fleet_state'] = fleet_for_save
 
         metadata_json = json.dumps(metadata, indent=2)
 
@@ -3316,7 +3433,7 @@ class ConfigurationManager:
             if choice == '0':
                 break
             elif choice == '1':
-                self._create_new_configuration_with_management()
+                self._create_machine_first_configuration()
             elif choice == '2' and configs:
                 self._switch_configuration(configs)
             elif choice == '3' and configs:
@@ -3974,7 +4091,7 @@ class ConfigurationManager:
 
     def _quick_export_current(self) -> None:
         """Quick export of current active configuration"""
-        if not self.app.check_hosts_config():
+        if not self.app.has_active_config_shell():
             self.app.print_colored("No active configuration to export.", 'yellow')
             self.app.wait_for_enter()
             return
@@ -8656,8 +8773,11 @@ class R1Setup:
     def _reset_inventory_for_new_config(self):
         return self.config_manager._reset_inventory_for_new_config()
 
-    def _generate_config_name(self, nodes_count, custom_name=None):
-        return self.config_manager._generate_config_name(nodes_count, custom_name)
+    def _create_machine_first_configuration(self):
+        return self.config_manager._create_machine_first_configuration()
+
+    def _generate_config_name(self, nodes_count, custom_name=None, *, unit='n'):
+        return self.config_manager._generate_config_name(nodes_count, custom_name, unit=unit)
 
     def _list_available_configs(self):
         return self.config_manager._list_available_configs()
@@ -10455,7 +10575,8 @@ PY"""
 
         # Show compact status line
         has_config = self.check_hosts_config()
-        if has_config:
+        has_shell = self.has_active_config_shell()
+        if has_config or has_shell:
             self.load_configuration()
         current_env = self.get_mnl_app_env() or 'not set'
         active_config_name = self.active_config.get('config_name', 'None')
@@ -10467,7 +10588,7 @@ PY"""
         config_label = active_config_name if active_config_name != 'None' else 'none'
         self.print_colored(f"  {config_label} | {current_env} | {deploy_str}", 'cyan')
 
-        # Line 2: node status summary (only when configured)
+        # Line 2: node status summary (only when hosts exist)
         if has_config:
             hosts = _get_gpu_hosts(self.inventory)
             if hosts:
@@ -10491,6 +10612,14 @@ PY"""
                 self.print_colored(
                     f"  Nodes ({len(hosts)}): {', '.join(status_summary)} ({age_str})",
                     'cyan'
+                )
+        elif has_shell:
+            # Zero-host shell with registered machines
+            fleet_state = self.get_fleet_state_copy()
+            machines = fleet_state.get('fleet', {}).get('machines', {})
+            if machines:
+                self.print_colored(
+                    f"  Machines: {len(machines)} registered, 0 instances", 'cyan',
                 )
 
         self.print_section("R1Setup Main Menu")
@@ -10528,22 +10657,29 @@ PY"""
 
             # Show current configuration status
             has_config = self.check_hosts_config()
+            has_shell = self.has_active_config_shell()
             current_env = self.get_mnl_app_env()
             active_config_name = self.active_config.get('config_name', 'None')
 
             self.print_section("Current Status")
             self.print_colored(f"Active Config: {active_config_name if active_config_name != 'None' else '✗ No active config'}",
                                'green' if active_config_name != 'None' else 'red')
-            self.print_colored(f"Configuration: {'✓ Configured' if has_config else '✗ Not configured'}",
-                               'green' if has_config else 'red')
+            is_configured = has_config or has_shell
+            self.print_colored(f"Configuration: {'✓ Configured' if is_configured else '✗ Not configured'}",
+                               'green' if is_configured else 'red')
             self.print_colored(f"Network: {current_env if current_env else '✗ Not set'}",
                                'green' if current_env else 'red')
 
-            # Show node count if configured
-            if has_config:
+            # Show node/machine counts
+            if has_config or has_shell:
                 self.load_configuration()
                 hosts = _get_gpu_hosts(self.inventory)
-                self.print_colored(f"Nodes: {len(hosts)} configured", 'cyan')
+                if hosts:
+                    self.print_colored(f"Nodes: {len(hosts)} configured", 'cyan')
+                fleet_state = self.get_fleet_state_copy()
+                machines = fleet_state.get('fleet', {}).get('machines', {})
+                if machines:
+                    self.print_colored(f"Machines: {len(machines)} registered", 'cyan')
 
             self.print_colored("Configuration Menu", 'cyan', bold=True)
             print()
@@ -12929,11 +13065,11 @@ PY"""
 
     def ensure_active_configuration(self) -> bool:
         """Ensure there's an active configuration before proceeding to main menu"""
-        # Check if we have a valid active configuration
-        if self.check_hosts_config():
+        # Check if we have a valid active configuration (hosts OR zero-host shell)
+        if self.has_active_config_shell():
             return True
 
-        if self._restore_active_configuration_if_possible() and self.check_hosts_config():
+        if self._restore_active_configuration_if_possible() and self.has_active_config_shell():
             return True
 
         self.print_header("Configuration Required")
@@ -12961,8 +13097,13 @@ PY"""
 
                 env = metadata.get('environment', 'unknown')
                 nodes = metadata.get('nodes_count', 0)
+                machines = metadata.get('machines_count', 0)
+                if machines > 0 and nodes == 0:
+                    count_label = f"{machines} machine(s), 0 instances"
+                else:
+                    count_label = f"{nodes} node(s)"
 
-                self.print_colored(f"\n📁 Found 1 saved configuration: {custom_name} ({env}, {nodes} node(s))", 'cyan')
+                self.print_colored(f"\n📁 Found 1 saved configuration: {custom_name} ({env}, {count_label})", 'cyan')
                 self.print_colored("Automatically activating the only available configuration...", 'yellow')
 
                 if self._load_config_by_name(display_name):
@@ -12973,7 +13114,7 @@ PY"""
                 else:
                     self.print_colored(f"❌ Failed to activate configuration: {custom_name}", 'red')
                     self.print_colored("The configuration file may be corrupted. Please create a new one.", 'red')
-                    self._create_new_configuration_with_management()
+                    self._create_machine_first_configuration()
                     return True
 
             # Multiple configurations - show selection menu
@@ -12986,6 +13127,7 @@ PY"""
                 display_name = config_name.replace('.yml', '')
                 env = metadata.get('environment', 'unknown')
                 nodes = metadata.get('nodes_count', 0)
+                machines = metadata.get('machines_count', 0)
                 created_at = metadata.get('created_at')
                 last_deployed_date = metadata.get('last_deployed_date')
                 deployment_status = metadata.get('deployment_status', 'never_deployed')
@@ -13017,8 +13159,12 @@ PY"""
                 else:
                     deployment_str = " | 📋 Never deployed"
 
+                if machines > 0 and nodes == 0:
+                    count_label = f"{machines} machine(s), 0 instances"
+                else:
+                    count_label = f"{nodes} node(s)"
                 self.print_colored(f"  {i}. {custom_name}", 'cyan', bold=True)
-                self.print_colored(f"     {env} | {nodes} node(s) | Created: {created_str}{deployment_str}", 'white')
+                self.print_colored(f"     {env} | {count_label} | Created: {created_str}{deployment_str}", 'white')
 
             while True:
                 self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
@@ -13057,13 +13203,13 @@ PY"""
                         continue
                 elif choice == '2':
                     # Create new configuration
-                    self._create_new_configuration_with_management()
+                    self._create_machine_first_configuration()
                     return True
                 elif choice == '3':
                     # Import configuration
                     self._import_configuration()
                     # Check if import was successful by seeing if we now have an active config
-                    if self.check_hosts_config():
+                    if self.has_active_config_shell():
                         self.print_colored("You can now access the main menu.", 'green')
                         self.wait_for_enter()
                         return True
@@ -13092,13 +13238,13 @@ PY"""
                     self.print_colored("Exiting r1setup.", 'yellow')
                     return False
                 elif choice == '1':
-                    self._create_new_configuration_with_management()
+                    self._create_machine_first_configuration()
                     return True
                 elif choice == '2':
                     # Import configuration for first-time users
                     self._import_configuration()
                     # Check if import was successful by seeing if we now have an active config
-                    if self.check_hosts_config():
+                    if self.has_active_config_shell():
                         self.print_colored("Welcome to r1setup! Your configuration has been imported successfully.", 'green')
                         self.print_colored("You can now access the main menu.", 'green')
                         self.wait_for_enter()

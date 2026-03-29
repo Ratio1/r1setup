@@ -1159,12 +1159,31 @@ Recommended per-phase closeout checklist:
 
 #### Phase 2
 
-- Status: not started
-- Scope notes:
+- Status: completed
+- Scope notes: Machine registration shell for simple mode. One planned instance per machine. No advanced multi-instance prompts.
 - Actual behavior shipped:
+  - Extended `_generate_config_name` with `unit` kwarg (default `'n'`); machine-first flows use `unit='m'`
+  - Added `machines_count` to `_save_config_with_metadata` — derived from fleet state on every save
+  - Added 3 machine-first primitives on `ConfigurationManager`:
+    - `_prompt_machine_count()` — prompts for number of machines
+    - `_collect_machine_registration_entries(num_machines)` — collects machine labels + SSH + optional spec probe, calls `upsert_machine_record`, returns registered IDs
+    - `_create_machine_first_configuration()` — full onboarding entry point: name + env + machine count + config shell + machine registration + summary
+  - Wired `_create_machine_first_configuration` into all 4 previous `_create_new_configuration_with_management` call sites:
+    - `manage_configurations_menu` choice 1
+    - `ensure_active_configuration` single-config fallback, multi-config choice 2, no-config choice 1
+  - `_create_new_configuration_with_management` retained as method (used by configure-nodes-menu paths)
+  - Updated `ensure_active_configuration` gates: `check_hosts_config()` → `has_active_config_shell()` at initial check, after restore, and at both import-success validation points
+  - Updated config listing display to show `"N machine(s), 0 instances"` when `machines_count > 0` and `nodes_count == 0` (single-config and multi-config views)
+  - Updated `show_main_menu`: loads configuration for zero-host shells; shows `"Machines: N registered, 0 instances"` line
+  - Updated `configuration_menu` status block: shows `"✓ Configured"` for zero-host shells; shows machines count alongside nodes count
+  - Updated `_quick_export_current` gate: `check_hosts_config()` → `has_active_config_shell()`
+  - Updated existing `test_ensure_active_configuration_restores_before_prompting` to use `has_active_config_shell` mock
 - Tests run:
-- Commit(s):
-- Follow-up notes:
+  - `python3 -m py_compile r1setup` — clean
+  - `python3 -m unittest discover tests -v` — 275 tests, all passed
+  - New tests in `TestPhase2MachineFirstConfig` (8 tests): generate_config_name unit_m/default_n, prompt_machine_count, collect_machine_registration_entries (basic + duplicate rejection), create_machine_first_configuration full flow, ensure_active_configuration accepts zero-host shell, ensure_active_configuration import uses has_active_config_shell
+- Commit(s): caaf990
+- Follow-up notes: All existing node-operation guards still use `check_hosts_config()` correctly. Fleet Summary already handled machines with no instances. `_add_node` and `_create_initial_configuration` remain unchanged per plan.
 
 #### Phase 3
 

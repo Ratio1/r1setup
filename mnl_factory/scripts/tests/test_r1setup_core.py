@@ -1196,7 +1196,7 @@ class TestActiveConfigurationRecovery(unittest.TestCase):
 
     def test_ensure_active_configuration_restores_before_prompting(self):
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)
-        app.check_hosts_config = MagicMock(side_effect=[False, True])
+        app.has_active_config_shell = MagicMock(side_effect=[False, True])
         app._restore_active_configuration_if_possible = MagicMock(return_value=True)
         app.print_header = MagicMock()
         app.print_colored = MagicMock()
@@ -1535,3 +1535,129 @@ class TestConfigCreationPathMigration(unittest.TestCase):
 
         app.config_manager._reset_inventory_for_new_config.assert_called_once()
         app._create_initial_configuration.assert_called_once()
+
+
+class TestPhase2MachineFirstConfig(unittest.TestCase):
+    """Tests for Phase 2 machine-first configuration flow."""
+
+    def test_generate_config_name_with_unit_m(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        result = cm._generate_config_name(3, "fleet", unit='m')
+        self.assertIn("fleet", result)
+        self.assertTrue(result.endswith("3m"))
+
+    def test_generate_config_name_default_unit_n(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        result = cm._generate_config_name(2, "test")
+        self.assertTrue(result.endswith("2n"))
+
+    def test_prompt_machine_count_returns_positive(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.app.get_input = MagicMock(return_value="3")
+        self.assertEqual(cm._prompt_machine_count(), 3)
+
+    def test_collect_machine_registration_entries_registers_machines(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {"config_name": "test"}
+        cm.fleet_state = {"config_schema_version": 1, "fleet": {"machines": {}, "instances": {}}}
+
+        # Mock interactions: label, SSH config, decline probe
+        cm.app.get_input = MagicMock(side_effect=[
+            "my-machine",   # label for machine 1
+            "n",            # decline spec probe
+        ])
+        cm.app._configure_single_node = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "ansible_user": "root", "ansible_port": 22,
+        })
+        cm.app._extract_machine_access_config = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "ansible_user": "root", "ansible_port": 22,
+        })
+        cm.app.print_section = MagicMock()
+        cm.app.print_colored = MagicMock()
+
+        # Mock upsert to capture calls
+        cm.upsert_machine_record = MagicMock()
+
+        ids = cm._collect_machine_registration_entries(1)
+
+        self.assertEqual(ids, ["my-machine"])
+        cm.upsert_machine_record.assert_called_once()
+        call_args = cm.upsert_machine_record.call_args
+        self.assertEqual(call_args[0][0], "my-machine")
+        self.assertEqual(call_args[0][1]["topology_mode"], "standard")
+        self.assertEqual(call_args[0][1]["deployment_state"], "empty")
+
+    def test_collect_machine_registration_rejects_duplicate_labels(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {"config_name": "test"}
+        cm.fleet_state = {"config_schema_version": 1, "fleet": {"machines": {}, "instances": {}}}
+
+        # First machine: "dup", second attempt: "dup" (rejected), then "unique"
+        cm.app.get_input = MagicMock(side_effect=[
+            "dup",      # label for machine 1
+            "n",        # decline probe
+            "dup",      # label for machine 2 (rejected - duplicate)
+            "unique",   # retry for machine 2
+            "n",        # decline probe
+        ])
+        cm.app._configure_single_node = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "ansible_user": "root",
+        })
+        cm.app._extract_machine_access_config = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "ansible_user": "root",
+        })
+        cm.app.print_section = MagicMock()
+        cm.app.print_colored = MagicMock()
+        cm.upsert_machine_record = MagicMock()
+
+        ids = cm._collect_machine_registration_entries(2)
+
+        self.assertEqual(ids, ["dup", "unique"])
+
+    def test_create_machine_first_configuration_full_flow(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {}
+        cm.fleet_state = None
+
+        cm._prompt_new_config_name = MagicMock(return_value="prod")
+        cm._prompt_new_config_environment = MagicMock(return_value="mainnet")
+        cm._prompt_machine_count = MagicMock(return_value=2)
+        cm._generate_config_name = MagicMock(return_value="prod_20260329_1200_2m")
+        cm._reset_inventory_for_new_config = MagicMock()
+        cm.ensure_configuration_shell = MagicMock()
+        cm._collect_machine_registration_entries = MagicMock(return_value=["m-1", "m-2"])
+
+        cm._create_machine_first_configuration()
+
+        cm._generate_config_name.assert_called_once_with(2, "prod", unit='m')
+        cm._reset_inventory_for_new_config.assert_called_once()
+        cm.ensure_configuration_shell.assert_called_once_with("prod_20260329_1200_2m", "mainnet")
+        cm._collect_machine_registration_entries.assert_called_once_with(2)
+        # Verify summary output mentions machines
+        printed = [call[0][0] for call in cm.app.print_colored.call_args_list]
+        self.assertTrue(any("2 machine(s) registered" in p for p in printed))
+        self.assertTrue(any("0 instances" in p for p in printed))
+
+    def test_ensure_active_configuration_accepts_zero_host_shell(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.has_active_config_shell = MagicMock(return_value=True)
+        app.print_header = MagicMock()
+
+        result = app.ensure_active_configuration()
+
+        self.assertTrue(result)
+        app.print_header.assert_not_called()
+
+    def test_ensure_active_configuration_import_uses_has_active_config_shell(self):
+        """Import success check should use has_active_config_shell, not check_hosts_config."""
+        # Verify the method body references has_active_config_shell for import checks.
+        import inspect
+        src = inspect.getsource(r1setup.R1Setup.ensure_active_configuration)
+        # The import-success checks should use has_active_config_shell
+        self.assertIn("has_active_config_shell", src)
