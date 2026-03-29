@@ -1369,76 +1369,12 @@ class TestSharedConfigCreationPrimitives(unittest.TestCase):
         self.assertEqual(result, "testnet")
         cm.set_mnl_app_env.assert_called_once_with("testnet")
 
-    def test_prompt_node_count_returns_positive_int(self):
-        cm = self._make_config_manager()
-        cm.app.get_input = MagicMock(return_value="3")
-        result = cm._prompt_node_count()
-        self.assertEqual(result, 3)
-
-    def test_prompt_node_count_rejects_zero_then_accepts(self):
-        cm = self._make_config_manager()
-        cm.app.get_input = MagicMock(side_effect=["0", "2"])
-        result = cm._prompt_node_count()
-        self.assertEqual(result, 2)
-
     def test_reset_inventory_for_new_config(self):
         cm = self._make_config_manager()
         cm.app.inventory = {"old": "data"}
         cm._reset_inventory_for_new_config()
         hosts = cm.app.inventory['all']['children']['gpu_nodes']['hosts']
         self.assertEqual(hosts, {})
-
-    def test_collect_node_connection_entries_enforces_duplicate_check(self):
-        cm = self._make_config_manager()
-        cm.app.inventory = {
-            'all': {'vars': {}, 'children': {'gpu_nodes': {'hosts': {}}}}
-        }
-        # First call returns duplicate name, second returns unique name
-        cm.app._get_valid_hostname = MagicMock(side_effect=["node-1", "node-1", "node-2"])
-        cm.app._configure_single_node = MagicMock(
-            return_value={"ansible_host": "10.0.0.1", "ansible_user": "root"}
-        )
-        cm.app.print_section = MagicMock()
-        cm.app.print_colored = MagicMock()
-
-        hosts = cm._collect_node_connection_entries(
-            2, enforce_duplicate_check=True, show_progress=False
-        )
-
-        self.assertIn("node-1", hosts)
-        self.assertIn("node-2", hosts)
-        self.assertEqual(len(hosts), 2)
-
-    def test_collect_node_connection_entries_with_credential_reuse(self):
-        cm = self._make_config_manager()
-        cm.app.inventory = {
-            'all': {'vars': {}, 'children': {'gpu_nodes': {'hosts': {}}}}
-        }
-        cm.app._get_valid_hostname = MagicMock(side_effect=["node-1", "node-2"])
-        first_config = {"ansible_host": "10.0.0.1", "ansible_user": "root"}
-        second_config = {"ansible_host": "10.0.0.2", "ansible_user": "root"}
-        cm.app._configure_single_node = MagicMock(side_effect=[first_config, second_config])
-        cm.app.print_section = MagicMock()
-        cm.app.print_colored = MagicMock()
-
-        cm._collect_node_connection_entries(
-            2, allow_credential_reuse=True, show_progress=True
-        )
-
-        # Second call should pass previous_config
-        calls = cm.app._configure_single_node.call_args_list
-        self.assertEqual(calls[0], ((), {}))  # first call: no previous
-        self.assertEqual(calls[1], ((), {'previous_config': first_config}))
-
-    def test_finalize_new_config_save_delegates_and_prints(self):
-        cm = self._make_config_manager()
-        cm._save_config_with_metadata = MagicMock()
-        cm._finalize_new_config_save("test_20260329_1200_2n", "testnet", 2)
-        cm._save_config_with_metadata.assert_called_once_with(
-            "test_20260329_1200_2n", "testnet", 2, update_symlink=True,
-        )
-        cm.app.print_colored.assert_called_once()
-        self.assertIn("created and activated", cm.app.print_colored.call_args[0][0])
 
     def test_generate_config_name_delegates_to_prompt_when_no_name(self):
         cm = self._make_config_manager()

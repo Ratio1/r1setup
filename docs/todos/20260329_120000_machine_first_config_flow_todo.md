@@ -3,7 +3,7 @@
 Created At: `2026-03-29T12:00:00+03:00`
 Revised At: `2026-03-29T23:25:00+03:00`
 
-> **Status: Phases 0-4 complete.** Phases 5, 6, 7 not started.
+> **Status: All phases (0-7) complete.** Machine-first flow is the only config creation path.
 
 ## Problem
 
@@ -1288,9 +1288,16 @@ Recommended per-phase closeout checklist:
 
 #### Phase 7
 
-- Status: not started
-- Scope notes:
+- Status: completed
+- Scope notes: Docs, dead code cleanup, menu label updates.
 - Actual behavior shipped:
+  - Removed dead node-first primitives: `_prompt_node_count`, `_collect_node_connection_entries`, `_finalize_new_config_save`, and R1Setup `_prompt_node_count` wrapper
+  - Removed 5 tests for dead methods
+  - Updated menu labels: "Create Initial Configuration" → "Create New Configuration — Register machines and set up instances"; "Configure Nodes" → "Instance and node management"
+  - Updated README_r1setup.md: added "Machine-First Onboarding" feature section; renamed "Node Management" to "Instance Management"; updated Discovery section to note onboarding integration
+  - `_add_node` remains unchanged — continues to create inventory hosts directly. A future enhancement may adapt it to the machine-first pattern.
 - Tests run:
-- Commit(s):
-- Follow-up notes:
+  - `python3 -m py_compile r1setup` — clean
+  - `python3 -m unittest discover tests -v` — 307 tests, all passed
+- Commit(s): pending
+- Follow-up notes: All 8 phases (0-7) are now complete. The machine-first configuration flow is the only config creation path.

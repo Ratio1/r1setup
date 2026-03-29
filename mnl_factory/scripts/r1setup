@@ -1225,18 +1225,6 @@ class ConfigurationManager:
         self.set_mnl_app_env(env)
         return env
 
-    def _prompt_node_count(self) -> int:
-        """Prompt the operator for the number of nodes to configure."""
-        while True:
-            try:
-                num_nodes = int(self.app.get_input("How many nodes do you want to configure", "1"))
-                if num_nodes <= 0:
-                    self.app.print_colored("Please enter a positive number", 'red')
-                    continue
-                return num_nodes
-            except ValueError:
-                self.app.print_colored("Please enter a valid number", 'red')
-
     def _reset_inventory_for_new_config(self) -> None:
         """Reset inventory to an empty gpu_nodes structure."""
         self.app.inventory = {
@@ -1250,66 +1238,7 @@ class ConfigurationManager:
             }
         }
 
-    def _collect_node_connection_entries(
-        self,
-        num_nodes: int,
-        *,
-        allow_credential_reuse: bool = False,
-        enforce_duplicate_check: bool = True,
-        show_progress: bool = False,
-    ) -> dict:
-        """Collect node connection entries interactively.
-
-        Returns the hosts dict from the current inventory.
-        """
-        hosts = self.app.inventory['all']['children']['gpu_nodes']['hosts']
-        previous_config = None
-        configured_nodes = []
-
-        for i in range(num_nodes):
-            if show_progress and configured_nodes:
-                self.app.print_colored("")
-                for idx, (n, ip, user) in enumerate(configured_nodes, 1):
-                    self.app.print_colored(f"  \u2713 {idx}/{num_nodes}: {n} ({user}@{ip})", 'green')
-
-            self.app.print_section(f"Configuring Node {i + 1} of {num_nodes}")
-
-            while True:
-                name = self.app._get_valid_hostname(f"Enter name for node {i + 1}", f"gpu-node-{i + 1}")
-                if enforce_duplicate_check and name in hosts:
-                    self.app.print_colored(f"Node '{name}' already exists! Please choose a different name.", 'red')
-                    continue
-                break
-
-            kwargs = {}
-            if allow_credential_reuse and previous_config is not None:
-                kwargs['previous_config'] = previous_config
-
-            node_config = self.app._configure_single_node(**kwargs)
-            hosts[name] = node_config
-
-            if allow_credential_reuse:
-                previous_config = node_config
-
-            ip = node_config.get('ansible_host', '')
-            user = node_config.get('ansible_user', '')
-            configured_nodes.append((name, ip, user))
-
-            if show_progress:
-                self.app.print_colored(
-                    f"\u2713 Node {i + 1}/{num_nodes} configured: {name} ({user}@{ip})", 'green'
-                )
-            else:
-                self.app.print_colored(f"Node '{name}' configured successfully!", 'green')
-
-        return hosts
-
-    def _finalize_new_config_save(self, config_name: str, env: str, nodes_count: int, *, update_symlink: bool = True) -> None:
-        """Save the new config, update symlink, and print confirmation."""
-        self._save_config_with_metadata(config_name, env, nodes_count, update_symlink=update_symlink)
-        self.app.print_colored(f"Configuration '{config_name}' created and activated!", 'green')
-
-    # -- Machine-first config-creation primitives (Phase 2+) --
+    # -- Machine-first config-creation primitives --
 
     def _select_configuration_mode(self) -> str:
         """Prompt the operator for simple or advanced configuration mode.
@@ -9218,9 +9147,6 @@ class R1Setup:
     def _prompt_new_config_environment(self):
         return self.config_manager._prompt_new_config_environment()
 
-    def _prompt_node_count(self):
-        return self.config_manager._prompt_node_count()
-
     def _reset_inventory_for_new_config(self):
         return self.config_manager._reset_inventory_for_new_config()
 
@@ -11081,7 +11007,7 @@ PY"""
 
             self.print_colored("Configuration Menu", 'cyan', bold=True)
             print()
-            self.print_colored("  1) Configure Nodes        - Node connection setup and management")
+            self.print_colored("  1) Configure Nodes        - Instance and node management")
             self.print_colored("  2) Manage Configurations  - Switch, backup, restore configurations")
             self.print_colored("  3) View Configuration     - Display current configuration")
             self.print_colored("  4) Switch Environment     - Change network environment (mainnet/testnet/devnet)")
@@ -11145,7 +11071,7 @@ PY"""
             self.print_colored("Configure Nodes Menu", 'cyan', bold=True)
             print()
             if not hosts:
-                self.print_colored("  1) Create Initial Configuration    - First-time setup")
+                self.print_colored("  1) Create New Configuration        - Register machines and set up instances")
             else:
                 self.print_colored("  1) Add New Node                   - Add node to existing config")
                 self.print_colored("  2) Edit Existing Node             - Modify node settings")
