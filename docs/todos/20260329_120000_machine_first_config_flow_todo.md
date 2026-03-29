@@ -1111,12 +1111,22 @@ Recommended per-phase closeout checklist:
 
 #### Phase 0
 
-- Status: not started
-- Scope notes:
+- Status: completed
+- Scope notes: Low-risk UX guidance changes only. No onboarding architecture changes.
 - Actual behavior shipped:
+  - Added `has_active_config_shell()` on `R1Setup` (after `check_hosts_config()`). Returns True for valid config shells with zero hosts (metadata-only shells created by `ensure_configuration_shell`). Does not change `check_hosts_config()` semantics.
+  - Updated `_get_deployment_display_state()` tracking_live_nodes suggested_action: `"Review tracked live nodes before deploying changes"` → `"Review fleet status before deploying changes"`
+  - Updated `_get_suggested_action()` no-config fallback: `"Configure your nodes first"` → `"Create or load a configuration first"`
+  - Updated `_get_suggested_action()` never-deployed/deleted hint: `"Deploy your configured nodes"` → `"Deploy your configured instances"`
 - Tests run:
-- Commit(s):
-- Follow-up notes:
+  - `python3 -m py_compile r1setup` — clean
+  - `python3 -m unittest discover tests -v` — 252 tests, all passed
+  - New tests added to `tests/test_r1setup_core.py`:
+    - `TestHasActiveConfigShell` (4 tests): true_when_hosts_exist, true_for_zero_host_shell, false_when_no_config, false_when_config_file_missing
+    - `TestPhase0Wording` (3 tests): suggested_action_no_config_says_create_or_load, suggested_action_never_deployed_says_instances, deployment_display_tracking_live_says_fleet_status
+  - Updated existing `test_suggested_action_prefers_review_for_tracked_live_nodes` to match new wording
+- Commit(s): (pending)
+- Follow-up notes: None. All changes are additive or string-only. No behavioral regressions.
 
 #### Phase 1
 

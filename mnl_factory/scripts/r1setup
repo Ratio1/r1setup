@@ -8517,6 +8517,24 @@ class R1Setup:
         except Exception:
             return False
 
+    def has_active_config_shell(self) -> bool:
+        """Check whether a valid configuration shell exists, even with zero hosts.
+
+        Returns True when either:
+        - check_hosts_config() is True (hosts exist), OR
+        - an active config name is set and its config file exists on disk
+          (a zero-host shell created by ensure_configuration_shell).
+
+        This does NOT change check_hosts_config() semantics.
+        """
+        if self.check_hosts_config():
+            return True
+        config_name = self.config_manager.active_config.get('config_name')
+        if not config_name:
+            return False
+        config_path = self.config_manager.app.configs_dir / f"{config_name}.yml"
+        return config_path.exists()
+
     def _get_operation_log_dir(self) -> Path:
         """Return the local operation-log directory."""
         return self.r1_setup_dir / 'logs'
@@ -10329,7 +10347,7 @@ PY"""
                 'deployment_line': f"Deployment: 📡 Tracking {live_label}",
                 'suggested_action': (
                     '4',
-                    '\U0001f4a1 Suggested: Review tracked live nodes before deploying changes',
+                    '\U0001f4a1 Suggested: Review fleet status before deploying changes',
                 ),
                 'deployment_menu_default': '9',
             }
@@ -10354,13 +10372,13 @@ PY"""
             machines = fleet_state.get('fleet', {}).get('machines', {})
             if machines:
                 return '2', '\U0001f4a1 Suggested: Prepare or review your registered machines'
-            return '1', '\U0001f4a1 Suggested: Configure your nodes first'
+            return '1', '\U0001f4a1 Suggested: Create or load a configuration first'
         deployment_display = self._get_deployment_display_state()
         if deployment_display.get('suggested_action'):
             return deployment_display['suggested_action']
         deployment_status = self.active_config.get('deployment_status', 'never_deployed')
         if deployment_status in ('never_deployed', 'deleted'):
-            return '2', '\U0001f4a1 Suggested: Deploy your configured nodes'
+            return '2', '\U0001f4a1 Suggested: Deploy your configured instances'
         hosts = _get_gpu_hosts(self.inventory)
         _, eligible_hosts, outdated_hosts, _, _ = self._get_service_update_inventory(hosts)
         if eligible_hosts and outdated_hosts:

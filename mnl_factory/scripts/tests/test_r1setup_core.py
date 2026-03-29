@@ -1016,7 +1016,7 @@ class TestSuggestedActions(unittest.TestCase):
         default_option, hint = app._get_suggested_action()
 
         self.assertEqual(default_option, "4")
-        self.assertIn("Review tracked live nodes", hint)
+        self.assertIn("Review fleet status", hint)
 
 
 class TestTrackedLiveNodeMessaging(unittest.TestCase):
@@ -1224,3 +1224,113 @@ class TestActiveConfigurationRecovery(unittest.TestCase):
 
             self.assertFalse(restored)
             app._load_config_by_name.assert_not_called()
+
+
+class TestHasActiveConfigShell(unittest.TestCase):
+    """Tests for has_active_config_shell() helper."""
+
+    def test_true_when_hosts_exist(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=True)
+        app.config_manager = MagicMock()
+
+        self.assertTrue(app.has_active_config_shell())
+
+    def test_true_for_zero_host_shell(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            configs_dir = Path(temp_dir) / "configs"
+            configs_dir.mkdir()
+            config_path = configs_dir / "my-config_20260329_1200_0n.yml"
+            config_path.write_text("all:\n  children:\n    gpu_nodes:\n      hosts: {}\n")
+
+            app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+            app.check_hosts_config = MagicMock(return_value=False)
+            app.config_manager = MagicMock()
+            app.config_manager.active_config = {"config_name": "my-config_20260329_1200_0n"}
+            app.config_manager.app = MagicMock()
+            app.config_manager.app.configs_dir = configs_dir
+
+            self.assertTrue(app.has_active_config_shell())
+
+    def test_false_when_no_config(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=False)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"config_name": None}
+
+        self.assertFalse(app.has_active_config_shell())
+
+    def test_false_when_config_file_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            configs_dir = Path(temp_dir) / "configs"
+            configs_dir.mkdir()
+
+            app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+            app.check_hosts_config = MagicMock(return_value=False)
+            app.config_manager = MagicMock()
+            app.config_manager.active_config = {"config_name": "nonexistent"}
+            app.config_manager.app = MagicMock()
+            app.config_manager.app.configs_dir = configs_dir
+
+            self.assertFalse(app.has_active_config_shell())
+
+
+class TestPhase0Wording(unittest.TestCase):
+    """Tests that Phase 0 UX wording updates are applied."""
+
+    def test_suggested_action_no_config_says_create_or_load(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=False)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "never_deployed"}
+        app.config_manager.get_fleet_state_copy = MagicMock(
+            return_value={"fleet": {"machines": {}, "instances": {}}}
+        )
+
+        _, hint = app._get_suggested_action()
+
+        self.assertIn("Create or load a configuration first", hint)
+
+    def test_suggested_action_never_deployed_says_instances(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.check_hosts_config = MagicMock(return_value=True)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "never_deployed"}
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {"node_status": "not_deployed"},
+                        }
+                    }
+                }
+            }
+        }
+
+        _, hint = app._get_suggested_action()
+
+        self.assertIn("Deploy your configured instances", hint)
+
+    def test_deployment_display_tracking_live_says_fleet_status(self):
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.config_manager = MagicMock()
+        app.config_manager.active_config = {"deployment_status": "never_deployed"}
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-1": {"node_status": "running"},
+                        }
+                    }
+                }
+            }
+        }
+
+        display = app._get_deployment_display_state()
+
+        self.assertEqual(display["state_key"], "tracking_live_nodes")
+        action_option, action_hint = display["suggested_action"]
+        self.assertEqual(action_option, "4")
+        self.assertIn("Review fleet status", action_hint)
