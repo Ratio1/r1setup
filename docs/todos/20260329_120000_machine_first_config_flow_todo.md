@@ -1236,6 +1236,28 @@ Recommended per-phase closeout checklist:
 - Commit(s): 56cf0a9
 - Follow-up notes: None. Advanced-mode gap fill (remaining planned capacity) deferred to Phase 5.
 
+#### E2E Smoke Test (Phases 0-4)
+
+- Status: completed
+- Date: 2026-03-29
+- Test machines:
+  - machine-1: `vitalii@35.228.69.214` (r1-vi-g1, 4 CPU, 15.6 GiB RAM) — has 1 existing edge_node service
+  - machine-2: `vitalii@34.88.90.109` (r1-vi-g2, 4 CPU, 15.6 GiB RAM) — clean, no services
+- Test suite: `tests/e2e/test_machine_first_onboarding.py` (13 tests)
+- Results: all 13 passed (35.5s total)
+  - Test01 SSH Connectivity: both machines reachable
+  - Test02 Spec Probe: both returned valid CPU/RAM (4 CPU, 15.6 GiB each)
+  - Test03 Discovery Probe: machine-1 found 1 candidate, machine-2 found 0
+  - Test04 Config Shell: zero-host config with fleet metadata persists correctly
+  - Test05 Machine Registration: 2 machines in fleet state, machines_count=2, nodes_count=0
+  - Test06 Batch Discovery: machine-1=discovered, machine-2=clean; scan cached in fleet metadata
+  - Test07 Fresh Host Building: SSH fields + standard runtime names + never_deployed status correct
+  - Test08 Gap Fill: 2 fresh instances created from machine records
+  - Test09 Full Flow: register → probe → discover → gap fill end-to-end; machine-1 correctly classified as `discovered` (not clean) due to existing service; only machine-2 (clean) received a fresh instance; final state: 2 machines, 1 instance (machine-2), nodes_count=1, machines_count=2
+  - Test10 Has Active Config Shell: zero-host shell valid
+- Key finding: Phase 4 safety gate validated against real infrastructure — machine with existing edge_node service was not blindly gap-filled
+- Commit(s): 9f5c3bd
+
 #### Phase 5
 
 - Status: not started
