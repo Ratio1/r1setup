@@ -3,6 +3,8 @@
 Created At: `2026-03-29T12:00:00+03:00`
 Revised At: `2026-03-29T23:25:00+03:00`
 
+> **Status: All phases (0-7) complete.** Machine-first flow is the only config creation path.
+
 ## Problem
 
 The current config creation flow is still node-first:
@@ -1125,7 +1127,7 @@ Recommended per-phase closeout checklist:
     - `TestHasActiveConfigShell` (4 tests): true_when_hosts_exist, true_for_zero_host_shell, false_when_no_config, false_when_config_file_missing
     - `TestPhase0Wording` (3 tests): suggested_action_no_config_says_create_or_load, suggested_action_never_deployed_says_instances, deployment_display_tracking_live_says_fleet_status
   - Updated existing `test_suggested_action_prefers_review_for_tracked_live_nodes` to match new wording
-- Commit(s): 97921ed
+- Commit(s): 97921ed, 88357b6 (deployment_menu_default '9' → '0' for tracking_live_nodes)
 - Follow-up notes: None. All changes are additive or string-only. No behavioral regressions.
 
 #### Phase 1
@@ -1171,7 +1173,7 @@ Recommended per-phase closeout checklist:
   - Wired `_create_machine_first_configuration` into all 4 previous `_create_new_configuration_with_management` call sites:
     - `manage_configurations_menu` choice 1
     - `ensure_active_configuration` single-config fallback, multi-config choice 2, no-config choice 1
-  - `_create_new_configuration_with_management` retained as method (used by configure-nodes-menu paths)
+  - `_create_new_configuration_with_management` retained as method (used by configure-nodes-menu paths); later removed in 88357b6 when all paths were unified
   - Updated `ensure_active_configuration` gates: `check_hosts_config()` → `has_active_config_shell()` at initial check, after restore, and at both import-success validation points
   - Updated config listing display to show `"N machine(s), 0 instances"` when `machines_count > 0` and `nodes_count == 0` (single-config and multi-config views)
   - Updated `show_main_menu`: loads configuration for zero-host shells; shows `"Machines: N registered, 0 instances"` line
@@ -1182,8 +1184,8 @@ Recommended per-phase closeout checklist:
   - `python3 -m py_compile r1setup` — clean
   - `python3 -m unittest discover tests -v` — 275 tests, all passed
   - New tests in `TestPhase2MachineFirstConfig` (8 tests): generate_config_name unit_m/default_n, prompt_machine_count, collect_machine_registration_entries (basic + duplicate rejection), create_machine_first_configuration full flow, ensure_active_configuration accepts zero-host shell, ensure_active_configuration import uses has_active_config_shell
-- Commit(s): caaf990
-- Follow-up notes: All existing node-operation guards still use `check_hosts_config()` correctly. Fleet Summary already handled machines with no instances. `_add_node` and `_create_initial_configuration` remain unchanged per plan.
+- Commit(s): caaf990, 88357b6 (wired configure_nodes_menu and _create_new_configuration to machine-first flow; removed dead _create_new_configuration_with_management and _create_initial_configuration)
+- Follow-up notes: All existing node-operation guards still use `check_hosts_config()` correctly. Fleet Summary already handled machines with no instances. `_add_node` remains unchanged per plan. As of 88357b6, all config creation entry points converge on `_create_machine_first_configuration`.
 
 #### Phase 3
 
@@ -1241,8 +1243,8 @@ Recommended per-phase closeout checklist:
 - Status: completed
 - Date: 2026-03-29
 - Test machines:
-  - machine-1: `vitalii@35.228.69.214` (r1-vi-g1, 4 CPU, 15.6 GiB RAM) — has 1 existing edge_node service
-  - machine-2: `vitalii@34.88.90.109` (r1-vi-g2, 4 CPU, 15.6 GiB RAM) — clean, no services
+  - machine-1: GCP instance (4 CPU, 15.6 GiB RAM) — has 1 existing edge_node service
+  - machine-2: GCP instance (4 CPU, 15.6 GiB RAM) — clean, no services
 - Test suite: `tests/e2e/test_machine_first_onboarding.py` (13 tests)
 - Results: all 13 passed (35.5s total)
   - Test01 SSH Connectivity: both machines reachable
@@ -1260,27 +1262,84 @@ Recommended per-phase closeout checklist:
 
 #### Phase 5
 
-- Status: not started
-- Scope notes:
+- Status: completed
+- Scope notes: Advanced mode / expert topology. EE_ID and exit status path template fixes.
 - Actual behavior shipped:
+  - Added `_select_configuration_mode()` on ConfigurationManager — returns 'simple' or 'advanced', requires typing exact word "advanced" to confirm
+  - Added `_collect_advanced_instance_counts(registered_ids)` — per-machine instance count with capacity guidance from spec probes; warns and requires confirmation when exceeding recommended max
+  - Extended `_onboarding_gap_fill_clean_machines` with `config_mode` and `desired_counts` kwargs — creates N instances per clean machine in advanced mode, subtracts already-imported instances, promotes to expert topology
+  - Extended `_onboarding_batch_discovery_and_import` with `session_mode` kwarg — starts in the user-selected mode
+  - Wired mode selection into `_create_machine_first_configuration` orchestration
+  - Updated `edge_node.service.j2`: EE_ID sourced from `r1setup_instance_logical_name | default(inventory_hostname, true)`; exit status path uses `r1setup_runtime_exit_status_path | default("/tmp/ee-node.exit", true)`
+  - Legacy normalization already handled by existing `apply_runtime_snapshot_to_host_config` setdefault
 - Tests run:
-- Commit(s):
-- Follow-up notes:
+  - `python3 -m py_compile r1setup` — clean
+  - `python3 -m unittest discover tests -v` — 312 tests, all passed
+  - 8 new tests in `TestPhase5AdvancedMode`: mode selection (3), capacity formula (2), advanced gap fill (2), simple backward compat (1)
+- Commit(s): b304eb7
+- Follow-up notes: Both template changes are backward compatible via Jinja2 default filters.
 
 #### Phase 6
 
 - Status: not started
-- Scope notes:
+- Scope notes: Unify standalone machine registration with onboarding primitives. Remove duplicated per-machine registration logic.
 - Actual behavior shipped:
+  - `register_machine_without_deployment` now delegates to shared `_collect_machine_registration_entries(1)` for registration
+  - Removed duplicated label prompt, SSH collection, spec probe, and machine record building from standalone flow
+  - Added resource recommendation display to shared `_collect_machine_registration_entries` (shown when below nominal recommendation)
+  - Removed dead `_select_topology_mode` method (no callers remain — expert-mode promotion is now handled dynamically during discovery import)
+  - Cleaned up stale `_select_topology_mode` mocks from test fixtures
+  - `_add_node` remains unchanged per plan — stays as direct instance-creation flow
 - Tests run:
-- Commit(s):
-- Follow-up notes:
+  - `python3 -m py_compile r1setup` — clean
+  - `python3 -m unittest discover tests -v` — 312 tests, all passed
+- Commit(s): pending
+- Follow-up notes: `_add_node` policy is deferred to Phase 7 documentation. Standalone registration no longer offers upfront topology mode selection; expert promotion happens naturally during discovery import when multi-service machines are detected.
 
 #### Phase 7
 
-- Status: not started
-- Scope notes:
+- Status: completed
+- Scope notes: Docs, dead code cleanup, menu label updates.
 - Actual behavior shipped:
+  - Removed dead node-first primitives: `_prompt_node_count`, `_collect_node_connection_entries`, `_finalize_new_config_save`, and R1Setup `_prompt_node_count` wrapper
+  - Removed 5 tests for dead methods
+  - Updated menu labels: "Create Initial Configuration" → "Create New Configuration — Register machines and set up instances"; "Configure Nodes" → "Instance and node management"
+  - Updated README_r1setup.md: added "Machine-First Onboarding" feature section; renamed "Node Management" to "Instance Management"; updated Discovery section to note onboarding integration
+  - `_add_node` remains unchanged — continues to create inventory hosts directly. A future enhancement may adapt it to the machine-first pattern.
 - Tests run:
-- Commit(s):
-- Follow-up notes:
+  - `python3 -m py_compile r1setup` — clean
+  - `python3 -m unittest discover tests -v` — 307 tests, all passed
+- Commit(s): 0dac5fe
+- Follow-up notes: All 8 phases (0-7) are now complete. The machine-first configuration flow is the only config creation path.
+
+#### E2E Smoke Test (Phases 0-7)
+
+- Status: completed
+- Date: 2026-03-29
+- Test machines:
+  - machine-1: GCP instance (4 CPU, 15.6 GiB RAM) — has 1 existing edge_node service
+  - machine-2: GCP instance (4 CPU, 15.6 GiB RAM) — clean, no services
+- Test suite: `tests/e2e/test_machine_first_onboarding.py` (26 tests)
+- Results: all 26 passed (40.2s total)
+  - Test01 SSH Connectivity: both machines reachable
+  - Test02 Spec Probe: both returned valid CPU/RAM (4 CPU, 15.6 GiB each)
+  - Test03 Discovery Probe: machine-1 found 1 candidate, machine-2 found 0
+  - Test04 Config Shell: zero-host config with fleet metadata persists correctly
+  - Test05 Machine Registration: 2 machines in fleet state, machines_count=2, nodes_count=0
+  - Test06 Batch Discovery: machine-1=discovered, machine-2=clean; scan cached in fleet metadata
+  - Test07 Fresh Host Building: SSH fields + standard runtime names + never_deployed status correct
+  - Test08 Gap Fill: 2 fresh instances created from machine records
+  - Test09 Full Flow: register → probe → discover → gap fill end-to-end; machine-1 correctly classified as `discovered` (not clean); only machine-2 (clean) received fresh instance; final state: 2 machines, 1 instance (machine-2), nodes_count=1, machines_count=2
+  - Test10 Has Active Config Shell: zero-host shell valid
+  - Test11 Configuration Mode Selection: simple default, advanced requires exact word, partial input stays simple
+  - Test12 Advanced Instance Counts: capacity formula verified against real machine specs (4 CPU / 15.6 GiB → max_recommended=1)
+  - Test13 Advanced Gap Fill: 2 expert-mode instances created on one machine with unique suffixed runtime names (edge_node_inst_1, edge_node_inst_2); machine promoted to expert topology
+  - Test14 EE_ID Template: edge_node.service.j2 uses r1setup_instance_logical_name with inventory_hostname fallback; exit status path uses per-instance variable with /tmp/ee-node.exit fallback
+  - Test15 Unified Registration: register_machine_without_deployment delegates to _collect_machine_registration_entries(1)
+  - Test16 Dead Code Removed: _select_topology_mode, _prompt_node_count, _collect_node_connection_entries, _finalize_new_config_save, _create_initial_configuration, _create_new_configuration_with_management all confirmed absent
+- Key findings:
+  - Phase 4 safety gate still validated — machine with existing edge_node service was not gap-filled
+  - Phase 5 capacity math capped at 1 instance for 15.6 GiB machines (15.6 // 16 = 0, floored to 1)
+  - Expert-mode runtime naming produces collision-free service/container/volume names
+  - Template backward compatibility confirmed via Jinja2 default filters
+- Commit(s): pending

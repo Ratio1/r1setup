@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for core R1Setup instance methods."""
 
+import copy
 import os
 import tempfile
 import unittest
@@ -1368,76 +1369,12 @@ class TestSharedConfigCreationPrimitives(unittest.TestCase):
         self.assertEqual(result, "testnet")
         cm.set_mnl_app_env.assert_called_once_with("testnet")
 
-    def test_prompt_node_count_returns_positive_int(self):
-        cm = self._make_config_manager()
-        cm.app.get_input = MagicMock(return_value="3")
-        result = cm._prompt_node_count()
-        self.assertEqual(result, 3)
-
-    def test_prompt_node_count_rejects_zero_then_accepts(self):
-        cm = self._make_config_manager()
-        cm.app.get_input = MagicMock(side_effect=["0", "2"])
-        result = cm._prompt_node_count()
-        self.assertEqual(result, 2)
-
     def test_reset_inventory_for_new_config(self):
         cm = self._make_config_manager()
         cm.app.inventory = {"old": "data"}
         cm._reset_inventory_for_new_config()
         hosts = cm.app.inventory['all']['children']['gpu_nodes']['hosts']
         self.assertEqual(hosts, {})
-
-    def test_collect_node_connection_entries_enforces_duplicate_check(self):
-        cm = self._make_config_manager()
-        cm.app.inventory = {
-            'all': {'vars': {}, 'children': {'gpu_nodes': {'hosts': {}}}}
-        }
-        # First call returns duplicate name, second returns unique name
-        cm.app._get_valid_hostname = MagicMock(side_effect=["node-1", "node-1", "node-2"])
-        cm.app._configure_single_node = MagicMock(
-            return_value={"ansible_host": "10.0.0.1", "ansible_user": "root"}
-        )
-        cm.app.print_section = MagicMock()
-        cm.app.print_colored = MagicMock()
-
-        hosts = cm._collect_node_connection_entries(
-            2, enforce_duplicate_check=True, show_progress=False
-        )
-
-        self.assertIn("node-1", hosts)
-        self.assertIn("node-2", hosts)
-        self.assertEqual(len(hosts), 2)
-
-    def test_collect_node_connection_entries_with_credential_reuse(self):
-        cm = self._make_config_manager()
-        cm.app.inventory = {
-            'all': {'vars': {}, 'children': {'gpu_nodes': {'hosts': {}}}}
-        }
-        cm.app._get_valid_hostname = MagicMock(side_effect=["node-1", "node-2"])
-        first_config = {"ansible_host": "10.0.0.1", "ansible_user": "root"}
-        second_config = {"ansible_host": "10.0.0.2", "ansible_user": "root"}
-        cm.app._configure_single_node = MagicMock(side_effect=[first_config, second_config])
-        cm.app.print_section = MagicMock()
-        cm.app.print_colored = MagicMock()
-
-        cm._collect_node_connection_entries(
-            2, allow_credential_reuse=True, show_progress=True
-        )
-
-        # Second call should pass previous_config
-        calls = cm.app._configure_single_node.call_args_list
-        self.assertEqual(calls[0], ((), {}))  # first call: no previous
-        self.assertEqual(calls[1], ((), {'previous_config': first_config}))
-
-    def test_finalize_new_config_save_delegates_and_prints(self):
-        cm = self._make_config_manager()
-        cm._save_config_with_metadata = MagicMock()
-        cm._finalize_new_config_save("test_20260329_1200_2n", "testnet", 2)
-        cm._save_config_with_metadata.assert_called_once_with(
-            "test_20260329_1200_2n", "testnet", 2, update_symlink=True,
-        )
-        cm.app.print_colored.assert_called_once()
-        self.assertIn("created and activated", cm.app.print_colored.call_args[0][0])
 
     def test_generate_config_name_delegates_to_prompt_when_no_name(self):
         cm = self._make_config_manager()
@@ -1457,10 +1394,10 @@ class TestSharedConfigCreationPrimitives(unittest.TestCase):
 
 
 class TestConfigCreationPathMigration(unittest.TestCase):
-    """Tests that migrated config-creation paths use shared primitives correctly."""
+    """Tests that all config-creation entry points delegate to the machine-first flow."""
 
-    def test_path1_calls_set_mnl_app_env(self):
-        """Path 1 (_create_new_configuration_with_management) must persist env."""
+    def test_machine_first_flow_prompts_environment(self):
+        """Machine-first flow must call _prompt_new_config_environment."""
         cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
         cm.app = MagicMock()
         cm.active_config = {}
@@ -1468,73 +1405,68 @@ class TestConfigCreationPathMigration(unittest.TestCase):
 
         cm._prompt_new_config_name = MagicMock(return_value="test")
         cm._prompt_new_config_environment = MagicMock(return_value="devnet")
-        cm._prompt_node_count = MagicMock(return_value=1)
-        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1n")
+        cm._prompt_machine_count = MagicMock(return_value=1)
+        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1m")
         cm._reset_inventory_for_new_config = MagicMock()
-        cm._collect_node_connection_entries = MagicMock()
-        cm._finalize_new_config_save = MagicMock()
-        cm.app.get_input = MagicMock(return_value="n")  # decline deploy
+        cm.ensure_configuration_shell = MagicMock()
+        cm._collect_machine_registration_entries = MagicMock(return_value=["machine-1"])
+        cm._onboarding_batch_discovery_and_import = MagicMock(return_value={
+            'scanned': False, 'imported_total': 0, 'session_mode': 'simple', 'clean_machine_ids': [],
+        })
+        cm._onboarding_gap_fill_clean_machines = MagicMock(return_value=0)
+        cm.app.print_section = MagicMock()
+        cm.app.print_colored = MagicMock()
+        cm.app.get_input = MagicMock(return_value="n")
         cm.app.wait_for_enter = MagicMock()
 
-        cm._create_new_configuration_with_management()
+        cm._create_machine_first_configuration()
 
         cm._prompt_new_config_environment.assert_called_once()
 
-    def test_path1_enforces_duplicate_check(self):
-        """Path 1 must pass enforce_duplicate_check=True."""
+    def test_machine_first_flow_creates_config_shell_before_registration(self):
+        """Config shell must exist before machine registration."""
+        call_order = []
+
         cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
         cm.app = MagicMock()
         cm.active_config = {}
         cm.fleet_state = None
 
         cm._prompt_new_config_name = MagicMock(return_value="test")
-        cm._prompt_new_config_environment = MagicMock(return_value="testnet")
-        cm._prompt_node_count = MagicMock(return_value=1)
-        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1n")
+        cm._prompt_new_config_environment = MagicMock(return_value="mainnet")
+        cm._prompt_machine_count = MagicMock(return_value=1)
+        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1m")
         cm._reset_inventory_for_new_config = MagicMock()
-        cm._collect_node_connection_entries = MagicMock()
-        cm._finalize_new_config_save = MagicMock()
+        cm.ensure_configuration_shell = MagicMock(side_effect=lambda *a, **kw: call_order.append('shell'))
+        cm._collect_machine_registration_entries = MagicMock(
+            side_effect=lambda *a, **kw: (call_order.append('register'), ["machine-1"])[1],
+        )
+        cm._onboarding_batch_discovery_and_import = MagicMock(return_value={
+            'scanned': False, 'imported_total': 0, 'session_mode': 'simple', 'clean_machine_ids': [],
+        })
+        cm._onboarding_gap_fill_clean_machines = MagicMock(return_value=0)
+        cm.app.print_section = MagicMock()
+        cm.app.print_colored = MagicMock()
         cm.app.get_input = MagicMock(return_value="n")
         cm.app.wait_for_enter = MagicMock()
 
-        cm._create_new_configuration_with_management()
+        cm._create_machine_first_configuration()
 
-        _, kwargs = cm._collect_node_connection_entries.call_args
-        self.assertTrue(kwargs.get('enforce_duplicate_check'))
+        self.assertEqual(call_order, ['shell', 'register'])
 
-    def test_path2_uses_shared_primitives(self):
-        """Path 2 (_create_initial_configuration) delegates to shared primitives."""
-        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
-        app.print_section = MagicMock()
-        app.config_manager = MagicMock()
-        app.config_manager._prompt_new_config_name = MagicMock(return_value="initial")
-        app.config_manager._prompt_new_config_environment = MagicMock(return_value="mainnet")
-        app.config_manager._prompt_node_count = MagicMock(return_value=1)
-        app.config_manager._generate_config_name = MagicMock(return_value="initial_20260329_1200_1n")
-        app.config_manager._collect_node_connection_entries = MagicMock()
-        app.config_manager._finalize_new_config_save = MagicMock()
-
-        app._create_initial_configuration()
-
-        app.config_manager._prompt_new_config_name.assert_called_once()
-        app.config_manager._prompt_new_config_environment.assert_called_once()
-        app.config_manager._prompt_node_count.assert_called_once()
-        app.config_manager._collect_node_connection_entries.assert_called_once()
-        app.config_manager._finalize_new_config_save.assert_called_once()
-
-    def test_path3_resets_inventory_before_delegating(self):
-        """Path 3 (_create_new_configuration) uses shared reset."""
+    def test_create_new_configuration_resets_and_delegates_to_machine_first(self):
+        """_create_new_configuration backs up then delegates to machine-first flow."""
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)
         app.get_input = MagicMock(return_value="y")
         app.config_file = MagicMock()
         app.config_file.exists = MagicMock(return_value=False)
         app.config_manager = MagicMock()
-        app._create_initial_configuration = MagicMock()
+        app._create_machine_first_configuration = MagicMock()
 
         app._create_new_configuration()
 
         app.config_manager._reset_inventory_for_new_config.assert_called_once()
-        app._create_initial_configuration.assert_called_once()
+        app._create_machine_first_configuration.assert_called_once()
 
 
 class TestPhase2MachineFirstConfig(unittest.TestCase):
@@ -1789,20 +1721,24 @@ class TestPhase3BatchDiscovery(unittest.TestCase):
         cm = self._make_cm()
         cm._prompt_new_config_name = MagicMock(return_value="test")
         cm._prompt_new_config_environment = MagicMock(return_value="testnet")
+        cm._select_configuration_mode = MagicMock(return_value="simple")
         cm._prompt_machine_count = MagicMock(return_value=1)
         cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1m")
         cm._reset_inventory_for_new_config = MagicMock()
         cm.ensure_configuration_shell = MagicMock()
         cm._collect_machine_registration_entries = MagicMock(return_value=["m-1"])
         cm._onboarding_batch_discovery_and_import = MagicMock(
-            return_value={"scanned": True, "imported_total": 0, "session_mode": "simple"},
+            return_value={"scanned": True, "imported_total": 0, "session_mode": "simple", "clean_machine_ids": []},
         )
+        cm._onboarding_gap_fill_clean_machines = MagicMock(return_value=0)
         cm.app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {}}}}}
         cm.app.wait_for_enter = MagicMock()
 
         cm._create_machine_first_configuration()
 
-        cm._onboarding_batch_discovery_and_import.assert_called_once_with(["m-1"], "testnet")
+        cm._onboarding_batch_discovery_and_import.assert_called_once_with(
+            ["m-1"], "testnet", session_mode="simple",
+        )
 
 
 class TestPhase4GapFill(unittest.TestCase):
@@ -1867,7 +1803,7 @@ class TestPhase4GapFill(unittest.TestCase):
         count = cm._onboarding_gap_fill_clean_machines(["m-1"], "testnet")
 
         self.assertEqual(count, 1)
-        cm._build_fresh_host_entry.assert_called_once_with("m-1", "m-1")
+        cm._build_fresh_host_entry.assert_called_once_with("m-1", "m-1", topology_mode='standard')
         cm.upsert_machine_record.assert_called_once()
         cm._save_config_with_metadata.assert_called_once()
 
@@ -1927,3 +1863,135 @@ class TestPhase4GapFill(unittest.TestCase):
             if 'deploy' in str(c).lower()
         ]
         self.assertEqual(len(deploy_calls), 0)
+
+
+class TestPhase5AdvancedMode(unittest.TestCase):
+    """Tests for Phase 5 advanced mode / expert topology."""
+
+    def _make_cm(self):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.active_config = {"config_name": "test_config"}
+        cm.fleet_state = {
+            "config_schema_version": r1setup.CONFIG_SCHEMA_VERSION,
+            "fleet": {"machines": {}, "instances": {}},
+        }
+        cm._normalize_fleet_state = r1setup.ConfigurationManager._normalize_fleet_state.__get__(cm)
+        cm.get_fleet_state_copy = lambda: copy.deepcopy(cm.fleet_state)
+        return cm
+
+    def test_select_configuration_mode_returns_simple_by_default(self):
+        cm = self._make_cm()
+        cm.app.get_input = MagicMock(return_value="")
+        self.assertEqual(cm._select_configuration_mode(), "simple")
+
+    def test_select_configuration_mode_returns_advanced(self):
+        cm = self._make_cm()
+        cm.app.get_input = MagicMock(return_value="advanced")
+        self.assertEqual(cm._select_configuration_mode(), "advanced")
+
+    def test_select_configuration_mode_rejects_partial_match(self):
+        cm = self._make_cm()
+        cm.app.get_input = MagicMock(return_value="adv")
+        self.assertEqual(cm._select_configuration_mode(), "simple")
+
+    def test_collect_advanced_instance_counts_uses_capacity_formula(self):
+        cm = self._make_cm()
+        cm.fleet_state["fleet"]["machines"]["m-1"] = {
+            "machine_id": "m-1",
+            "machine_specs": {"cpu_total": 16, "memory_gb_total": 64.0},
+            "instance_names": [],
+        }
+        # Accept the default (should be min(16//4, 64//16) = 4)
+        cm.app.get_input = MagicMock(return_value="4")
+        counts = cm._collect_advanced_instance_counts(["m-1"])
+        self.assertEqual(counts["m-1"], 4)
+
+    def test_collect_advanced_instance_counts_caps_at_memory_limit(self):
+        cm = self._make_cm()
+        cm.fleet_state["fleet"]["machines"]["m-1"] = {
+            "machine_id": "m-1",
+            "machine_specs": {"cpu_total": 32, "memory_gb_total": 48.0},
+            "instance_names": [],
+        }
+        # max = min(32//4, 48//16) = min(8, 3) = 3
+        cm.app.get_input = MagicMock(return_value="3")
+        counts = cm._collect_advanced_instance_counts(["m-1"])
+        self.assertEqual(counts["m-1"], 3)
+
+    def test_gap_fill_advanced_creates_multiple_instances(self):
+        cm = self._make_cm()
+        cm.fleet_state["fleet"]["machines"]["m-1"] = {
+            "machine_id": "m-1", "instance_names": [], "topology_mode": "standard",
+            "ansible_host": "10.0.0.1", "ansible_user": "root",
+        }
+        cm.app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {}}}}}
+        # Return sequential hostnames
+        cm.app._get_valid_hostname = MagicMock(side_effect=["inst-1", "inst-2", "inst-3"])
+        cm._build_fresh_host_entry = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "node_status": "never_deployed",
+        })
+        cm.upsert_machine_record = MagicMock()
+        cm._save_config_with_metadata = MagicMock()
+        cm.app.get_input = MagicMock(return_value="Y")
+
+        count = cm._onboarding_gap_fill_clean_machines(
+            ["m-1"], "testnet",
+            config_mode="advanced",
+            desired_counts={"m-1": 3},
+        )
+
+        self.assertEqual(count, 3)
+        # All calls should use topology_mode='expert'
+        for call in cm._build_fresh_host_entry.call_args_list:
+            self.assertEqual(call.kwargs.get("topology_mode"), "expert")
+
+    def test_gap_fill_advanced_subtracts_imported(self):
+        cm = self._make_cm()
+        # Machine already has 1 imported instance
+        cm.fleet_state["fleet"]["machines"]["m-1"] = {
+            "machine_id": "m-1", "instance_names": ["imported-1"],
+            "ansible_host": "10.0.0.1", "ansible_user": "root",
+        }
+        cm.fleet_state["fleet"]["instances"]["imported-1"] = {
+            "assigned_machine_id": "m-1", "logical_name": "imported-1",
+        }
+        cm.app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {}}}}}
+        cm.app._get_valid_hostname = MagicMock(side_effect=["inst-2", "inst-3"])
+        cm._build_fresh_host_entry = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "node_status": "never_deployed",
+        })
+        cm.upsert_machine_record = MagicMock()
+        cm._save_config_with_metadata = MagicMock()
+        cm.app.get_input = MagicMock(return_value="Y")
+
+        count = cm._onboarding_gap_fill_clean_machines(
+            ["m-1"], "testnet",
+            config_mode="advanced",
+            desired_counts={"m-1": 3},
+        )
+
+        # 3 desired - 1 imported = 2 fresh
+        self.assertEqual(count, 2)
+        self.assertEqual(cm._build_fresh_host_entry.call_count, 2)
+
+    def test_gap_fill_simple_still_creates_one(self):
+        """Simple mode backward compatibility: exactly 1 instance per machine."""
+        cm = self._make_cm()
+        cm.fleet_state["fleet"]["machines"]["m-1"] = {
+            "machine_id": "m-1", "instance_names": [],
+            "ansible_host": "10.0.0.1", "ansible_user": "root",
+        }
+        cm.app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {}}}}}
+        cm.app._get_valid_hostname = MagicMock(return_value="m-1")
+        cm._build_fresh_host_entry = MagicMock(return_value={
+            "ansible_host": "10.0.0.1", "node_status": "never_deployed",
+        })
+        cm.upsert_machine_record = MagicMock()
+        cm._save_config_with_metadata = MagicMock()
+        cm.app.get_input = MagicMock(return_value="Y")
+
+        count = cm._onboarding_gap_fill_clean_machines(["m-1"], "testnet")
+
+        self.assertEqual(count, 1)
+        cm._build_fresh_host_entry.assert_called_once_with("m-1", "m-1", topology_mode="standard")

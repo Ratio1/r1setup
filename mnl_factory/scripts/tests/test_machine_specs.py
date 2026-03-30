@@ -92,7 +92,6 @@ class TestMachineRegistrationSpecMessaging(unittest.TestCase):
         app.print_colored = MagicMock()
         app.print_debug = MagicMock()
         app.wait_for_enter = MagicMock()
-        app._select_topology_mode = MagicMock(return_value="expert")
         app._extract_machine_access_config = MagicMock(return_value={
             "ansible_host": "10.0.0.2",
             "ansible_user": "root",

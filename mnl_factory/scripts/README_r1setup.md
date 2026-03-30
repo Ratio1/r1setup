@@ -42,12 +42,22 @@ Notes:
 - Run `bash /home/vi/work/ratio1/repos/multi_node_launcher/scripts/run_r1setup_repo_local.sh --help` for all options.
 
 ## Features
-### Node Management
-- Configure GPU nodes (IP, SSH, authentication)
+### Machine-First Onboarding
+- First-run configuration starts from machines, not nodes
+- Register machines with SSH details and optional hardware spec probes
+- Batch discovery scans all registered machines for existing `edge_node` services
+- Discovered running services are imported (not redeployed) with preserved runtime names
+- Fresh instances are only created on machines confirmed clean by the scan
+- Simple mode (default): one instance per machine, no topology prompts
+- Advanced mode (opt-in): multiple instances per machine with capacity guidance
+- Deploy prompt defaults to `n` and only appears when fresh instances were created
+
+### Instance Management
+- Add, edit, and remove individual instances
 - View current configuration
 - Test node connectivity
 
-### Deployment  
+### Deployment
 - Full deployment (Docker + NVIDIA + GPU)
 - Docker-only deployment
 - Prepare registered machines without deploying an Edge Node yet
@@ -71,9 +81,9 @@ Notes:
 - Change network environment (mainnet/testnet/devnet)
 
 ## Discovery And Import
-Current discovery/import support lives under `Configuration Menu`:
+Discovery and import are integrated into the first-run onboarding flow. They are also available standalone under `Configuration Menu`:
 
-- `Register Machine`: add a fleet machine without deploying a node
+- `Register Machine`: add a fleet machine without deploying a node (delegates to the same shared registration helper used by onboarding)
 - `Discover Services`: scan a registered machine for existing remote `edge_node` services and import only the ones you choose
 
 Discovery/import rules:

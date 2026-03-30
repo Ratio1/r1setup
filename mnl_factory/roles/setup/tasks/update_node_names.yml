@@ -11,11 +11,15 @@
     path: "{{ mnl_config_startup_path }}"
   register: config_file_stat
 
+- name: Resolve target EE_ID from logical name with inventory_hostname fallback
+  set_fact:
+    target_ee_id: "{{ r1setup_instance_logical_name | default(inventory_hostname, true) }}"
+
 - name: Create startup configuration with EE_ID if it doesn't exist
   ansible.builtin.copy:
     content: |
       {
-        "EE_ID": "{{ inventory_hostname }}"
+        "EE_ID": "{{ target_ee_id }}"
       }
     dest: "{{ mnl_config_startup_path }}"
     mode: '0644'
@@ -36,24 +40,24 @@
 
 - name: Check if EE_ID update is needed
   set_fact:
-    ee_id_needs_update: "{{ not config_file_stat.stat.exists or config_created is changed or (current_ee_id | default('')) != inventory_hostname }}"
+    ee_id_needs_update: "{{ not config_file_stat.stat.exists or config_created is changed or (current_ee_id | default('')) != target_ee_id }}"
 
 - name: Display EE_ID status
   debug:
     msg: |
       Node: {{ inventory_hostname }}
       Current EE_ID: {{ current_ee_id | default('not set') }}
-      Target EE_ID: {{ inventory_hostname }}
+      Target EE_ID: {{ target_ee_id }}
       Update needed: {{ ee_id_needs_update }}
 
 - name: Update EE_ID in existing startup configuration
   ansible.builtin.copy:
-    content: "{{ (config_content.content | b64decode | from_json) | combine({'EE_ID': inventory_hostname}) | to_nice_json }}"
+    content: "{{ (config_content.content | b64decode | from_json) | combine({'EE_ID': target_ee_id}) | to_nice_json }}"
     dest: "{{ mnl_config_startup_path }}"
     backup: yes
     mode: '0644'
   become: yes
-  when: 
+  when:
     - config_file_stat.stat.exists
     - ee_id_needs_update | bool
     - config_created is not changed
@@ -61,7 +65,7 @@
 
 - name: Skip message when EE_ID is already correct
   debug:
-    msg: "EE_ID is already set to '{{ inventory_hostname }}' - skipping update and restart"
+    msg: "EE_ID is already set to '{{ target_ee_id }}' - skipping update and restart"
   when: not (ee_id_needs_update | bool)
 
 - name: Restart Edge Node service
