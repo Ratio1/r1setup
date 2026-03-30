@@ -1429,6 +1429,9 @@ class ConfigurationManager:
             registered_ids, env, session_mode=config_mode,
         )
 
+        # If discovery switched the session to advanced, propagate to gap fill
+        config_mode = discovery_result.get('session_mode', config_mode)
+
         # Gap fill: create fresh instances on scanned-clean machines
         fresh_count = self._onboarding_gap_fill_clean_machines(
             discovery_result.get('clean_machine_ids', []), env,
@@ -2652,7 +2655,11 @@ class ConfigurationManager:
         if 'config_name' not in metadata:
             metadata['config_name'] = config_name
         if 'description' not in metadata:
-            metadata['description'] = f"Configuration with {nodes_count} node(s) for {environment} network"
+            fleet_machines = (self.fleet_state or {}).get('fleet', {}).get('machines', {})
+            if fleet_machines and nodes_count == 0:
+                metadata['description'] = f"Configuration with {len(fleet_machines)} machine(s) for {environment} network"
+            else:
+                metadata['description'] = f"Configuration with {nodes_count} node(s) for {environment} network"
         if 'last_deployed_date' not in metadata:
             metadata['last_deployed_date'] = None
         if 'last_deployed_network' not in metadata:
