@@ -53,6 +53,7 @@ import tempfile
 import stat
 import ssl
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 
@@ -64,7 +65,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.6.0"
+    CLI_VERSION = "1.7.0"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -1298,12 +1299,52 @@ class ConfigurationManager:
             node_config = self.app._configure_single_node()
             machine_access = self.app._extract_machine_access_config(node_config)
 
-            # Optional spec probe
-            machine_specs = None
-            probe_choice = self.app.get_input("Probe machine specs? (y/n)", "y")
-            if probe_choice.lower() == 'y':
-                self.app.print_colored("  Probing machine specs...", 'cyan')
-                probe_result = self.app._probe_machine_specs(node_config)
+            # Build and persist machine record (no specs yet)
+            machine_data = {
+                'topology_mode': 'standard',
+                'deployment_state': 'empty',
+                'instance_names': [],
+                **machine_access,
+            }
+
+            self.upsert_machine_record(label, machine_data)
+            registered_ids.append(label)
+            self.app.print_colored(f"\u2713 Machine '{label}' registered.", 'green')
+
+        # Batch probe specs for all registered machines in parallel
+        if registered_ids:
+            probe_choice = self.app.get_input(
+                f"Probe specs for all {len(registered_ids)} machine(s)? (Y/n)", "Y",
+            )
+            if probe_choice.lower() != 'n':
+                self._batch_probe_machine_specs(registered_ids)
+
+        return registered_ids
+
+    def _batch_probe_machine_specs(self, machine_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Probe specs for multiple machines in parallel. Returns {mid: probe_result}."""
+        fleet_state = self._normalize_fleet_state(self.get_fleet_state_copy())
+        results: Dict[str, Dict[str, Any]] = {}
+
+        tasks: Dict[str, Dict[str, Any]] = {}
+        for mid in machine_ids:
+            record = fleet_state['fleet']['machines'].get(mid)
+            if record:
+                tasks[mid] = record
+
+        if not tasks:
+            return results
+
+        self.app.print_colored(f"  Probing specs for {len(tasks)} machine(s) in parallel...", 'cyan')
+
+        def _probe_one(mid: str, record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+            return mid, self.app._probe_machine_specs(record)
+
+        with ThreadPoolExecutor(max_workers=min(len(tasks), 10)) as pool:
+            futures = {pool.submit(_probe_one, mid, rec): mid for mid, rec in tasks.items()}
+            for future in as_completed(futures):
+                mid, probe_result = future.result()
+                results[mid] = probe_result
                 if probe_result.get('status') == 'success':
                     machine_specs = {
                         'hostname': probe_result['hostname'],
@@ -1311,33 +1352,20 @@ class ConfigurationManager:
                         'memory_gb_total': probe_result['memory_gb_total'],
                         'last_checked_at': probe_result['last_checked_at'],
                     }
+                    self.upsert_machine_record(mid, {'machine_specs': machine_specs})
                     self.app.print_colored(
-                        f"  \u2713 {probe_result['hostname']}: {probe_result['cpu_total']} CPU, "
+                        f"    {mid}: \u2713 {probe_result['hostname']}: {probe_result['cpu_total']} CPU, "
                         f"{probe_result['memory_gb_total']:.1f} GiB RAM", 'green',
                     )
                     recommendation = self.assess_machine_resource_recommendation(machine_specs)
                     if recommendation.get('status') != 'meets_recommendation':
-                        self.app.print_colored(f"  {recommendation['message']}", recommendation['color'])
+                        self.app.print_colored(f"    {mid}: {recommendation['message']}", recommendation['color'])
                 else:
                     self.app.print_colored(
-                        f"  \u26a0 Spec probe failed: {probe_result.get('message', 'unknown error')}", 'yellow',
+                        f"    {mid}: \u26a0 {probe_result.get('message', 'unknown error')}", 'yellow',
                     )
 
-            # Build and persist machine record
-            machine_data = {
-                'topology_mode': 'standard',
-                'deployment_state': 'empty',
-                'instance_names': [],
-                **machine_access,
-            }
-            if machine_specs:
-                machine_data['machine_specs'] = machine_specs
-
-            self.upsert_machine_record(label, machine_data)
-            registered_ids.append(label)
-            self.app.print_colored(f"\u2713 Machine '{label}' registered.", 'green')
-
-        return registered_ids
+        return results
 
     def _collect_advanced_instance_counts(self, registered_ids: List[str]) -> Dict[str, int]:
         """For advanced mode, ask for desired instance count per machine.
@@ -1479,34 +1507,51 @@ class ConfigurationManager:
     # -- Batch discovery primitives (Phase 3) --
 
     def _batch_discover_machines(self, machine_ids: List[str]) -> Dict[str, Dict[str, Any]]:
-        """Scan registered machines for existing edge_node services.
+        """Scan registered machines for existing edge_node services in parallel.
 
         Returns ``{machine_id: {status, candidates, error}}`` without persisting.
         """
         fleet_state = self._normalize_fleet_state(self.get_fleet_state_copy())
         scan_buffer: Dict[str, Dict[str, Any]] = {}
+
+        # Separate valid machines from unknown ids
+        tasks: Dict[str, Dict[str, Any]] = {}
         for mid in machine_ids:
             machine_record = fleet_state['fleet']['machines'].get(mid)
             if not machine_record:
                 scan_buffer[mid] = {'status': 'skipped', 'candidates': [], 'error': 'not registered'}
-                continue
-            self.app.print_colored(f"  Scanning {mid}...", 'cyan', end='')
+            else:
+                tasks[mid] = machine_record
+
+        if not tasks:
+            return scan_buffer
+
+        self.app.print_colored(f"  Scanning {len(tasks)} machine(s) in parallel...", 'cyan')
+
+        def _scan_one(mid: str, record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
             try:
-                result = self.app.discover_existing_edge_node_services(machine_record)
+                result = self.app.discover_existing_edge_node_services(record)
                 if result.get('status') == 'success':
-                    candidates = result.get('candidates', [])
+                    return mid, {'status': 'success', 'candidates': result.get('candidates', []), 'error': None}
+                else:
+                    return mid, {'status': 'error', 'candidates': [], 'error': result.get('message', 'unknown error')}
+            except Exception as e:
+                return mid, {'status': 'error', 'candidates': [], 'error': str(e)}
+
+        with ThreadPoolExecutor(max_workers=min(len(tasks), 10)) as pool:
+            futures = {pool.submit(_scan_one, mid, rec): mid for mid, rec in tasks.items()}
+            for future in as_completed(futures):
+                mid, result = future.result()
+                scan_buffer[mid] = result
+                if result['status'] == 'success':
+                    count = len(result['candidates'])
                     self.app.print_colored(
-                        f" \u2713 {len(candidates)} service(s) found" if candidates else " \u2713 clean",
+                        f"    {mid}: \u2713 {count} service(s) found" if count else f"    {mid}: \u2713 clean",
                         'green',
                     )
-                    scan_buffer[mid] = {'status': 'success', 'candidates': candidates, 'error': None}
                 else:
-                    msg = result.get('message', 'unknown error')
-                    self.app.print_colored(f" \u2717 {msg}", 'red')
-                    scan_buffer[mid] = {'status': 'error', 'candidates': [], 'error': msg}
-            except Exception as e:
-                self.app.print_colored(f" \u2717 {e}", 'red')
-                scan_buffer[mid] = {'status': 'error', 'candidates': [], 'error': str(e)}
+                    self.app.print_colored(f"    {mid}: \u2717 {result['error']}", 'red')
+
         return scan_buffer
 
     def _persist_batch_discovery_results(self, scan_buffer: Dict[str, Dict[str, Any]]) -> None:
@@ -8295,8 +8340,8 @@ class SSHKeyManager:
         while True:
             self.app.print_header("SSH Key Management")
 
-            if not self.app.check_hosts_config():
-                self.app.print_colored("No nodes configured. Configure nodes first.", 'red')
+            if not self.app.check_hosts_config() and not self.app.has_fleet_machines():
+                self.app.print_colored("No nodes or machines configured. Configure nodes first.", 'red')
                 self.app.wait_for_enter()
                 return
 
@@ -8307,7 +8352,10 @@ class SSHKeyManager:
 
             self.app.load_configuration()
             hosts = _get_gpu_hosts(self.app.inventory)
-            self.app.print_section(f"Available for {len(hosts)} configured node(s)")
+            # Fall back to fleet-state machines when no inventory hosts exist
+            if not hosts:
+                hosts = self.app.get_fleet_machines_as_hosts()
+            self.app.print_section(f"Available for {len(hosts)} configured node(s)/machine(s)")
             self.app.print_colored("  1) Install Key / Migrate Password Hosts", 'white')
             self.app.print_colored("  2) Add Extra Public Key", 'white')
             self.app.print_colored("  3) Validate Key Authentication", 'white')
@@ -9084,6 +9132,21 @@ class R1Setup:
             return False
         config_path = self.config_manager.app.configs_dir / f"{config_name}.yml"
         return config_path.exists()
+
+    def has_fleet_machines(self) -> bool:
+        """Check whether any machines are registered in fleet state."""
+        fleet_state = self.config_manager.fleet_state or {}
+        return bool(fleet_state.get('fleet', {}).get('machines', {}))
+
+    def get_fleet_machines_as_hosts(self) -> dict:
+        """Return fleet-state machines as a host-compatible dict.
+
+        Each machine record already contains ansible_host, ansible_user, etc.
+        so it can be used in place of inventory hosts for machine-level
+        operations (SSH, logs, key management).
+        """
+        fleet_state = self.config_manager.fleet_state or {}
+        return dict(fleet_state.get('fleet', {}).get('machines', {}))
 
     def _get_operation_log_dir(self) -> Path:
         """Return the local operation-log directory."""
@@ -10574,36 +10637,111 @@ PY"""
             self.wait_for_enter()
             return
 
-        machine_id = str(preselected_machine_id or '').strip()
-        if machine_id and machine_id not in machines:
-            machine_id = ''
-        if not machine_id:
-            machine_id = self._select_single_registered_machine(machines, title="Select Machine For Discovery")
-        if not machine_id:
+        # Determine which machines to scan
+        selected_ids: List[str] = []
+        if preselected_machine_id:
+            mid = str(preselected_machine_id).strip()
+            if mid in machines:
+                selected_ids = [mid]
+
+        if not selected_ids:
+            selected_ids = self._select_machines_for_discovery(machines)
+        if not selected_ids:
             return
 
-        machine_record = dict(machines.get(machine_id, {}))
-        self.print_colored(
-            f"Scanning {self.config_manager._format_machine_connection_display(machine_record)} for existing edge-node services...",
-            'cyan',
-        )
-        discovery_result = self.discover_existing_edge_node_services(machine_record)
-        if discovery_result.get('status') != 'success':
-            self.print_colored(f"Discovery failed: {discovery_result.get('message', 'unknown error')}", 'red')
+        # Batch scan in parallel
+        self.print_section("Scanning Machines")
+        scan_buffer = self.config_manager._batch_discover_machines(selected_ids)
+        self.config_manager._persist_batch_discovery_results(scan_buffer)
+
+        # Summary
+        classified = self.config_manager._classify_scan_results(scan_buffer)
+        self.print_section("Discovery Summary")
+        if classified['clean']:
+            self.print_colored(f"  \u2713 Clean: {', '.join(classified['clean'])}", 'green')
+        if classified['discovered']:
+            for mid in classified['discovered']:
+                count = len(scan_buffer[mid]['candidates'])
+                self.print_colored(f"  \U0001f4e1 Found services: {mid} ({count} service(s))", 'cyan')
+        if classified['failed']:
+            self.print_colored(f"  \u2717 Failed: {', '.join(classified['failed'])}", 'red')
+
+        if not classified['discovered']:
+            self.print_colored("No existing edge-node services were discovered.", 'yellow')
             self.wait_for_enter()
             return
 
-        candidates = list(discovery_result.get('candidates') or [])
-        self.config_manager.record_machine_discovery_scan(machine_id, candidates)
-        if not candidates:
-            self.print_colored("No existing edge-node services were discovered on this machine.", 'yellow')
-            self.wait_for_enter()
-            return
+        # Import flow: walk through each discovered machine interactively
+        for machine_id in classified['discovered']:
+            machine_record = dict(machines.get(machine_id, {}))
+            candidates = list(scan_buffer[machine_id].get('candidates') or [])
+            if not candidates:
+                continue
 
+            self.print_section(f"Import Services from {machine_id}")
+            self._import_discovered_candidates_for_machine(machine_id, machine_record, candidates)
+
+        self.wait_for_enter()
+
+    def _select_machines_for_discovery(self, machines: Dict[str, Dict[str, Any]]) -> List[str]:
+        """Show machine list and let user select one, multiple, or all for discovery."""
+        machine_ids = list(machines.keys())
+        self.print_header("Select Machines For Discovery")
+
+        for index, machine_id in enumerate(machine_ids, start=1):
+            machine_record = machines[machine_id]
+            connection_display = self.config_manager._format_machine_connection_display(machine_record)
+            topology_mode = str(machine_record.get('topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE)
+            deployment_state = str(machine_record.get('deployment_state') or DEFAULT_MACHINE_DEPLOYMENT_STATE)
+            specs_summary = self.config_manager._format_machine_specs_summary(machine_record.get('machine_specs'))
+            line = f"  {index}) {machine_id} | {connection_display} | mode={topology_mode} | state={deployment_state}"
+            self.print_colored(line, 'white')
+            if specs_summary:
+                self.print_colored(f"      specs: {specs_summary}", 'cyan')
+
+        print()
+        self.print_colored("  a) All machines", 'cyan')
+        self.print_colored("  0) Cancel", 'white')
+        print()
+
+        while True:
+            choice = self.get_input(
+                f"Select machines (e.g. 1,3,5 or 'a' for all)", "a",
+            ).strip().lower()
+
+            if choice == '0':
+                return []
+            if choice == 'a':
+                return list(machine_ids)
+
+            # Parse comma-separated numbers
+            try:
+                indices = [int(x.strip()) for x in choice.split(',')]
+                selected = []
+                for idx in indices:
+                    if 1 <= idx <= len(machine_ids):
+                        mid = machine_ids[idx - 1]
+                        if mid not in selected:
+                            selected.append(mid)
+                    else:
+                        self.print_colored(f"  Invalid number: {idx}. Valid range is 1-{len(machine_ids)}.", 'red')
+                        selected = []
+                        break
+                if selected:
+                    return selected
+            except ValueError:
+                self.print_colored("  Enter comma-separated numbers, 'a' for all, or '0' to cancel.", 'red')
+
+    def _import_discovered_candidates_for_machine(
+        self,
+        machine_id: str,
+        machine_record: Dict[str, Any],
+        candidates: List[Dict[str, Any]],
+    ) -> None:
+        """Run the interactive import flow for one machine's discovered candidates."""
         selected_candidates = self._select_discovery_candidates(machine_record, candidates)
         if not selected_candidates:
-            self.print_colored("Discovery import cancelled. No changes were saved.", 'yellow')
-            self.wait_for_enter()
+            self.print_colored(f"  Skipped import for {machine_id}.", 'yellow')
             return
 
         current_env = str(self.get_mnl_app_env() or self.active_config.get('environment') or '').strip().lower()
@@ -10621,8 +10759,7 @@ PY"""
                 "n",
             ).lower() == 'y'
             if not proceed:
-                self.print_colored("Discovery import cancelled. No changes were saved.", 'yellow')
-                self.wait_for_enter()
+                self.print_colored(f"  Skipped import for {machine_id}.", 'yellow')
                 return
 
         duplicate_claims: List[str] = []
@@ -10643,8 +10780,7 @@ PY"""
                 self.print_colored(f"  - {line}", 'yellow')
             proceed = self.get_input("Continue importing into the current config anyway? (y/n)", "n").lower() == 'y'
             if not proceed:
-                self.print_colored("Discovery import cancelled. No changes were saved.", 'yellow')
-                self.wait_for_enter()
+                self.print_colored(f"  Skipped import for {machine_id}.", 'yellow')
                 return
 
         existing_instances = list(machine_record.get('instance_names') or [])
@@ -10662,8 +10798,7 @@ PY"""
             )
             proceed = self.get_input("Promote this machine to expert mode and continue? (y/n)", "n").lower() == 'y'
             if not proceed:
-                self.print_colored("Discovery import cancelled. No changes were saved.", 'yellow')
-                self.wait_for_enter()
+                self.print_colored(f"  Skipped import for {machine_id}.", 'yellow')
                 return
 
         hosts = _get_gpu_hosts(self.inventory)
@@ -10671,8 +10806,7 @@ PY"""
         for candidate in selected_candidates:
             logical_name = self._prompt_discovery_import_name(candidate, hosts)
             if not logical_name:
-                self.print_colored("Discovery import cancelled. No changes were saved.", 'yellow')
-                self.wait_for_enter()
+                self.print_colored(f"  Skipped import for {machine_id}.", 'yellow')
                 return
             logical_name_map[candidate['service_name']] = logical_name
             hosts[logical_name] = {}  # temporary reservation against duplicate prompts
@@ -10682,19 +10816,17 @@ PY"""
 
         result = self.import_discovery_candidates(machine_id, selected_candidates, logical_name_map)
         if result.get('status') != 'success':
-            self.print_colored(f"Discovery import failed: {result.get('message', 'unknown error')}", 'red')
-            self.wait_for_enter()
+            self.print_colored(f"  Import failed for {machine_id}: {result.get('message', 'unknown error')}", 'red')
             return
 
         self.print_colored(
-            f"Imported {len(result.get('imported_names') or [])} service(s) into the current config.",
+            f"  Imported {len(result.get('imported_names') or [])} service(s) from {machine_id}.",
             'green',
         )
         self.print_colored(
-            f"Machine '{machine_id}' now operates in {result.get('topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE)} mode.",
+            f"  Machine '{machine_id}' now operates in {result.get('topology_mode', DEFAULT_MACHINE_TOPOLOGY_MODE)} mode.",
             'cyan',
         )
-        self.wait_for_enter()
 
     def _ensure_configuration_shell_for_machine_registration(self) -> bool:
         """Ensure an active configuration exists before persisting machine-only fleet data."""
@@ -11187,10 +11319,20 @@ PY"""
 
             # Show if configuration exists
             has_config = self.check_hosts_config()
+            has_machines = self.has_fleet_machines()
             if has_config:
                 self.load_configuration()
                 hosts = _get_gpu_hosts(self.inventory)
                 self.print_section(f"Available for {len(hosts)} configured node(s)")
+            elif has_machines:
+                self.load_configuration()
+                machines = self.get_fleet_machines_as_hosts()
+                self.print_section(f"{len(machines)} registered machine(s), no node instances yet")
+                self.print_colored(
+                    "\U0001f4a1 Use 'Discover Services' (Main Menu \u2192 1 \u2192 7) to import existing services,\n"
+                    "   or 'Add New Node' (Main Menu \u2192 1 \u2192 1) to create new instances.",
+                    'yellow',
+                )
             else:
                 self.print_section("No nodes configured")
                 self.print_colored("\u26a0\ufe0f  Configure nodes first to use operations tools", 'yellow')
@@ -11216,7 +11358,15 @@ PY"""
             if choice == '0':
                 break
             elif choice in ('1', '2', '3', '4', '5') and not has_config:
-                self.print_colored("No nodes configured. Please configure nodes first (Main Menu \u2192 1).", 'red')
+                if has_machines:
+                    self.print_colored(
+                        "Machines registered but no node instances configured.\n"
+                        "Use 'Discover Services' (Main Menu \u2192 1 \u2192 7) to import existing services,\n"
+                        "or 'Add New Node' (Main Menu \u2192 1 \u2192 1) to create new instances.",
+                        'red',
+                    )
+                else:
+                    self.print_colored("No nodes configured. Please configure nodes first (Main Menu \u2192 1).", 'red')
                 self.wait_for_enter()
                 continue
             elif choice == '1':
@@ -11750,20 +11900,30 @@ PY"""
         while True:
             self.print_header("Advanced Menu")
 
-            # Show if configuration exists
+            # Show if configuration exists (inventory hosts or fleet machines)
             has_config = self.check_hosts_config()
+            has_machines = self.has_fleet_machines()
             if has_config:
                 self.load_configuration()
                 hosts = _get_gpu_hosts(self.inventory)
                 self.print_section(f"Available for {len(hosts)} configured node(s)")
+            elif has_machines:
+                self.load_configuration()
+                machines = self.get_fleet_machines_as_hosts()
+                self.print_section(f"{len(machines)} registered machine(s), no node instances yet")
+                self.print_colored(
+                    "\U0001f4a1 Use 'Discover Services' (Main Menu \u2192 1 \u2192 7) to import existing services,\n"
+                    "   or 'Add New Node' (Main Menu \u2192 1 \u2192 1) to create new instances.",
+                    'yellow',
+                )
             else:
                 self.print_section("No nodes configured")
-                self.print_colored("⚠️  Configure nodes first to use advanced tools", 'yellow')
+                self.print_colored("\u26a0\ufe0f  Configure nodes first to use advanced tools", 'yellow')
 
             self.print_colored("Advanced Menu", 'cyan', bold=True)
             print()
-            self.print_colored("🔧 OPERATIONAL TOOLS", 'cyan', bold=True)
-            self.print_colored("  1) SSH to Node           - Connect to node via SSH")
+            self.print_colored("\U0001f527 OPERATIONAL TOOLS", 'cyan', bold=True)
+            self.print_colored("  1) SSH to Machine        - Connect to machine via SSH")
             self.print_colored("  2) Get Logs              - Stream logs from nodes")
             self.print_colored("  3) Write Logs to File    - Save node logs to local file")
             print()
@@ -11771,7 +11931,7 @@ PY"""
             self.print_colored("  4) Import Private Keys   - Collect private keys from all nodes")
             self.print_colored("  5) SSH Key Management    - Install, validate, and track SSH keys")
             print()
-            self.print_colored("⚙️  CUSTOMIZATION", 'cyan', bold=True)
+            self.print_colored("\u2699\ufe0f  CUSTOMIZATION", 'cyan', bold=True)
             self.print_colored("  6) Customize Service     - Override service template variables")
             print()
             self.print_colored("  0) Back to Main Menu")
@@ -11781,8 +11941,21 @@ PY"""
 
             if choice == '0':
                 break
-            elif choice in ('1', '2', '3', '4', '5', '6') and not has_config:
-                self.print_colored("No nodes configured. Please configure nodes first (Main Menu \u2192 1).", 'red')
+            # Machine-level operations (SSH, logs, keys) work with fleet machines
+            elif choice in ('1', '2', '3', '4', '5') and not has_config and not has_machines:
+                self.print_colored("No nodes or machines configured. Please configure nodes first (Main Menu \u2192 1).", 'red')
+                self.wait_for_enter()
+                continue
+            # Service customization requires deployed node instances
+            elif choice == '6' and not has_config:
+                if has_machines:
+                    self.print_colored(
+                        "Machines registered but no node instances configured.\n"
+                        "Use 'Discover Services' (Main Menu \u2192 1 \u2192 7) to import existing services first.",
+                        'red',
+                    )
+                else:
+                    self.print_colored("No nodes configured. Please configure nodes first (Main Menu \u2192 1).", 'red')
                 self.wait_for_enter()
                 continue
             elif choice == '1':
@@ -11805,26 +11978,29 @@ PY"""
 
     def import_nodes_private_keys(self) -> None:
         """Import private keys from all configured nodes"""
-        if not self.check_hosts_config():
-            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+        if not self.check_hosts_config() and not self.has_fleet_machines():
+            self.print_colored("No nodes or machines configured! Please configure nodes first.", 'red')
             self.wait_for_enter()
             return
 
         self.print_header("Import Nodes Private Keys")
-        
+
         # WARNING MESSAGE
-        self.print_section("⚠️  CRITICAL SECURITY WARNING")
+        self.print_section("\u26a0\ufe0f  CRITICAL SECURITY WARNING")
         self.print_colored("This operation will collect private keys from all configured nodes.", 'red', bold=True)
         self.print_colored("Private keys provide full access to node wallets and should be handled with extreme care.", 'red')
         self.print_colored("Only proceed if you understand the security implications.", 'red')
         print()
-        
+
         # Load configuration
         self.load_configuration()
         hosts = _get_gpu_hosts(self.inventory)
-        
+        # Fall back to fleet-state machines when no inventory hosts exist
         if not hosts:
-            self.print_colored("No nodes configured.", 'yellow')
+            hosts = self.get_fleet_machines_as_hosts()
+
+        if not hosts:
+            self.print_colored("No nodes or machines configured.", 'yellow')
             self.wait_for_enter()
             return
         
@@ -13192,8 +13368,8 @@ PY"""
 
     def ssh_into_node_machine(self) -> None:
         """SSH into a selected node's machine"""
-        if not self.check_hosts_config():
-            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+        if not self.check_hosts_config() and not self.has_fleet_machines():
+            self.print_colored("No nodes or machines configured! Please configure nodes first.", 'red')
             self.wait_for_enter()
             return
 
@@ -13202,6 +13378,9 @@ PY"""
         # Load configuration
         self.load_configuration()
         hosts = _get_gpu_hosts(self.inventory)
+        # Fall back to fleet-state machines when no inventory hosts exist
+        if not hosts:
+            hosts = self.get_fleet_machines_as_hosts()
         env = self.get_mnl_app_env()
 
         # Show SSH connection details
@@ -13648,19 +13827,22 @@ PY"""
 
     def get_logs(self) -> None:
         """Stream logs from selected nodes"""
-        if not self.check_hosts_config():
-            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+        if not self.check_hosts_config() and not self.has_fleet_machines():
+            self.print_colored("No nodes or machines configured! Please configure nodes first.", 'red')
             self.wait_for_enter()
             return
 
         self.print_header("Get Node Logs")
-        
+
         # Load configuration
         self.load_configuration()
         hosts = _get_gpu_hosts(self.inventory)
-        
+        # Fall back to fleet-state machines when no inventory hosts exist
         if not hosts:
-            self.print_colored("No nodes configured.", 'yellow')
+            hosts = self.get_fleet_machines_as_hosts()
+
+        if not hosts:
+            self.print_colored("No nodes or machines configured.", 'yellow')
             self.wait_for_enter()
             return
         
@@ -13768,22 +13950,25 @@ PY"""
 
     def write_logs_to_file(self) -> None:
         """Save node logs to a local file"""
-        if not self.check_hosts_config():
-            self.print_colored("No nodes configured! Please configure nodes first.", 'red')
+        if not self.check_hosts_config() and not self.has_fleet_machines():
+            self.print_colored("No nodes or machines configured! Please configure nodes first.", 'red')
             self.wait_for_enter()
             return
 
         self.print_header("Write Logs to File")
-        
+
         # Load configuration
         self.load_configuration()
         hosts = _get_gpu_hosts(self.inventory)
-        
+        # Fall back to fleet-state machines when no inventory hosts exist
         if not hosts:
-            self.print_colored("No nodes configured.", 'yellow')
+            hosts = self.get_fleet_machines_as_hosts()
+
+        if not hosts:
+            self.print_colored("No nodes or machines configured.", 'yellow')
             self.wait_for_enter()
             return
-        
+
         # Show available nodes
         self.print_section(f"Available Nodes ({len(hosts)})")
         host_list = list(hosts.keys())

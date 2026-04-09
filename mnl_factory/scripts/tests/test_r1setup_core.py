@@ -1497,10 +1497,10 @@ class TestPhase2MachineFirstConfig(unittest.TestCase):
         cm.active_config = {"config_name": "test"}
         cm.fleet_state = {"config_schema_version": 1, "fleet": {"machines": {}, "instances": {}}}
 
-        # Mock interactions: label, SSH config, decline probe
+        # Mock interactions: label, SSH config, then batch probe at end
         cm.app.get_input = MagicMock(side_effect=[
             "my-machine",   # label for machine 1
-            "n",            # decline spec probe
+            "n",            # decline batch spec probe
         ])
         cm.app._configure_single_node = MagicMock(return_value={
             "ansible_host": "10.0.0.1", "ansible_user": "root", "ansible_port": 22,
@@ -1530,12 +1530,12 @@ class TestPhase2MachineFirstConfig(unittest.TestCase):
         cm.fleet_state = {"config_schema_version": 1, "fleet": {"machines": {}, "instances": {}}}
 
         # First machine: "dup", second attempt: "dup" (rejected), then "unique"
+        # Batch probe is asked once at the end for all machines
         cm.app.get_input = MagicMock(side_effect=[
             "dup",      # label for machine 1
-            "n",        # decline probe
             "dup",      # label for machine 2 (rejected - duplicate)
             "unique",   # retry for machine 2
-            "n",        # decline probe
+            "n",        # decline batch probe
         ])
         cm.app._configure_single_node = MagicMock(return_value={
             "ansible_host": "10.0.0.1", "ansible_user": "root",
