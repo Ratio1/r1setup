@@ -1680,7 +1680,7 @@ class ConfigurationManager:
         hosts = _get_gpu_hosts(self.app.inventory)
         logical_name_map: Dict[str, str] = {}
         for candidate in selected:
-            name = self.app._prompt_discovery_import_name(candidate, hosts)
+            name = self.app._prompt_discovery_import_name(candidate, hosts, machine_id=machine_id)
             if name is None:
                 return {'action': 'cancelled', 'imported_count': 0, 'mode_switched_to': None}
             logical_name_map[candidate['service_name']] = name
@@ -10483,9 +10483,13 @@ PY"""
         self,
         candidate: Dict[str, Any],
         existing_hosts: Dict[str, Dict[str, Any]],
+        machine_id: str = '',
     ) -> Optional[str]:
         """Prompt for the config-local logical name of one imported discovered candidate."""
-        suggested_name = self.config_manager._sanitize_runtime_suffix(candidate.get('service_name') or 'imported_node')
+        # Default to machine name; fall back to service name if machine_id conflicts
+        suggested_name = machine_id or self.config_manager._sanitize_runtime_suffix(
+            candidate.get('service_name') or 'imported_node',
+        )
         if suggested_name in existing_hosts:
             suffix = 2
             base_name = suggested_name
@@ -10493,9 +10497,13 @@ PY"""
                 suffix += 1
             suggested_name = f"{base_name}_{suffix}"
 
+        self.print_colored(
+            f"  Node alias for service '{candidate['service_name']}' (this is only a local alias in r1setup):",
+            'cyan',
+        )
         while True:
             chosen_name = self._get_valid_hostname(
-                f"Config node name for imported service '{candidate['service_name']}'",
+                f"Node alias",
                 suggested_name,
             )
             if chosen_name in existing_hosts:
@@ -10804,7 +10812,7 @@ PY"""
         hosts = _get_gpu_hosts(self.inventory)
         logical_name_map: Dict[str, str] = {}
         for candidate in selected_candidates:
-            logical_name = self._prompt_discovery_import_name(candidate, hosts)
+            logical_name = self._prompt_discovery_import_name(candidate, hosts, machine_id=machine_id)
             if not logical_name:
                 self.print_colored(f"  Skipped import for {machine_id}.", 'yellow')
                 return
