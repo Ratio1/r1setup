@@ -1172,7 +1172,6 @@ class ConfigurationManager:
             'last_deployed_network': None,
             'deployment_status': 'never_deployed',
             'last_deleted_date': None,
-            'last_deployment_type': None
         }
 
     def _load_active_config(self) -> None:
@@ -1189,7 +1188,6 @@ class ConfigurationManager:
             'last_deployed_network': None,
             'deployment_status': 'never_deployed',
             'last_deleted_date': None,
-            'last_deployment_type': None
         }
 
         if self.app.active_config_file.exists():
@@ -2733,8 +2731,9 @@ class ConfigurationManager:
             metadata['deployment_status'] = 'never_deployed'
         if 'last_deleted_date' not in metadata:
             metadata['last_deleted_date'] = None
-        if 'last_deployment_type' not in metadata:
-            metadata['last_deployment_type'] = None
+        # last_deployment_type was fleet-level and lied on mixed fleets — drop
+        # it on load so stale values don't linger in the config file.
+        metadata.pop('last_deployment_type', None)
 
         # Always update these fields
         metadata['environment'] = environment
@@ -3032,6 +3031,34 @@ class ConfigurationManager:
             changed = True
         if changed:
             self._save_configuration()
+
+    @staticmethod
+    def install_variant_summary(inventory: Dict[str, Any]) -> str:
+        """Per-host variant rollup for display, e.g. 'GPU: 2, CPU: 3' or
+        'no installs yet'. Reads r1setup_last_install_variant from each host.
+
+        Replaces the fleet-level last_deployment_type field, which lied on
+        mixed fleets.
+        """
+        hosts = _get_gpu_hosts(inventory)
+        counts: Dict[str, int] = {'gpu': 0, 'cpu': 0}
+        never = 0
+        for cfg in hosts.values():
+            v = cfg.get(INSTALL_LAST_VARIANT_FIELD)
+            if v in counts:
+                counts[v] += 1
+            else:
+                never += 1
+        pieces = []
+        if counts['gpu']:
+            pieces.append(f"GPU: {counts['gpu']}")
+        if counts['cpu']:
+            pieces.append(f"CPU: {counts['cpu']}")
+        if not pieces:
+            return 'no installs yet'
+        if never:
+            pieces.append(f"Never: {never}")
+        return ", ".join(pieces)
 
     @staticmethod
     def _read_fetched_metadata(
@@ -3950,8 +3977,12 @@ class ConfigurationManager:
                     deployment_status = metadata.get('deployment_status', 'never_deployed')
                     last_deployed_date = metadata.get('last_deployed_date')
                     last_deployed_network = metadata.get('last_deployed_network')
-                    last_deployment_type = metadata.get('last_deployment_type')
                     last_deleted_date = metadata.get('last_deleted_date')
+                    # Per-host variant rollup replaces the retired
+                    # fleet-level last_deployment_type field.
+                    variant_summary = self.install_variant_summary(
+                        metadata.get('inventory') or self.app.inventory
+                    )
 
                     if deployment_status == 'deployed' and last_deployed_date:
                         deployed_str = _parse_iso_datetime(last_deployed_date)
@@ -3959,8 +3990,8 @@ class ConfigurationManager:
                             deployment_info = f"🚀 Last deployed: {deployed_str}"
                             if last_deployed_network:
                                 deployment_info += f" ({last_deployed_network}"
-                            if last_deployment_type:
-                                deployment_info += f", {last_deployment_type})"
+                            if variant_summary and variant_summary != 'no installs yet':
+                                deployment_info += f", {variant_summary})"
                             elif last_deployed_network:
                                 deployment_info += ")"
                         else:
@@ -4098,7 +4129,6 @@ class ConfigurationManager:
                         'last_deployed_network': None,
                         'deployment_status': 'never_deployed',
                         'last_deleted_date': None,
-                        'last_deployment_type': None
                     }
                     self._save_active_config()
 
@@ -6073,7 +6103,8 @@ class DeploymentService:
             metadata['last_deployed_date'] = datetime.now().isoformat()
             metadata['last_deployed_network'] = current_network
             metadata['deployment_status'] = 'deployed'
-            metadata['last_deployment_type'] = deployment_type
+            # last_deployment_type retired: per-host variant is the truth now.
+            metadata.pop('last_deployment_type', None)
 
             self.app.print_debug(f"Updated metadata: {metadata}")
 
@@ -6159,11 +6190,11 @@ class DeploymentService:
             self.app.print_colored(f"ℹ️  {deployment_display['status_note']}", 'white')
         if deployment_status == 'deployed':
             last_deployed_network = self.app.active_config.get('last_deployed_network')
-            last_deployment_type = self.app.active_config.get('last_deployment_type')
+            variant_summary = self.app.config_manager.install_variant_summary(self.app.inventory)
             if last_deployed_network:
                 self.app.print_colored(f"🌐 Network: {last_deployed_network}", 'cyan')
-            if last_deployment_type:
-                self.app.print_colored(f"🔧 Type: {last_deployment_type}", 'cyan')
+            if variant_summary and variant_summary != 'no installs yet':
+                self.app.print_colored(f"🔧 Per-host variants: {variant_summary}", 'cyan')
 
         # Individual node status - check in real-time
         self.app.print_section(f"Machine Status Overview")
@@ -11237,8 +11268,11 @@ PY"""
         deployment_status = str(metadata.get('deployment_status') or 'never_deployed')
         last_deployed_date = metadata.get('last_deployed_date')
         last_deployed_network = metadata.get('last_deployed_network')
-        last_deployment_type = metadata.get('last_deployment_type')
         last_deleted_date = metadata.get('last_deleted_date')
+        # Per-host variant rollup replaces retired fleet-level last_deployment_type.
+        variant_summary = self.config_manager.install_variant_summary(
+            inventory if inventory is not None else self.inventory
+        )
 
         if deployment_status == 'deployed':
             deployed_str = _parse_iso_datetime(last_deployed_date) if last_deployed_date else None
@@ -11246,8 +11280,8 @@ PY"""
             main_menu_text = f"🚀 deployed {deployed_str}" if deployed_str else "✓ deployed"
             if deployed_str and last_deployed_network:
                 summary_text += f" ({last_deployed_network}"
-                if last_deployment_type:
-                    summary_text += f", {last_deployment_type})"
+                if variant_summary and variant_summary != 'no installs yet':
+                    summary_text += f", {variant_summary})"
                 else:
                     summary_text += ")"
                 main_menu_text += f" ({last_deployed_network})"
@@ -11568,11 +11602,11 @@ PY"""
                 self.print_colored(f"ℹ️  {deployment_display['status_note']}", 'white')
             if deployment_status == 'deployed':
                 last_deployed_network = self.active_config.get('last_deployed_network')
-                last_deployment_type = self.active_config.get('last_deployment_type')
+                variant_summary = self.config_manager.install_variant_summary(self.inventory)
                 if last_deployed_network:
                     self.print_colored(f"🌐 Network: {last_deployed_network}", 'cyan')
-                if last_deployment_type:
-                    self.print_colored(f"🔧 Type: {last_deployment_type}", 'cyan')
+                if variant_summary and variant_summary != 'no installs yet':
+                    self.print_colored(f"🔧 Per-host variants: {variant_summary}", 'cyan')
             migration_plan_state = self.active_config.get('migration_plan_state')
             if migration_plan_state:
                 self.print_colored(
