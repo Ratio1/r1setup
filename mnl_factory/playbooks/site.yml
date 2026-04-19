@@ -9,10 +9,35 @@
     - ../group_vars/vault.yml
     - ../group_vars/mnl.yml
     - ../group_vars/variables.yml
-  roles:
-    - role: "{{ playbook_dir }}/../roles/prerequisites"
-    - role: "{{ playbook_dir }}/../roles/docker"
-    - role: "{{ playbook_dir }}/../roles/nvidia_gpu"
-      when: skip_gpu is not defined or not skip_gpu
-    - role: "{{ playbook_dir }}/../roles/setup"
+  tasks:
+    - name: Run prerequisites role
+      import_role:
+        name: prerequisites
 
+    - name: Run docker role
+      import_role:
+        name: docker
+
+    # GPU driver install (Mode 2). Wrapped in block/rescue so a failure
+    # cleans up partial NVIDIA packages and then re-raises — no silent
+    # fallback to CPU. Mode 3 (skip_gpu=true) skips the whole block, so
+    # we never touch user-managed drivers.
+    - name: GPU driver install (with cleanup on failure)
+      block:
+        - name: Include nvidia_gpu role
+          include_role:
+            name: nvidia_gpu
+      rescue:
+        - name: Cleanup partial NVIDIA install on failure (r1setup-managed drivers only)
+          shell: "apt autoremove nvidia* --purge -y"
+          become: true
+          ignore_errors: true
+          when: ansible_os_family == "Debian"
+        - name: Re-raise GPU install failure (no fallback)
+          fail:
+            msg: "GPU install failed on {{ inventory_hostname }} — partial driver state cleaned up. See earlier task output."
+      when: skip_gpu is not defined or not skip_gpu
+
+    - name: Run setup role
+      import_role:
+        name: setup

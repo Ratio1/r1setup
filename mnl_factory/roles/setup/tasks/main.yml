@@ -1,4 +1,17 @@
 ---
+# Mode-3 preflight: user said they manage GPU drivers (skip_gpu=true) but
+# asked for the GPU image. Verify nvidia-smi works here, BEFORE we pull
+# anything, so a broken user-managed setup fails loudly without us touching
+# their drivers.
+- name: Preflight nvidia-smi check (user-managed GPU drivers)
+  command: nvidia-smi
+  register: r1setup_user_nvidia_smi
+  changed_when: false
+  failed_when: r1setup_user_nvidia_smi.rc != 0
+  when:
+    - mnl_image_variant | default('cpu') == 'gpu'
+    - skip_gpu | default(false)
+
 - name: Log into Docker registry
   docker_login:
     registry: "{{ docker_registry }}"
