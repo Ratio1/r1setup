@@ -21,7 +21,13 @@ mnl_docker_persistent_folder: "/edge_node/_local_cache"
 
 mnl_cr_server: "docker.io"
 mnl_cr_user: "ratio1"
-mnl_docker_image_name: "edge_node"
+mnl_docker_image_name_cpu: "edge_node"
+mnl_docker_image_name_gpu: "edge_node_gpu"
+
+# CLI passes mnl_image_variant_cli as an extra-var. Host_vars / group_vars can
+# pin mnl_image_variant directly (host_vars > group_vars > cli default).
+mnl_image_variant: "{{ mnl_image_variant_cli | default('cpu') }}"
+mnl_docker_image_name: "{{ mnl_docker_image_name_gpu if mnl_image_variant == 'gpu' else mnl_docker_image_name_cpu }}"
 mnl_docker_image_url: "{{ mnl_cr_user }}/{{ mnl_docker_image_name }}:{{ mnl_app_env }}"
 
 mnl_docker_pull_limit: 5
