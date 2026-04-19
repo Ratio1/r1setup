@@ -300,6 +300,93 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
             self.assertEqual(app.run_generated_playbook.call_args_list[1].kwargs["timeout"], 180)
 
 
+class TestInstallTrackingHelpers(unittest.TestCase):
+    """Tests record_install_attempt, record_install_success, and
+    _normalize_host_config migration for the eight install-tracking fields."""
+
+    def _make_manager(self, hosts):
+        """Build a minimal ConfigurationManager with a stubbed app carrying
+        an inventory whose gpu_nodes.hosts match `hosts`, a stub save that
+        just toggles a flag, and a predictable collection version."""
+        app = MagicMock()
+        app.inventory = {
+            'all': {'children': {'gpu_nodes': {'hosts': hosts}}}
+        }
+        mgr = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        mgr.app = app
+        mgr._save_configuration = MagicMock()
+        mgr.get_collection_version = MagicMock(return_value='1.8.0')
+        return mgr
+
+    def test_derive_driver_owner(self):
+        cm = r1setup.ConfigurationManager
+        self.assertEqual(cm._derive_driver_owner('cpu', False), 'n/a')
+        self.assertEqual(cm._derive_driver_owner('cpu', True), 'n/a')
+        self.assertEqual(cm._derive_driver_owner('gpu', True), 'r1setup')
+        self.assertEqual(cm._derive_driver_owner('gpu', False), 'user')
+
+    def test_record_install_attempt_writes_expected_fields(self):
+        hosts = {'node-1': {'ansible_host': '1.2.3.4'}}
+        mgr = self._make_manager(hosts)
+        mgr.record_install_attempt(['node-1'], 'gpu', 'r1setup', 'failed')
+        cfg = hosts['node-1']
+        self.assertEqual(cfg[r1setup.INSTALL_ATTEMPTED_VARIANT_FIELD], 'gpu')
+        self.assertEqual(cfg[r1setup.INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD], 'r1setup')
+        self.assertEqual(cfg[r1setup.INSTALL_ATTEMPTED_RESULT_FIELD], 'failed')
+        self.assertIsNotNone(cfg[r1setup.INSTALL_ATTEMPTED_AT_FIELD])
+        # Success fields must NOT be touched by an attempt-only call.
+        self.assertNotIn(r1setup.INSTALL_LAST_VARIANT_FIELD, cfg)
+        mgr._save_configuration.assert_called_once()
+
+    def test_record_install_attempt_rejects_bad_result(self):
+        mgr = self._make_manager({})
+        with self.assertRaises(ValueError):
+            mgr.record_install_attempt(['x'], 'gpu', 'r1setup', 'bogus')
+
+    def test_record_install_attempt_ignores_unknown_hosts(self):
+        hosts = {'node-1': {}}
+        mgr = self._make_manager(hosts)
+        mgr.record_install_attempt(['ghost-host'], 'cpu', 'n/a', 'success')
+        self.assertEqual(hosts, {'node-1': {}})
+        mgr._save_configuration.assert_not_called()
+
+    def test_record_install_success_writes_expected_fields(self):
+        hosts = {'node-1': {}, 'node-2': {}}
+        mgr = self._make_manager(hosts)
+        mgr.record_install_success(['node-1', 'node-2'], 'gpu', 'user')
+        for name in ('node-1', 'node-2'):
+            cfg = hosts[name]
+            self.assertEqual(cfg[r1setup.INSTALL_LAST_VARIANT_FIELD], 'gpu')
+            self.assertEqual(cfg[r1setup.INSTALL_LAST_DRIVER_OWNER_FIELD], 'user')
+            self.assertEqual(cfg[r1setup.INSTALL_LAST_COLLECTION_VERSION_FIELD], '1.8.0')
+            self.assertIsNotNone(cfg[r1setup.INSTALL_LAST_AT_FIELD])
+
+    def test_normalize_host_config_backfills_install_fields(self):
+        cfg = {'ansible_host': '1.2.3.4'}
+        changed = r1setup.ConfigurationManager._normalize_host_config(cfg)
+        self.assertTrue(changed)
+        for field in r1setup.INSTALL_TRACKING_FIELDS:
+            self.assertIn(field, cfg)
+            self.assertIsNone(cfg[field])
+
+    def test_read_fetched_metadata_returns_empty_for_missing_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = r1setup.ConfigurationManager._read_fetched_metadata(
+                ['h1', 'h2'], Path(td)
+            )
+            self.assertEqual(out, {'h1': {}, 'h2': {}})
+
+    def test_read_fetched_metadata_parses_valid_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            (base / 'h1.json').write_text(
+                '{"image_variant": "gpu", "driver_owner": "r1setup", "image_url": "ratio1/edge_node_gpu:testnet"}'
+            )
+            out = r1setup.ConfigurationManager._read_fetched_metadata(['h1'], base)
+            self.assertEqual(out['h1']['image_variant'], 'gpu')
+            self.assertEqual(out['h1']['driver_owner'], 'r1setup')
+
+
 class TestBuildInstallExtraVars(unittest.TestCase):
     """Validates the three-mode install extra-vars builder."""
 

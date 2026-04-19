@@ -118,6 +118,26 @@ SSH_AUTH_MODE_VERIFICATION_FAILED = 'verification_failed'
 SERVICE_FILE_VERSION_FIELD = 'r1setup_service_file_version'
 DEFAULT_SERVICE_FILE_VERSION = 'v0'
 UNKNOWN_SERVICE_FILE_VERSION_MARKERS = {'', 'unknown', 'not found', 'n/a', 'none', 'null'}
+
+# Per-host install tracking fields (see docs/_todos/20260418T183123_r1setup_mixed_cpu_gpu_fleets.md).
+INSTALL_LAST_VARIANT_FIELD = 'r1setup_last_install_variant'
+INSTALL_LAST_DRIVER_OWNER_FIELD = 'r1setup_last_install_driver_owner'
+INSTALL_LAST_AT_FIELD = 'r1setup_last_install_at'
+INSTALL_LAST_COLLECTION_VERSION_FIELD = 'r1setup_last_install_collection_version'
+INSTALL_ATTEMPTED_VARIANT_FIELD = 'r1setup_last_attempted_variant'
+INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD = 'r1setup_last_attempted_driver_owner'
+INSTALL_ATTEMPTED_AT_FIELD = 'r1setup_last_attempted_at'
+INSTALL_ATTEMPTED_RESULT_FIELD = 'r1setup_last_attempted_result'
+INSTALL_TRACKING_FIELDS = (
+    INSTALL_LAST_VARIANT_FIELD,
+    INSTALL_LAST_DRIVER_OWNER_FIELD,
+    INSTALL_LAST_AT_FIELD,
+    INSTALL_LAST_COLLECTION_VERSION_FIELD,
+    INSTALL_ATTEMPTED_VARIANT_FIELD,
+    INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD,
+    INSTALL_ATTEMPTED_AT_FIELD,
+    INSTALL_ATTEMPTED_RESULT_FIELD,
+)
 CONFIG_SCHEMA_VERSION = 1
 DEFAULT_MACHINE_TOPOLOGY_MODE = 'standard'
 DEFAULT_MACHINE_DEPLOYMENT_STATE = 'unknown'
@@ -2953,6 +2973,90 @@ class ConfigurationManager:
         if changed:
             self._save_configuration()
 
+    @staticmethod
+    def _derive_driver_owner(variant: str, manage_drivers: bool) -> str:
+        """Map (variant, manage_drivers) → the driver_owner label persisted on each host."""
+        if variant != 'gpu':
+            return 'n/a'
+        return 'r1setup' if manage_drivers else 'user'
+
+    def record_install_attempt(
+        self,
+        host_names: List[str],
+        variant: str,
+        driver_owner: str,
+        result: str,
+    ) -> None:
+        """Persist the last-attempted install metadata for each host.
+
+        Attempts are recorded regardless of success, so the selection menu
+        can show e.g. 'GPU (user) • 2026-04-17 ✗' next to a host whose last
+        attempt failed but which still has a prior successful CPU install.
+        """
+        if result not in ('success', 'failed'):
+            raise ValueError(f"Invalid attempt result {result!r}; expected 'success' or 'failed'")
+        hosts = _get_gpu_hosts(self.app.inventory)
+        now = datetime.now().isoformat()
+        changed = False
+        for name in host_names:
+            host_config = hosts.get(name)
+            if host_config is None:
+                continue
+            host_config[INSTALL_ATTEMPTED_VARIANT_FIELD] = variant
+            host_config[INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD] = driver_owner
+            host_config[INSTALL_ATTEMPTED_AT_FIELD] = now
+            host_config[INSTALL_ATTEMPTED_RESULT_FIELD] = result
+            changed = True
+        if changed:
+            self._save_configuration()
+
+    def record_install_success(
+        self,
+        host_names: List[str],
+        variant: str,
+        driver_owner: str,
+    ) -> None:
+        """Persist the last-successful install metadata for each host."""
+        hosts = _get_gpu_hosts(self.app.inventory)
+        now = datetime.now().isoformat()
+        collection_version = self.get_collection_version()
+        changed = False
+        for name in host_names:
+            host_config = hosts.get(name)
+            if host_config is None:
+                continue
+            host_config[INSTALL_LAST_VARIANT_FIELD] = variant
+            host_config[INSTALL_LAST_DRIVER_OWNER_FIELD] = driver_owner
+            host_config[INSTALL_LAST_AT_FIELD] = now
+            host_config[INSTALL_LAST_COLLECTION_VERSION_FIELD] = collection_version
+            changed = True
+        if changed:
+            self._save_configuration()
+
+    @staticmethod
+    def _read_fetched_metadata(
+        host_names: List[str],
+        fetched_dir: Optional[Path] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Read per-host metadata JSON files pulled from each host by the
+        `fetch` task in render_edge_node_definition.yml. Returns a mapping
+        {hostname: metadata_dict}. Missing or malformed files yield an
+        empty entry for that host so callers can uniformly iterate.
+        """
+        base = fetched_dir if fetched_dir is not None else Path('/tmp/r1setup-fetched')
+        out: Dict[str, Dict[str, Any]] = {}
+        for name in host_names:
+            fpath = base / f"{name}.json"
+            if not fpath.exists():
+                out[name] = {}
+                continue
+            try:
+                with fpath.open('r') as fh:
+                    out[name] = json.load(fh)
+            except (OSError, ValueError):
+                out[name] = {}
+        return out
+
     def _save_configuration(self) -> None:
         """Save configuration to file (legacy method - now uses new config management)"""
         # Get current environment and node count
@@ -2991,6 +3095,13 @@ class ConfigurationManager:
         if 'last_status_check' in host_config:
             del host_config['last_status_check']
             changed = True
+
+        # Backfill install-tracking fields for old inventories so the menu
+        # renderer can rely on them always being present (None = never).
+        for field in INSTALL_TRACKING_FIELDS:
+            if field not in host_config:
+                host_config[field] = None
+                changed = True
 
         return changed
 
@@ -5811,6 +5922,17 @@ class DeploymentService:
         )
         successful_instance_hosts = self._extract_successful_hosts_from_output(instance_output, deployable_host_names)
         failed_instance_hosts = [host_name for host_name in deployable_host_names if host_name not in successful_instance_hosts]
+
+        # Record install attempt + success on every run (not only on the
+        # overall-success branch below) so per-host history reflects
+        # reality for mixed-fleet partial failures.
+        driver_owner = ConfigurationManager._derive_driver_owner(variant, manage_drivers)
+        if successful_instance_hosts:
+            self.app.record_install_attempt(successful_instance_hosts, variant, driver_owner, "success")
+            self.app.record_install_success(successful_instance_hosts, variant, driver_owner)
+        failed_for_tracking = list(failed_instance_hosts) + list(skipped_host_names)
+        if failed_for_tracking:
+            self.app.record_install_attempt(failed_for_tracking, variant, driver_owner, "failed")
 
         if success:
             self.app.print_colored(f"\n✅ Deployment succeeded on {len(successful_instance_hosts)} node(s)", 'green')
@@ -9562,6 +9684,30 @@ class R1Setup:
 
     def record_service_file_versions(self, host_versions: Dict[str, str]) -> None:
         return self.config_manager.record_service_file_versions(host_versions)
+
+    def record_install_attempt(
+        self,
+        host_names: List[str],
+        variant: str,
+        driver_owner: str,
+        result: str,
+    ) -> None:
+        return self.config_manager.record_install_attempt(host_names, variant, driver_owner, result)
+
+    def record_install_success(
+        self,
+        host_names: List[str],
+        variant: str,
+        driver_owner: str,
+    ) -> None:
+        return self.config_manager.record_install_success(host_names, variant, driver_owner)
+
+    @staticmethod
+    def read_fetched_metadata(
+        host_names: List[str],
+        fetched_dir: Optional[Path] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        return ConfigurationManager._read_fetched_metadata(host_names, fetched_dir)
 
     def detect_helper_mode_conflicts(
         self,
