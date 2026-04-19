@@ -300,6 +300,155 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
             self.assertEqual(app.run_generated_playbook.call_args_list[1].kwargs["timeout"], 180)
 
 
+class TestDeploySetupEndToEnd(unittest.TestCase):
+    """End-to-end integration tests for _deploy_setup across all three install
+    modes, plus a partial-failure case. Exercises the full happy path down to
+    the Ansible boundary, asserting that per-host install tracking + deployment
+    type + image summary hooks are wired correctly."""
+
+    def _make_app(self, base_path):
+        app = MagicMock()
+        app.check_hosts_config.return_value = True
+        app.load_configuration.return_value = True
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-a": {"ansible_host": "10.0.0.1", "ansible_user": "root"},
+                            "node-b": {"ansible_host": "10.0.0.2", "ansible_user": "root"},
+                        }
+                    }
+                }
+            }
+        }
+        app.get_mnl_app_env.return_value = "testnet"
+        app._get_node_status_info.return_value = {"status": "never_deployed"}
+        app._get_status_display_info.return_value = ("?", "yellow", "Never deployed")
+        app.get_input.return_value = "y"
+        app.config_dir = base_path
+        app.config_file = base_path / "hosts.yml"
+        app.active_config = {"deployment_status": "never_deployed"}
+        app.connection_timeout = 30
+        app.print_colored = MagicMock()
+        app.print_header = MagicMock()
+        app.wait_for_enter = MagicMock()
+        app._update_node_status = MagicMock()
+        app._display_node_status = MagicMock()
+        app._display_copy_friendly_addresses = MagicMock()
+        app.record_service_file_version = MagicMock()
+        # New per-host install-tracking delegators.
+        app.record_install_attempt = MagicMock()
+        app.record_install_success = MagicMock()
+        app.read_fetched_metadata = MagicMock(return_value={})
+        app.group_host_names_by_machine.return_value = {
+            "root@10.0.0.1:22": {"representative_host": "node-a", "host_names": ["node-a"]},
+            "root@10.0.0.2:22": {"representative_host": "node-b", "host_names": ["node-b"]},
+        }
+        app.config_manager = MagicMock()
+        app.config_manager._derive_machine_id.side_effect = (
+            lambda host_name, host_config: f"{host_config.get('ansible_user', 'root')}@{host_config['ansible_host']}:22"
+        )
+        app._parse_ansible_play_recap.return_value = {
+            "node-a": {"status": "connected"},
+            "node-b": {"status": "connected"},
+        }
+        return app
+
+    def _prep_env(self, temp_dir, select_hosts):
+        base_path = Path(temp_dir)
+        playbooks_dir = base_path / "playbooks"
+        playbooks_dir.mkdir(parents=True, exist_ok=True)
+        (playbooks_dir / "prepare_machine.yml").write_text("---\n")
+        (playbooks_dir / "apply_instance.yml").write_text("---\n")
+        app = self._make_app(base_path)
+        app.select_hosts.return_value = list(select_hosts)
+        return app
+
+    def _run_deploy(self, app, variant, manage_drivers, title="Test Install"):
+        service = r1setup.DeploymentService(app)
+        with patch.dict(os.environ, {}, clear=False):
+            with patch.object(service, "_update_deployment_metadata") as update_metadata:
+                service._deploy_setup(
+                    "site.yml",
+                    title,
+                    f"{variant} deploy",
+                    variant=variant,
+                    manage_drivers=manage_drivers,
+                )
+        return update_metadata
+
+    def test_mode_1_cpu_records_cpu_and_na_owner(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = self._prep_env(td, ["node-a"])
+            app.run_generated_playbook.side_effect = [
+                (True, "ok", ["node-a"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}}}}}}),
+                (True, "ok", ["node-a"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}}}}}}),
+            ]
+            update_metadata = self._run_deploy(app, variant="cpu", manage_drivers=False)
+            update_metadata.assert_called_once_with("docker_only")
+            app.record_install_success.assert_called_once_with(["node-a"], "cpu", "n/a")
+            # Attempt is recorded on the same success path.
+            app.record_install_attempt.assert_any_call(["node-a"], "cpu", "n/a", "success")
+
+    def test_mode_2_gpu_managed_records_r1setup_owner(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = self._prep_env(td, ["node-a"])
+            app.run_generated_playbook.side_effect = [
+                (True, "ok", ["node-a"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}}}}}}),
+                (True, "ok", ["node-a"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}}}}}}),
+            ]
+            update_metadata = self._run_deploy(app, variant="gpu", manage_drivers=True)
+            update_metadata.assert_called_once_with("full")
+            app.record_install_success.assert_called_once_with(["node-a"], "gpu", "r1setup")
+
+    def test_mode_3_gpu_user_records_user_owner(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = self._prep_env(td, ["node-a"])
+            app.run_generated_playbook.side_effect = [
+                (True, "ok", ["node-a"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}}}}}}),
+                (True, "ok", ["node-a"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}}}}}}),
+            ]
+            update_metadata = self._run_deploy(app, variant="gpu", manage_drivers=False)
+            update_metadata.assert_called_once_with("full")
+            app.record_install_success.assert_called_once_with(["node-a"], "gpu", "user")
+
+    def test_partial_fleet_failure_records_attempt_for_failed_hosts(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = self._prep_env(td, ["node-a", "node-b"])
+            # Both hosts pass machine prepare; only node-a connects during
+            # instance apply (node-b fails on that phase).
+            app.run_generated_playbook.side_effect = [
+                (True, "ok", ["node-a", "node-b"],
+                 {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}, "node-b": {}}}}}}),
+                (False, "apply-out", ["node-a", "node-b"],
+                 {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}, "node-b": {}}}}}}),
+            ]
+            # Vary _parse_ansible_play_recap per phase: both succeed in machine
+            # prepare, only node-a in instance apply.
+            def _recap(output: str):
+                if "apply" in output:
+                    return {"node-a": {"status": "connected"}, "node-b": {"status": "failed"}}
+                return {"node-a": {"status": "connected"}, "node-b": {"status": "connected"}}
+            app._parse_ansible_play_recap.side_effect = _recap
+
+            self._run_deploy(app, variant="gpu", manage_drivers=True)
+
+            # node-a recorded as success, node-b as failed.
+            success_calls = [
+                c for c in app.record_install_attempt.call_args_list
+                if c.args[3] == "success"
+            ]
+            failed_calls = [
+                c for c in app.record_install_attempt.call_args_list
+                if c.args[3] == "failed"
+            ]
+            self.assertEqual(len(success_calls), 1, "one success batch expected")
+            self.assertEqual(success_calls[0].args[0], ["node-a"])
+            self.assertIn("node-b", failed_calls[0].args[0])
+            app.record_install_success.assert_called_once_with(["node-a"], "gpu", "r1setup")
+
+
 class TestInstallVariantSummary(unittest.TestCase):
     """Tests the per-host install-variant rollup used to replace the retired
     fleet-level last_deployment_type field."""
