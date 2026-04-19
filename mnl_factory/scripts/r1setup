@@ -5798,17 +5798,27 @@ class DeploymentService:
             status_emoji, _, status_desc = self.app._get_status_display_info(status_info['status'])
             self.app.print_colored(f"   • {name}: {user}@{ip} [{status_emoji} {status_desc}]", 'white')
 
+        # Mode-specific confirmation copy, keyed on (variant, manage_drivers).
         self.app.print_colored(f"\n⚠️  This will:", 'yellow', bold=True)
-        if "Docker + NVIDIA" in description:
+        if variant == "gpu" and manage_drivers:
+            # Mode 2 — r1setup installs/manages NVIDIA drivers.
             self.app.print_colored("   • Install Docker and Docker Compose", 'yellow')
-            self.app.print_colored("   • Install NVIDIA drivers and CUDA toolkit", 'yellow')
-            self.app.print_colored("   • Configure GPU access for containers", 'yellow')
-            self.app.print_colored("   • Deploy and start the Edge Node", 'yellow')
-        elif "Docker only" in description:
+            self.app.print_colored("   • Install NVIDIA drivers + NVIDIA Container Toolkit", 'yellow')
+            self.app.print_colored(f"   • Pull the GPU image (ratio1/edge_node_gpu:{env})", 'yellow')
+            self.app.print_colored("   • Deploy and start the Edge Node with GPU access", 'yellow')
+            self.app.print_colored("   • Abort per host if GPU setup fails — no silent CPU fallback", 'yellow')
+        elif variant == "gpu" and not manage_drivers:
+            # Mode 3 — user-managed drivers.
             self.app.print_colored("   • Install Docker and Docker Compose", 'yellow')
-            self.app.print_colored("   • Deploy and start the Edge Node (CPU mode)", 'yellow')
+            self.app.print_colored("   • Preflight nvidia-smi (r1setup will NOT touch your NVIDIA drivers)", 'yellow')
+            self.app.print_colored(f"   • Pull the GPU image (ratio1/edge_node_gpu:{env})", 'yellow')
+            self.app.print_colored("   • Deploy and start the Edge Node with GPU access", 'yellow')
+            self.app.print_colored("   • Abort per host if nvidia-smi fails — no silent CPU fallback, no driver changes", 'yellow')
         else:
-            self.app.print_colored(f"   • {description}", 'yellow')
+            # Mode 1 — CPU install.
+            self.app.print_colored("   • Install Docker and Docker Compose", 'yellow')
+            self.app.print_colored(f"   • Pull the CPU image (ratio1/edge_node:{env})", 'yellow')
+            self.app.print_colored("   • Deploy and start the Edge Node in CPU mode", 'yellow')
 
         # Check for network change warning for selected hosts
         deployment_status = self.app.active_config.get('deployment_status', 'never_deployed')
@@ -5955,6 +5965,9 @@ class DeploymentService:
                 self.app._display_node_status(host_name, compact=True)
                 print()  # New line after each status
 
+            # Image Summary — per-host variant / URL pulled from fetched metadata.
+            self._render_image_summary(successful_instance_hosts)
+
             # Display copy-friendly node addresses after successful deployment
             if successful_instance_hosts:
                 self.app._display_copy_friendly_addresses(successful_instance_hosts)
@@ -5967,7 +5980,67 @@ class DeploymentService:
                 self.app._update_node_status(host_name, 'error')
             self.app.print_colored(f"\n📊 Selected node statuses updated to Error due to deployment failure.", 'yellow')
 
+        # Mode-specific failure hint: only for GPU runs with failed hosts.
+        all_failed = list(failed_instance_hosts) + list(skipped_host_names)
+        if variant == "gpu" and all_failed:
+            self._render_gpu_failure_hint(all_failed, manage_drivers)
+
         self.app.wait_for_enter()
+
+    def _render_image_summary(self, host_names: List[str]) -> None:
+        """Print a per-host "Image Summary" block from the fetched metadata."""
+        if not host_names:
+            return
+        metadata = self.app.read_fetched_metadata(host_names)
+        self.app.print_colored("\n🖼️  Image Summary:", 'cyan', bold=True)
+        for host in host_names:
+            meta = metadata.get(host) or {}
+            variant_label = (meta.get('image_variant') or '?').upper()
+            image_url = meta.get('image_url') or 'unknown'
+            owner = meta.get('driver_owner') or 'n/a'
+            owner_suffix = f" ({owner})" if owner in ('r1setup', 'user') else ''
+            self.app.print_colored(
+                f"   • {host}: {variant_label}{owner_suffix} → {image_url}",
+                'white',
+            )
+
+    def _render_gpu_failure_hint(self, failed_hosts: List[str], manage_drivers: bool) -> None:
+        """Print a mode-specific hint after a GPU run that had failed hosts."""
+        joined = ", ".join(failed_hosts)
+        if manage_drivers:
+            # Mode 2
+            self.app.print_colored("\n⚠️  GPU install failed on: " + joined, 'yellow', bold=True)
+            self.app.print_colored(
+                "   Partial NVIDIA driver state has been cleaned up on these hosts.",
+                'yellow',
+            )
+            self.app.print_colored(
+                "   Re-run them via 'Install CPU Nodes', or fix the underlying driver",
+                'yellow',
+            )
+            self.app.print_colored(
+                "   issue and retry GPU install. No CPU image was deployed.",
+                'yellow',
+            )
+        else:
+            # Mode 3
+            self.app.print_colored("\n⚠️  GPU image deploy failed on: " + joined, 'yellow', bold=True)
+            self.app.print_colored(
+                "   nvidia-smi did not work on these hosts. r1setup did NOT touch the",
+                'yellow',
+            )
+            self.app.print_colored(
+                "   drivers (you marked them as user-managed). Either install/repair",
+                'yellow',
+            )
+            self.app.print_colored(
+                "   them yourself, or retry via 'Install GPU Nodes' with driver",
+                'yellow',
+            )
+            self.app.print_colored(
+                "   management enabled. No image was deployed.",
+                'yellow',
+            )
 
     def _update_deployment_metadata(self, deployment_type: str) -> None:
         """Update deployment metadata after successful deployment"""
