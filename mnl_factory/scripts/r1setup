@@ -5417,22 +5417,63 @@ class DeploymentService:
         self.app.wait_for_enter()
 
     def deploy_full(self) -> None:
-        """Deploy full setup (Docker + NVIDIA + GPU)"""
+        """Install GPU Nodes — deploys the GPU edge_node image.
+
+        Sub-prompts whether r1setup should install/manage the NVIDIA drivers
+        (Mode 2) or whether the user has already set them up themselves
+        (Mode 3). Mode 3 skips the nvidia_gpu role entirely and runs a
+        preflight nvidia-smi check before the Docker pull.
+        """
+        self.app.print_header("Install GPU Nodes")
+        self.app.print_colored(
+            "\nThis deploys the GPU image (ratio1/edge_node_gpu:{env}) on the hosts you select.\n"
+            "GPU installs never silently fall back to CPU — if anything goes wrong, the affected\n"
+            "hosts fail loudly and are listed for retry.",
+            'cyan',
+        )
+        self.app.print_colored(
+            "\nShould r1setup install and manage the NVIDIA drivers on the selected hosts?",
+            'yellow',
+            bold=True,
+        )
+        self.app.print_colored(
+            "   Y = r1setup installs drivers + NVIDIA Container Toolkit (default)",
+            'white',
+        )
+        self.app.print_colored(
+            "   N = drivers are already installed by you; r1setup only verifies nvidia-smi and deploys the image",
+            'white',
+        )
+        answer = self.app.get_input(
+            "Install/manage NVIDIA drivers? (Y/n)", "Y"
+        ).strip().lower()
+        manage_drivers = answer not in ('n', 'no')
+
+        if manage_drivers:
+            description = "Docker + NVIDIA drivers + GPU image deploy"
+            last_applied_action = "deploy_gpu_managed"
+        else:
+            description = "GPU image deploy (user-managed NVIDIA drivers)"
+            last_applied_action = "deploy_gpu_user_drivers"
+
         self._deploy_setup(
             "site.yml",
-            "Full Deployment",
-            "Docker + NVIDIA drivers + GPU setup",
-            last_applied_action="deploy_full",
+            "Install GPU Nodes",
+            description,
+            variant="gpu",
+            manage_drivers=manage_drivers,
+            last_applied_action=last_applied_action,
         )
 
     def deploy_docker_only(self) -> None:
-        """Deploy Docker only"""
+        """Install CPU Nodes — deploys the CPU edge_node image, skips all GPU setup."""
         self._deploy_setup(
             "site.yml",
-            "Docker-Only Deployment",
-            "Docker without GPU setup",
-            extra_vars={"skip_gpu": True},
-            last_applied_action="deploy_docker_only",
+            "Install CPU Nodes",
+            "Docker only (CPU image deploy)",
+            variant="cpu",
+            manage_drivers=False,
+            last_applied_action="deploy_cpu",
         )
 
     def delete_edge_node(self) -> None:
@@ -5544,15 +5585,56 @@ class DeploymentService:
 
         self.app.wait_for_enter()
 
+    @staticmethod
+    def _build_install_extra_vars(
+        variant: str,
+        manage_drivers: bool,
+    ) -> Dict[str, Any]:
+        """Validate the (variant, manage_drivers) pair and return the
+        extra-vars dict that the Ansible playbook expects.
+
+        Legal combinations:
+          - ('cpu', False) -> Mode 1 (CPU install)
+          - ('gpu', True)  -> Mode 2 (GPU install, r1setup manages drivers)
+          - ('gpu', False) -> Mode 3 (GPU image only, user-managed drivers)
+
+        Rejects 'cpu' + manage_drivers=True: installing drivers for a CPU
+        deploy makes no sense and almost always signals a refactor bug.
+        """
+        if variant not in ('cpu', 'gpu'):
+            raise ValueError(f"Invalid variant {variant!r}; expected 'cpu' or 'gpu'")
+        if variant == 'cpu' and manage_drivers:
+            raise ValueError(
+                "Illegal install mode: variant='cpu' with manage_drivers=True. "
+                "CPU install does not install NVIDIA drivers."
+            )
+
+        extra_vars: Dict[str, Any] = {"mnl_image_variant_cli": variant}
+        # skip_gpu is true for Mode 1 and Mode 3 — in both, we don't run
+        # the nvidia_gpu role. Only Mode 2 (manage_drivers=True) runs it.
+        if not manage_drivers:
+            extra_vars["skip_gpu"] = True
+        return extra_vars
+
     def _deploy_setup(
         self,
         playbook: str,
         title: str,
         description: str,
-        extra_vars: Optional[Dict[str, Any]] = None,
+        variant: str,
+        manage_drivers: bool,
         last_applied_action: str = "deploy",
     ) -> None:
-        """Common deployment logic with host selection"""
+        """Common deployment logic with host selection.
+
+        variant: 'cpu' or 'gpu' — selects the image variant.
+        manage_drivers: when True (Mode 2), r1setup runs the nvidia_gpu role
+            to install/manage drivers. When False for variant='gpu' (Mode 3),
+            the nvidia_gpu role is skipped and a preflight nvidia-smi check
+            runs instead. For variant='cpu', always False.
+        """
+        extra_vars = self._build_install_extra_vars(variant, manage_drivers)
+
         if not self.app.check_hosts_config():
             self.app.print_colored("No nodes configured! Please configure nodes first.", 'red')
             self.app.wait_for_enter()
@@ -5732,8 +5814,9 @@ class DeploymentService:
 
         if success:
             self.app.print_colored(f"\n✅ Deployment succeeded on {len(successful_instance_hosts)} node(s)", 'green')
-            # Update deployment metadata after successful deployment
-            deployment_type = "full" if "NVIDIA" in description else "docker_only"
+            # Update deployment metadata after successful deployment.
+            # deployment_type derives from variant (not a description string sniff).
+            deployment_type = "full" if variant == "gpu" else "docker_only"
             self._update_deployment_metadata(deployment_type)
             self.app.record_service_file_version(successful_instance_hosts)
 
@@ -11280,8 +11363,8 @@ PY"""
 
             self.print_colored("Deployment Menu", 'cyan', bold=True)
             print()
-            self.print_colored("  1) Deploy with GPU        - Deploy full Edge Node with GPU support")
-            self.print_colored("  2) Deploy CPU Only        - Deploy Edge Node without GPU capabilities")
+            self.print_colored("  1) Install GPU Nodes      - Deploy Edge Node with GPU image (ratio1/edge_node_gpu)")
+            self.print_colored("  2) Install CPU Nodes      - Deploy Edge Node with CPU image (ratio1/edge_node)")
             self.print_colored("  3) Prepare Machines       - Prepare registered machines without deploying nodes")
             self.print_colored("  4) Plan Migration        - Build and save a migration plan without executing it")
             self.print_colored("  5) Execute Migration    - Run the saved migration plan")

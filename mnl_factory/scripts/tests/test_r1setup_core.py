@@ -285,13 +285,51 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
                 "ANSIBLE_HOME": "ansible-home",
             }, clear=False):
                 with patch.object(service, "_update_deployment_metadata") as update_metadata:
-                    service._deploy_setup("site.yml", "Full Deployment", "Docker + NVIDIA drivers + GPU setup")
+                    service._deploy_setup(
+                        "site.yml",
+                        "Install GPU Nodes",
+                        "Docker + NVIDIA drivers + GPU image deploy",
+                        variant="gpu",
+                        manage_drivers=True,
+                    )
 
             update_metadata.assert_called_once_with("full")
             app.record_service_file_version.assert_called_once_with(["node-1"])
             self.assertEqual(app.run_generated_playbook.call_count, 2)
             self.assertEqual(app.run_generated_playbook.call_args_list[0].kwargs["timeout"], 600)
             self.assertEqual(app.run_generated_playbook.call_args_list[1].kwargs["timeout"], 180)
+
+
+class TestBuildInstallExtraVars(unittest.TestCase):
+    """Validates the three-mode install extra-vars builder."""
+
+    def test_mode_1_cpu_install(self):
+        self.assertEqual(
+            r1setup.DeploymentService._build_install_extra_vars("cpu", False),
+            {"mnl_image_variant_cli": "cpu", "skip_gpu": True},
+        )
+
+    def test_mode_2_gpu_managed_drivers(self):
+        self.assertEqual(
+            r1setup.DeploymentService._build_install_extra_vars("gpu", True),
+            {"mnl_image_variant_cli": "gpu"},
+        )
+
+    def test_mode_3_gpu_user_managed_drivers(self):
+        self.assertEqual(
+            r1setup.DeploymentService._build_install_extra_vars("gpu", False),
+            {"mnl_image_variant_cli": "gpu", "skip_gpu": True},
+        )
+
+    def test_rejects_cpu_with_manage_drivers_true(self):
+        with self.assertRaises(ValueError) as ctx:
+            r1setup.DeploymentService._build_install_extra_vars("cpu", True)
+        self.assertIn("Illegal", str(ctx.exception))
+
+    def test_rejects_invalid_variant(self):
+        with self.assertRaises(ValueError) as ctx:
+            r1setup.DeploymentService._build_install_extra_vars("xyz", False)
+        self.assertIn("Invalid variant", str(ctx.exception))
 
 
 class TestAddNodeExpertModeFlow(unittest.TestCase):
