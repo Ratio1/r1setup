@@ -217,6 +217,7 @@ The modular test package lives in [mnl_factory/scripts/tests](mnl_factory/script
   - triggered by `mnl_factory/scripts/ver.py`
 - Ansible Galaxy publish workflow: [.github/workflows/publish-ansible-galaxy.yml](.github/workflows/publish-ansible-galaxy.yml)
   - triggered by `mnl_factory/galaxy.yml`
+- Release notes: [CHANGELOG.md](CHANGELOG.md)
 
 ### Citations
 
