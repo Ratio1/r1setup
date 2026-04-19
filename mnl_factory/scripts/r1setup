@@ -14362,6 +14362,58 @@ PY"""
         except ImportError:
             return self._fallback_select_hosts(hosts, operation_name, initial_selection, preselection_label)
 
+    @staticmethod
+    def _format_install_history(host_config: Dict[str, Any], include_attempt: bool = True) -> str:
+        """Return a compact one-line summary of a host's install history.
+
+        Shape: ``<last-success>  [<recent-attempt-if-divergent-or-failed>]``
+
+        Examples:
+            ``GPU (r1) • 2026-03-12``
+            ``CPU      • 2026-02-01    GPU (user) • 2026-04-17 ✗``
+            ``—        • never``
+        """
+        def _fmt_variant(v: Optional[str], owner: Optional[str]) -> str:
+            if not v:
+                return '—  '
+            owner_short = {'r1setup': 'r1', 'user': 'user'}.get(owner or '', '')
+            suffix = f" ({owner_short})" if owner_short else ''
+            return f"{v.upper()}{suffix}"
+
+        def _fmt_date(ts: Optional[str]) -> str:
+            if not ts:
+                return 'never'
+            return ts.split('T')[0]
+
+        last_variant = host_config.get(INSTALL_LAST_VARIANT_FIELD)
+        last_owner = host_config.get(INSTALL_LAST_DRIVER_OWNER_FIELD)
+        last_at = host_config.get(INSTALL_LAST_AT_FIELD)
+        success_col = f"{_fmt_variant(last_variant, last_owner):<12} • {_fmt_date(last_at):<10}"
+
+        if not include_attempt:
+            return success_col
+
+        attempt_variant = host_config.get(INSTALL_ATTEMPTED_VARIANT_FIELD)
+        attempt_owner = host_config.get(INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD)
+        attempt_at = host_config.get(INSTALL_ATTEMPTED_AT_FIELD)
+        attempt_result = host_config.get(INSTALL_ATTEMPTED_RESULT_FIELD)
+
+        # Show attempt column only when it tells the user something new:
+        # either the last attempt failed, or it diverges from the last success.
+        diverges = (
+            attempt_variant and (
+                attempt_result == 'failed'
+                or attempt_variant != last_variant
+                or attempt_owner != last_owner
+            )
+        )
+        if not diverges:
+            return success_col
+
+        result_mark = '✗' if attempt_result == 'failed' else '✓'
+        attempt_col = f"{_fmt_variant(attempt_variant, attempt_owner):<12} • {_fmt_date(attempt_at):<10} {result_mark}"
+        return f"{success_col}    {attempt_col}"
+
     def _render_host_menu(self, hosts, host_list, selected_hosts, current_index, operation_name,
                           initial_selection=None, interactive=True, preselection_label=None):
         """Render the host selection menu (shared by interactive and fallback modes)."""
@@ -14430,17 +14482,34 @@ PY"""
                 is_preselected = initial_selection is not None and host_name in initial_selection and initial_selection != set(hosts.keys())
                 marker = "✓" if is_selected else " "
 
+                # Install history column (per-host variant + date + attempt,
+                # degrades to just the success column on narrow terminals).
+                host_cfg = hosts.get(host_name, {})
+                try:
+                    import shutil as _sh
+                    term_width = _sh.get_terminal_size((100, 24)).columns
+                except Exception:
+                    term_width = 100
+                include_attempt = term_width >= 110
+                history = self._format_install_history(host_cfg, include_attempt=include_attempt)
+
                 if interactive:
                     prefix = "→ " if is_current else "  "
                     color = 'yellow' if is_current else ('green' if is_selected else 'white')
                     style = 'bold' if is_current else False
                     preselect_indicator = " (pre-selected)" if is_preselected else ""
-                    self.print_colored(f"{prefix}[{marker}] {host_name}{preselect_indicator}", color, bold=style)
+                    self.print_colored(
+                        f"{prefix}[{marker}] {host_name:<24}  {history}{preselect_indicator}",
+                        color, bold=style,
+                    )
                 else:
                     idx = host_list.index(item)  # 0 is "All hosts", so real index starts at 1
                     color = 'green' if is_selected else 'white'
                     preselect_indicator = " (pre-selected)" if is_preselected else ""
-                    self.print_colored(f"  {idx}) [{marker}] {host_name}{preselect_indicator}", color, bold=is_selected)
+                    self.print_colored(
+                        f"  {idx}) [{marker}] {host_name:<24}  {history}{preselect_indicator}",
+                        color, bold=is_selected,
+                    )
 
         print()
         self.print_colored("─" * 60, 'blue')

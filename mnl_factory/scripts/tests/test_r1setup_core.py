@@ -300,6 +300,93 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
             self.assertEqual(app.run_generated_playbook.call_args_list[1].kwargs["timeout"], 180)
 
 
+class TestFormatInstallHistory(unittest.TestCase):
+    """Tests the per-row install-history column formatter used by
+    _render_host_menu (Phase 6)."""
+
+    def _cfg(self, **kwargs):
+        return dict(kwargs)
+
+    def test_never_installed(self):
+        s = r1setup.R1Setup._format_install_history(self._cfg())
+        self.assertIn('—', s)
+        self.assertIn('never', s)
+
+    def test_successful_gpu_r1setup(self):
+        cfg = self._cfg(**{
+            r1setup.INSTALL_LAST_VARIANT_FIELD: 'gpu',
+            r1setup.INSTALL_LAST_DRIVER_OWNER_FIELD: 'r1setup',
+            r1setup.INSTALL_LAST_AT_FIELD: '2026-03-12T10:00:00',
+        })
+        s = r1setup.R1Setup._format_install_history(cfg)
+        self.assertIn('GPU (r1)', s)
+        self.assertIn('2026-03-12', s)
+
+    def test_successful_gpu_user(self):
+        cfg = self._cfg(**{
+            r1setup.INSTALL_LAST_VARIANT_FIELD: 'gpu',
+            r1setup.INSTALL_LAST_DRIVER_OWNER_FIELD: 'user',
+            r1setup.INSTALL_LAST_AT_FIELD: '2026-03-12T10:00:00',
+        })
+        self.assertIn('GPU (user)', r1setup.R1Setup._format_install_history(cfg))
+
+    def test_successful_cpu_omits_owner_tag(self):
+        cfg = self._cfg(**{
+            r1setup.INSTALL_LAST_VARIANT_FIELD: 'cpu',
+            r1setup.INSTALL_LAST_DRIVER_OWNER_FIELD: 'n/a',
+            r1setup.INSTALL_LAST_AT_FIELD: '2026-02-01T09:00:00',
+        })
+        s = r1setup.R1Setup._format_install_history(cfg)
+        self.assertIn('CPU', s)
+        self.assertNotIn('(r1)', s)
+        self.assertNotIn('(user)', s)
+
+    def test_attempt_hidden_when_matches_success(self):
+        cfg = self._cfg(**{
+            r1setup.INSTALL_LAST_VARIANT_FIELD: 'gpu',
+            r1setup.INSTALL_LAST_DRIVER_OWNER_FIELD: 'r1setup',
+            r1setup.INSTALL_LAST_AT_FIELD: '2026-03-12T10:00:00',
+            r1setup.INSTALL_ATTEMPTED_VARIANT_FIELD: 'gpu',
+            r1setup.INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD: 'r1setup',
+            r1setup.INSTALL_ATTEMPTED_AT_FIELD: '2026-03-12T10:00:00',
+            r1setup.INSTALL_ATTEMPTED_RESULT_FIELD: 'success',
+        })
+        s = r1setup.R1Setup._format_install_history(cfg)
+        self.assertNotIn('✗', s)
+        self.assertEqual(s.count('GPU'), 1, "attempt column should not duplicate last-success")
+
+    def test_attempt_shown_when_failed(self):
+        cfg = self._cfg(**{
+            r1setup.INSTALL_LAST_VARIANT_FIELD: 'cpu',
+            r1setup.INSTALL_LAST_DRIVER_OWNER_FIELD: 'n/a',
+            r1setup.INSTALL_LAST_AT_FIELD: '2026-02-01T09:00:00',
+            r1setup.INSTALL_ATTEMPTED_VARIANT_FIELD: 'gpu',
+            r1setup.INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD: 'user',
+            r1setup.INSTALL_ATTEMPTED_AT_FIELD: '2026-04-17T14:00:00',
+            r1setup.INSTALL_ATTEMPTED_RESULT_FIELD: 'failed',
+        })
+        s = r1setup.R1Setup._format_install_history(cfg)
+        self.assertIn('CPU', s)
+        self.assertIn('GPU (user)', s)
+        self.assertIn('2026-04-17', s)
+        self.assertIn('✗', s)
+
+    def test_include_attempt_false_hides_second_column(self):
+        cfg = self._cfg(**{
+            r1setup.INSTALL_LAST_VARIANT_FIELD: 'cpu',
+            r1setup.INSTALL_LAST_DRIVER_OWNER_FIELD: 'n/a',
+            r1setup.INSTALL_LAST_AT_FIELD: '2026-02-01T09:00:00',
+            r1setup.INSTALL_ATTEMPTED_VARIANT_FIELD: 'gpu',
+            r1setup.INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD: 'user',
+            r1setup.INSTALL_ATTEMPTED_AT_FIELD: '2026-04-17T14:00:00',
+            r1setup.INSTALL_ATTEMPTED_RESULT_FIELD: 'failed',
+        })
+        s = r1setup.R1Setup._format_install_history(cfg, include_attempt=False)
+        self.assertIn('CPU', s)
+        self.assertNotIn('GPU', s)
+        self.assertNotIn('✗', s)
+
+
 class TestInstallTrackingHelpers(unittest.TestCase):
     """Tests record_install_attempt, record_install_success, and
     _normalize_host_config migration for the eight install-tracking fields."""
