@@ -672,6 +672,82 @@ class TestInstallTrackingHelpers(unittest.TestCase):
             self.assertEqual(out['h1']['driver_owner'], 'r1setup')
 
 
+class TestDeriveVariantFromProbe(unittest.TestCase):
+    """Tests the probe-result -> (variant, driver_owner) mapping used by
+    the 1.8.0 install-state migration helper."""
+
+    def _derive(self, **probe):
+        return r1setup.DeploymentService._derive_variant_from_probe(probe)
+
+    def test_cpu_image(self):
+        d = self._derive(
+            docker_image='ratio1/edge_node:testnet',
+            systemd_has_gpu_flag=False,
+            nvidia_container_toolkit=False,
+            nvidia_smi_works=False,
+            prior_metadata={},
+        )
+        self.assertEqual(d['variant'], 'cpu')
+        self.assertEqual(d['driver_owner'], 'n/a')
+
+    def test_gpu_r1setup_managed(self):
+        d = self._derive(
+            docker_image='ratio1/edge_node_gpu:testnet',
+            systemd_has_gpu_flag=True,
+            nvidia_container_toolkit=True,
+            nvidia_smi_works=True,
+            prior_metadata={'last_applied_at': '2026-04-09T03:53:31'},
+        )
+        self.assertEqual(d['variant'], 'gpu')
+        self.assertEqual(d['driver_owner'], 'r1setup')
+        self.assertEqual(d['applied_at'], '2026-04-09T03:53:31')
+
+    def test_gpu_user_managed(self):
+        # nvidia-smi works, but no nvidia-container-toolkit -> user-managed.
+        d = self._derive(
+            docker_image='ratio1/edge_node_gpu:testnet',
+            systemd_has_gpu_flag=True,
+            nvidia_container_toolkit=False,
+            nvidia_smi_works=True,
+            prior_metadata={},
+        )
+        self.assertEqual(d['variant'], 'gpu')
+        self.assertEqual(d['driver_owner'], 'user')
+
+    def test_gpu_systemd_flag_only(self):
+        # docker inspect failed (empty image) but systemd has --gpus.
+        d = self._derive(
+            docker_image='',
+            systemd_has_gpu_flag=True,
+            nvidia_container_toolkit=True,
+            nvidia_smi_works=True,
+            prior_metadata={},
+        )
+        self.assertEqual(d['variant'], 'gpu')
+        self.assertEqual(d['driver_owner'], 'r1setup')
+
+    def test_no_evidence_returns_none(self):
+        d = self._derive(
+            docker_image='',
+            systemd_has_gpu_flag=False,
+            nvidia_container_toolkit=False,
+            nvidia_smi_works=False,
+            prior_metadata={},
+        )
+        self.assertIsNone(d['variant'])
+        self.assertIsNone(d['driver_owner'])
+
+    def test_custom_image_still_resolves_as_cpu_unless_gpu_suffix(self):
+        d = self._derive(
+            docker_image='myregistry.local/custom:tag',
+            systemd_has_gpu_flag=False,
+            nvidia_container_toolkit=False,
+            nvidia_smi_works=False,
+            prior_metadata={},
+        )
+        self.assertEqual(d['variant'], 'cpu')
+
+
 class TestBuildInstallExtraVars(unittest.TestCase):
     """Validates the three-mode install extra-vars builder."""
 

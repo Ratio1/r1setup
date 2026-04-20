@@ -1,0 +1,84 @@
+---
+# Probe a host's current install state and fetch a small JSON summary back
+# to the controller so the CLI can back-populate the per-host install
+# tracking fields introduced in 1.8.0 for fleets that were first deployed
+# under 1.7.x or earlier. Read-only: no packages installed, no config
+# changes on the target host.
+- name: Probe install state for migration
+  hosts: gpu_nodes
+  become: true
+  vars:
+    ansible_roles_path: "{{ playbook_dir }}/../roles"
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+    - ../group_vars/mnl.yml
+    - ../group_vars/variables.yml
+  tasks:
+    - name: Read deployed image from docker inspect
+      ansible.builtin.shell: |
+        docker inspect {{ mnl_docker_container_name }} --format '{{ "{{" }}.Config.Image{{ "}}" }}' 2>/dev/null || true
+      register: probe_docker_image
+      changed_when: false
+      failed_when: false
+
+    - name: Check for --gpus in the rendered systemd unit
+      ansible.builtin.shell: |
+        grep -c -- '--gpus' /etc/systemd/system/{{ edge_node_service_name }}.service 2>/dev/null || echo 0
+      register: probe_gpu_flag
+      changed_when: false
+      failed_when: false
+
+    - name: Check for NVIDIA Container Toolkit (implies r1setup-managed drivers)
+      ansible.builtin.shell: |
+        dpkg -s nvidia-container-toolkit >/dev/null 2>&1 && echo yes || echo no
+      register: probe_nvct
+      changed_when: false
+      failed_when: false
+
+    - name: Check nvidia-smi availability
+      ansible.builtin.shell: |
+        nvidia-smi >/dev/null 2>&1 && echo yes || echo no
+      register: probe_nvidia_smi
+      changed_when: false
+      failed_when: false
+
+    - name: Read pre-existing r1setup metadata (last_applied_at) if any
+      ansible.builtin.slurp:
+        src: "{{ mnl_r1setup_metadata_host_path }}"
+      register: probe_metadata_slurp
+      failed_when: false
+      ignore_errors: true
+
+    - name: Compose probe summary
+      ansible.builtin.set_fact:
+        r1setup_probe_summary:
+          docker_image: "{{ probe_docker_image.stdout | default('') | trim }}"
+          systemd_has_gpu_flag: "{{ (probe_gpu_flag.stdout | default('0') | trim | int) > 0 }}"
+          nvidia_container_toolkit: "{{ (probe_nvct.stdout | default('no') | trim) == 'yes' }}"
+          nvidia_smi_works: "{{ (probe_nvidia_smi.stdout | default('no') | trim) == 'yes' }}"
+          prior_metadata: >-
+            {{
+              (probe_metadata_slurp.content | b64decode | from_json)
+              if (probe_metadata_slurp is defined
+                  and probe_metadata_slurp.content is defined
+                  and probe_metadata_slurp.content | length > 0)
+              else {}
+            }}
+
+    - name: Write probe summary to a controller-fetchable path
+      ansible.builtin.copy:
+        dest: "/tmp/r1setup-probe-{{ inventory_hostname }}.json"
+        content: "{{ r1setup_probe_summary | to_nice_json }}"
+        mode: '0644'
+
+    - name: Fetch probe summary back to the controller
+      ansible.builtin.fetch:
+        src: "/tmp/r1setup-probe-{{ inventory_hostname }}.json"
+        dest: "{{ r1setup_fetched_metadata_dir | default('/tmp/r1setup-fetched') }}/probe-{{ inventory_hostname }}.json"
+        flat: true
+
+    - name: Cleanup probe summary on the target
+      ansible.builtin.file:
+        path: "/tmp/r1setup-probe-{{ inventory_hostname }}.json"
+        state: absent

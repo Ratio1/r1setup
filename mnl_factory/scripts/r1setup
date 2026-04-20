@@ -5606,6 +5606,156 @@ class DeploymentService:
             last_applied_action=last_applied_action,
         )
 
+    @staticmethod
+    def _derive_variant_from_probe(probe: Dict[str, Any]) -> Dict[str, Any]:
+        """Map a probe-summary dict (from probe_install_state.yml) to
+        (variant, driver_owner, applied_at). Returns None for values that
+        couldn't be derived, letting the caller decide to skip or fall back.
+        """
+        image = (probe.get('docker_image') or '').strip()
+        variant: Optional[str] = None
+        if image:
+            variant = 'gpu' if image.endswith('_gpu') or '_gpu:' in image else 'cpu'
+        elif probe.get('systemd_has_gpu_flag'):
+            variant = 'gpu'
+        # No deploy evidence at all -> can't migrate this host.
+        if not variant and not probe.get('prior_metadata'):
+            return {'variant': None, 'driver_owner': None, 'applied_at': None}
+        # Fallback: if the systemd unit has --gpus and image was unreadable,
+        # assume gpu.
+        if variant is None:
+            variant = 'gpu' if probe.get('systemd_has_gpu_flag') else 'cpu'
+
+        if variant == 'gpu':
+            # nvidia-container-toolkit is installed by the nvidia_gpu role
+            # (Mode 2). If the toolkit is present AND nvidia-smi works, assume
+            # r1setup-managed. If nvidia-smi works but the toolkit isn't
+            # installed, it's user-managed (Mode 3).
+            if probe.get('nvidia_container_toolkit') and probe.get('nvidia_smi_works'):
+                driver_owner = 'r1setup'
+            elif probe.get('nvidia_smi_works'):
+                driver_owner = 'user'
+            else:
+                # GPU image deployed but drivers broken. Best guess: whatever
+                # was in prior metadata, else 'user' so we don't blame r1setup.
+                driver_owner = 'user'
+        else:
+            driver_owner = 'n/a'
+
+        prior = probe.get('prior_metadata') or {}
+        applied_at = prior.get('last_applied_at') or prior.get('applied_at')
+        return {'variant': variant, 'driver_owner': driver_owner, 'applied_at': applied_at}
+
+    def migrate_install_tracking(self) -> None:
+        """Probe running hosts and back-populate the 1.8.0 install tracking
+        fields. Read-only on the target hosts (no package or config changes).
+        """
+        if not self.app.check_hosts_config():
+            self.app.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_header("Migrate Install State")
+        self.app.print_colored(
+            "\nProbes each selected host for its currently-deployed image, NVIDIA\n"
+            "driver state, and prior r1setup metadata, then back-populates the\n"
+            "per-host install-tracking fields introduced in 1.8.0.\n\n"
+            "Read-only: no packages are installed, no configs are changed on\n"
+            "the target hosts. Safe to run on live fleets.",
+            'cyan',
+        )
+
+        self.app.load_configuration()
+        all_hosts = _get_gpu_hosts(self.app.inventory)
+
+        # Default to hosts that look like they were deployed before 1.8.0:
+        # node_status indicates a deploy happened, but install-tracking is
+        # still empty.
+        candidates = {
+            name for name, cfg in all_hosts.items()
+            if cfg.get('node_status') in ('running', 'stopped', 'error')
+            and not cfg.get(INSTALL_LAST_VARIANT_FIELD)
+        }
+        preselect_label = None
+        if candidates:
+            preselect_label = "hosts deployed before 1.8.0 (running, no install tracking yet)"
+
+        selected = self.app.select_hosts(
+            all_hosts, "install-state migration",
+            preselect_mode='none' if not candidates else 'all',
+            initial_selection=candidates if candidates else None,
+            preselection_label=preselect_label,
+        )
+        if not selected:
+            self.app.print_colored("Migration cancelled - no hosts selected.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        playbook = self.app.config_dir / 'playbooks/probe_install_state.yml'
+        if not playbook.exists():
+            self.app.print_colored(f"Probe playbook not found: {playbook}", 'red')
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_colored(f"\nProbing {len(selected)} host(s)...", 'cyan')
+        success, output, executed_hosts, _ = self.app.run_generated_playbook(
+            playbook,
+            selected,
+            machine_scope=False,
+            last_applied_action='migrate_install_tracking',
+            show_output=True,
+            timeout=self.app.connection_timeout,
+        )
+        reachable = self._extract_successful_hosts_from_output(output, executed_hosts)
+        unreachable = [h for h in selected if h not in reachable]
+
+        # Fetched probes land at /tmp/r1setup-fetched/probe-<host>.json
+        fetched_dir = Path('/tmp/r1setup-fetched')
+        migrated: List[str] = []
+        skipped: List[Tuple[str, str]] = []
+        for host in reachable:
+            probe_path = fetched_dir / f"probe-{host}.json"
+            if not probe_path.exists():
+                skipped.append((host, "probe result not fetched"))
+                continue
+            try:
+                probe = json.loads(probe_path.read_text())
+            except (OSError, ValueError) as exc:
+                skipped.append((host, f"probe parse error: {exc}"))
+                continue
+            derived = self._derive_variant_from_probe(probe)
+            if not derived['variant']:
+                skipped.append((host, "no deploy evidence on host"))
+                continue
+            variant = derived['variant']
+            owner = derived['driver_owner']
+            self.app.record_install_attempt([host], variant, owner, "success")
+            self.app.record_install_success([host], variant, owner)
+            migrated.append(f"{host}: {variant.upper()} ({owner})")
+
+        # Report.
+        self.app.print_colored("\n📊 Migration Summary:", 'cyan', bold=True)
+        if migrated:
+            self.app.print_colored(f"   ✅ Back-populated {len(migrated)} host(s):", 'green')
+            for line in migrated:
+                self.app.print_colored(f"      • {line}", 'white')
+        if skipped:
+            self.app.print_colored(f"   ⚠️  Skipped {len(skipped)} host(s):", 'yellow')
+            for host, reason in skipped:
+                self.app.print_colored(f"      • {host}: {reason}", 'yellow')
+        if unreachable:
+            self.app.print_colored(f"   ❌ Unreachable {len(unreachable)} host(s):", 'red')
+            for host in unreachable:
+                self.app.print_colored(f"      • {host}", 'red')
+            self.app.print_colored(
+                "   Retry the migration after these hosts come back online.",
+                'yellow',
+            )
+        if not success and not migrated:
+            self.app.print_colored("\n❌ Probe playbook failed. See output above.", 'red')
+
+        self.app.wait_for_enter()
+
     def deploy_docker_only(self) -> None:
         """Install CPU Nodes — deploys the CPU edge_node image, skips all GPU setup."""
         self._deploy_setup(
@@ -9721,6 +9871,9 @@ class R1Setup:
     def deploy_docker_only(self):
         return self.deployment_service.deploy_docker_only()
 
+    def migrate_install_tracking(self):
+        return self.deployment_service.migrate_install_tracking()
+
     def prepare_registered_machines(self, skip_gpu=False):
         return self.deployment_service.prepare_registered_machines(skip_gpu=skip_gpu)
 
@@ -11625,6 +11778,7 @@ PY"""
             self.print_colored("  7) Finalize Migration   - Clean up source artifacts after verified migration")
             self.print_colored("  8) Delete Deployment      - Remove deployed Edge Node")
             self.print_colored("  9) Deployment Status      - Check detailed deployment status")
+            self.print_colored("  m) Migrate Install State  - Back-populate 1.8.0 tracking from running hosts")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -11652,8 +11806,10 @@ PY"""
                 self.delete_edge_node()
             elif choice == '9':
                 self.deployment_status()
+            elif choice.lower() == 'm':
+                self.migrate_install_tracking()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-9.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-9 or m.", 'red')
                 self.wait_for_enter()
 
     def operations_menu(self) -> None:
