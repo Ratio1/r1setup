@@ -10775,11 +10775,25 @@ def parse_candidate(service_name):
     metadata_host_path = ''
     service_file_version = ''
 
-    container_match = re.search(r'--name\\s+([^\\s\\\\]+)', service_text or '')
+    # Strip comment lines so commented-out backup images / names don't bleed
+    # into the regex matches below. (Systemd-unit comments start with # at
+    # the beginning of a line, possibly after whitespace.)
+    active_text_lines = []
+    for line in (service_text or '').splitlines():
+        stripped = line.lstrip()
+        if not stripped.startswith('#'):
+            active_text_lines.append(line)
+    active_text = '\\n'.join(active_text_lines)
+
+    container_match = re.search(r'--name\\s+([^\\s\\\\]+)', active_text)
     if container_match:
         container_name = container_match.group(1).strip().strip("'\\\"")
 
-    image_match = re.search(r'([A-Za-z0-9./_-]*edge_node:[A-Za-z0-9._-]+)', service_text or '')
+    # Accept both CPU (edge_node) and GPU (edge_node_gpu) image names.
+    image_match = re.search(
+        r'([A-Za-z0-9./_-]*edge_node(?:_gpu)?:[A-Za-z0-9._-]+)',
+        active_text,
+    )
     if image_match:
         image = image_match.group(1).strip().strip("'\\\"")
 
@@ -11095,6 +11109,19 @@ PY"""
                 }
 
             host_config = self._extract_machine_access_config(machine_record)
+            # Auto-detect image variant from the discovered container's image
+            # name so future redeploys preserve the original variant without
+            # requiring the user to pick it manually. Sets mnl_image_variant
+            # as a host-var, which wins over the CLI-passed cli default but
+            # still yields to an explicit user override of mnl_docker_image_url.
+            discovered_image = str(candidate.get('image') or '').strip()
+            discovered_variant = None
+            if discovered_image:
+                discovered_variant = (
+                    'gpu' if (discovered_image.endswith('_gpu')
+                              or '_gpu:' in discovered_image)
+                    else 'cpu'
+                )
             host_config.update({
                 'r1setup_machine_id': machine_id,
                 'r1setup_topology_mode': final_topology_mode,
@@ -11113,6 +11140,9 @@ PY"""
                 'r1setup_discovery_environment': candidate.get('environment') or 'unknown',
                 'r1setup_discovery_environment_source': candidate.get('environment_source') or 'unknown',
             })
+            if discovered_variant:
+                host_config['mnl_image_variant'] = discovered_variant
+                host_config['r1setup_discovered_image'] = discovered_image
             self.config_manager.apply_runtime_snapshot_to_host_config(host_name, host_config)
             hosts[host_name] = host_config
             imported_names.append(host_name)
@@ -11394,7 +11424,11 @@ PY"""
 
         machine_id = registered_ids[0]
         self.print_colored(f"Machine '{machine_id}' registered successfully.", 'green')
-        if self.get_input("Discover existing edge-node services on this machine now? (y/n)", "n").lower() == 'y':
+        # Default Y: most fleets being registered already have edge_node
+        # running and the user expects an immediate monitoring path. Users
+        # who explicitly want a bare machine for a future deploy can still
+        # type 'n'.
+        if self.get_input("Discover existing edge-node services on this machine now? (Y/n)", "Y").lower() != 'n':
             self.discover_and_import_existing_services(machine_id)
             return
         self.wait_for_enter()
@@ -11520,6 +11554,39 @@ PY"""
                 'deployment_menu_default': '0',
             }
 
+        # Machines-only config: zero inventory hosts but machines registered
+        # in fleet state. Previously fell through to "✗ not deployed", which
+        # is misleading when the user has imported live edge_node runtimes
+        # via Register Machine. Surface the registered-machine count so the
+        # banner reflects reality.
+        if deployment_status == 'never_deployed':
+            fleet_state = (
+                self.fleet_state
+                or (metadata.get('fleet_state') if metadata else None)
+                or {}
+            )
+            machine_count = len((fleet_state.get('fleet') or {}).get('machines') or {})
+            if machine_count:
+                label = f"{machine_count} machine(s) registered"
+                return {
+                    'state_key': 'machines_registered',
+                    'color': 'yellow',
+                    'config_summary': f"📡 {label}",
+                    'status_line': f"📡 Status: {label}",
+                    'status_note': (
+                        "Machines are registered in this config but no Edge Node instances "
+                        "have been imported yet. Run Node Status & Info to probe them, or "
+                        "Configuration Menu -> Discover Services to import running services."
+                    ),
+                    'main_menu_text': f"📡 {label}",
+                    'deployment_line': f"Deployment: 📡 {label}",
+                    'suggested_action': (
+                        '4',
+                        '\U0001f4a1 Suggested: Probe registered machines for existing services',
+                    ),
+                    'deployment_menu_default': '0',
+                }
+
         return {
             'state_key': 'never_deployed',
             'color': 'yellow',
@@ -11578,7 +11645,13 @@ PY"""
         config_label = active_config_name if active_config_name != 'None' else 'none'
         self.print_colored(f"  {config_label} | {current_env} | {deploy_str}", 'cyan')
 
-        # Line 2: node status summary (only when hosts exist)
+        # Line 2: node status summary (only when hosts exist). When the
+        # config has no instances yet (zero-host shell), stay quiet —
+        # the config/network/deployment line above already says everything
+        # relevant to the current config. We intentionally do NOT display
+        # fleet-state machine counts here because they represent
+        # registered-but-not-yet-instantiated hosts, which tell the user
+        # nothing about what's deployed for *this* config.
         if has_config:
             hosts = _get_gpu_hosts(self.inventory)
             if hosts:
@@ -11602,14 +11675,6 @@ PY"""
                 self.print_colored(
                     f"  Nodes ({len(hosts)}): {', '.join(status_summary)} ({age_str})",
                     'cyan'
-                )
-        elif has_shell:
-            # Zero-host shell with registered machines
-            fleet_state = self.get_fleet_state_copy()
-            machines = fleet_state.get('fleet', {}).get('machines', {})
-            if machines:
-                self.print_colored(
-                    f"  Machines: {len(machines)} registered, 0 instances", 'cyan',
                 )
 
         self.print_section("R1Setup Main Menu")
@@ -15135,6 +15200,13 @@ PY"""
     def combined_node_status_and_info(self) -> None:
         """Display beautiful live container status overview - checks if Edge Node containers are running"""
         if not self.check_hosts_config():
+            # Machines-only fallback: no inventory hosts yet, but the fleet
+            # state may have registered machines that are running edge_node
+            # externally. Probe them directly rather than refusing outright.
+            fleet_state = self.config_manager.fleet_state or self.get_fleet_state_copy() or {}
+            machines = (fleet_state.get('fleet') or {}).get('machines') or {}
+            if machines:
+                return self._machines_only_status_probe(machines)
             self.print_colored("No nodes configured! Please configure nodes first.", 'red')
             self.wait_for_enter()
             return
@@ -15244,6 +15316,112 @@ PY"""
 
         # Quick actions
         self.print_colored("\U0001f4a1 Quick Actions: Main Menu \u2192 3 (Operations Menu)", 'white')
+
+        self.wait_for_enter()
+
+    def _machines_only_status_probe(self, machines: Dict[str, Dict[str, Any]]) -> None:
+        """Probe registered machines directly when the active config has no
+        inventory host entries. Uses the read-only probe_install_state.yml
+        playbook (no packages installed, no configs changed on the target).
+        """
+        self.clear_screen()
+        self.print_header("Container Status (machines-only)")
+        self.print_colored(
+            f"This config has {len(machines)} registered machine(s) but no Edge\n"
+            f"Node instances imported yet. Probing each machine's current\n"
+            f"runtime state directly (read-only)...",
+            'cyan',
+        )
+        print()
+
+        playbook = self.config_dir / 'playbooks/probe_install_state.yml'
+        if not playbook.exists():
+            self.print_colored(f"Probe playbook not found: {playbook}", 'red')
+            self.wait_for_enter()
+            return
+
+        fetched_dir = Path(tempfile.mkdtemp(prefix='r1setup_probe_'))
+        try:
+            machine_ids = list(machines.keys())
+            success, output, executed, exec_inv = self.run_registered_machine_playbook(
+                playbook,
+                machine_ids,
+                extra_vars={'r1setup_fetched_metadata_dir': str(fetched_dir)},
+                show_output=False,
+                timeout=self.connection_timeout,
+            )
+            # Execution inventory uses sanitized aliases as inventory
+            # hostnames; the probe writes probe-<alias>.json. Build a
+            # mapping alias -> machine_id so we can display friendly IDs.
+            exec_hosts = _get_gpu_hosts(exec_inv)
+            alias_to_machine = {
+                alias: host_cfg.get('r1setup_machine_id') or alias
+                for alias, host_cfg in exec_hosts.items()
+            }
+            reachable_aliases = DeploymentService(self)._extract_successful_hosts_from_output(output, list(exec_hosts.keys()))
+            reachable_machine_ids = {alias_to_machine[a] for a in reachable_aliases if a in alias_to_machine}
+
+            self.print_colored(
+                f"\U0001f4ca Machine Runtime Status ({len(machine_ids)} machine(s))",
+                'cyan', bold=True,
+            )
+            running_count = 0
+            for mid in machine_ids:
+                machine = machines[mid]
+                conn = self.config_manager._format_machine_connection_display(machine)
+                # Find the alias Ansible used for this machine.
+                alias = next(
+                    (a for a, m in alias_to_machine.items() if m == mid),
+                    None,
+                )
+                if alias is None or mid not in reachable_machine_ids:
+                    self.print_colored(f"  \U0001f534 {mid}: {conn} — unreachable", 'red')
+                    continue
+                probe_file = fetched_dir / f"probe-{alias}.json"
+                if not probe_file.exists():
+                    self.print_colored(f"  \u26aa {mid}: {conn} — no probe data returned", 'yellow')
+                    continue
+                try:
+                    probe = json.loads(probe_file.read_text())
+                except (OSError, ValueError):
+                    self.print_colored(f"  \u26aa {mid}: {conn} — probe parse error", 'yellow')
+                    continue
+
+                image = (probe.get('docker_image') or '').strip()
+                derived = DeploymentService._derive_variant_from_probe(probe)
+                variant = derived.get('variant')
+                owner = derived.get('driver_owner') or 'n/a'
+                if image and variant:
+                    running_count += 1
+                    owner_tag = f" ({owner})" if owner in ('r1setup', 'user') else ''
+                    self.print_colored(
+                        f"  \U0001f7e2 {mid}: {conn} — running {variant.upper()}{owner_tag} → {image}",
+                        'green',
+                    )
+                elif variant:
+                    self.print_colored(
+                        f"  \u26aa {mid}: {conn} — no container, but systemd unit / drivers suggest {variant.upper()}",
+                        'yellow',
+                    )
+                else:
+                    self.print_colored(f"  \u26aa {mid}: {conn} — no edge_node evidence", 'yellow')
+
+            print()
+            self.print_colored(
+                f"Summary: {running_count}/{len(machine_ids)} machine(s) running an Edge Node container.",
+                'cyan',
+            )
+            if running_count:
+                self.print_colored(
+                    "\U0001f4a1 To import the running services as instances:",
+                    'yellow',
+                )
+                self.print_colored(
+                    "   Configuration Menu \u2192 Discover Services",
+                    'white',
+                )
+        finally:
+            shutil.rmtree(fetched_dir, ignore_errors=True)
 
         self.wait_for_enter()
 
