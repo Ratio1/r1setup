@@ -11095,6 +11095,19 @@ PY"""
                 }
 
             host_config = self._extract_machine_access_config(machine_record)
+            # Auto-detect image variant from the discovered container's image
+            # name so future redeploys preserve the original variant without
+            # requiring the user to pick it manually. Sets mnl_image_variant
+            # as a host-var, which wins over the CLI-passed cli default but
+            # still yields to an explicit user override of mnl_docker_image_url.
+            discovered_image = str(candidate.get('image') or '').strip()
+            discovered_variant = None
+            if discovered_image:
+                discovered_variant = (
+                    'gpu' if (discovered_image.endswith('_gpu')
+                              or '_gpu:' in discovered_image)
+                    else 'cpu'
+                )
             host_config.update({
                 'r1setup_machine_id': machine_id,
                 'r1setup_topology_mode': final_topology_mode,
@@ -11113,6 +11126,9 @@ PY"""
                 'r1setup_discovery_environment': candidate.get('environment') or 'unknown',
                 'r1setup_discovery_environment_source': candidate.get('environment_source') or 'unknown',
             })
+            if discovered_variant:
+                host_config['mnl_image_variant'] = discovered_variant
+                host_config['r1setup_discovered_image'] = discovered_image
             self.config_manager.apply_runtime_snapshot_to_host_config(host_name, host_config)
             hosts[host_name] = host_config
             imported_names.append(host_name)
