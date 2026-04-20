@@ -11578,7 +11578,13 @@ PY"""
         config_label = active_config_name if active_config_name != 'None' else 'none'
         self.print_colored(f"  {config_label} | {current_env} | {deploy_str}", 'cyan')
 
-        # Line 2: node status summary (only when hosts exist)
+        # Line 2: node status summary (only when hosts exist). When the
+        # config has no instances yet (zero-host shell), stay quiet —
+        # the config/network/deployment line above already says everything
+        # relevant to the current config. We intentionally do NOT display
+        # fleet-state machine counts here because they represent
+        # registered-but-not-yet-instantiated hosts, which tell the user
+        # nothing about what's deployed for *this* config.
         if has_config:
             hosts = _get_gpu_hosts(self.inventory)
             if hosts:
@@ -11602,14 +11608,6 @@ PY"""
                 self.print_colored(
                     f"  Nodes ({len(hosts)}): {', '.join(status_summary)} ({age_str})",
                     'cyan'
-                )
-        elif has_shell:
-            # Zero-host shell with registered machines
-            fleet_state = self.get_fleet_state_copy()
-            machines = fleet_state.get('fleet', {}).get('machines', {})
-            if machines:
-                self.print_colored(
-                    f"  Machines: {len(machines)} registered, 0 instances", 'cyan',
                 )
 
         self.print_section("R1Setup Main Menu")
