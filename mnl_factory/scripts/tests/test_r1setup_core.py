@@ -672,6 +672,96 @@ class TestInstallTrackingHelpers(unittest.TestCase):
             self.assertEqual(out['h1']['driver_owner'], 'r1setup')
 
 
+class TestEnsureHostsYmlLinked(unittest.TestCase):
+    """Regression: when active_config.json points at a config and the
+    corresponding configs/<name>.yml exists but <collection>/hosts.yml is
+    missing (fresh dev HOME, deleted symlink, switched checkouts), startup
+    must self-heal so check_hosts_config()-gated actions don't fail with
+    'No nodes configured!'."""
+
+    def _prep_app(self, td: Path, active_config_name: str):
+        """Assemble an R1Setup instance with a real on-disk configs layout
+        but mocked-out methods where touching them would be noisy."""
+        configs_dir = td / "configs"
+        configs_dir.mkdir()
+        collection_dir = td / "collection"
+        collection_dir.mkdir()
+        # Synthesize a minimal valid inventory for the active config.
+        config_yaml = configs_dir / f"{active_config_name}.yml"
+        config_yaml.write_text(
+            "all:\n  children:\n    gpu_nodes:\n      hosts:\n        edge_node:\n          ansible_host: 1.2.3.4\n"
+        )
+        active_config_file = td / "active_config.json"
+        active_config_file.write_text(
+            '{"config_name": "' + active_config_name + '", "deployment_status": "deployed"}'
+        )
+
+        app = r1setup.R1Setup.__new__(r1setup.R1Setup)
+        app.configs_dir = configs_dir
+        app.config_dir = collection_dir
+        app.config_file = collection_dir / "hosts.yml"
+        app.active_config_file = active_config_file
+        app.print_colored = MagicMock()
+        app.print_debug = MagicMock()
+        # Init config_manager before touching active_config (the property
+        # setter on R1Setup forwards to config_manager.active_config).
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = app
+        cm.active_config = {}
+        app.config_manager = cm
+        # Wire just enough of _load_active_config for the heal path.
+        def _load_active_config():
+            import json
+            with open(active_config_file) as fh:
+                cm.active_config.update(json.load(fh))
+        app._load_active_config = _load_active_config
+        return app, config_yaml
+
+    def test_heal_creates_symlink_when_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            app, config_yaml = self._prep_app(Path(td), "my-fleet")
+            self.assertFalse(app.config_file.exists())
+            healed = app._ensure_hosts_yml_linked()
+            self.assertTrue(healed)
+            self.assertTrue(app.config_file.is_symlink())
+            self.assertEqual(app.config_file.resolve(), config_yaml.resolve())
+
+    def test_heal_is_idempotent_when_already_linked(self):
+        with tempfile.TemporaryDirectory() as td:
+            app, config_yaml = self._prep_app(Path(td), "my-fleet")
+            app._ensure_hosts_yml_linked()
+            # Running again should short-circuit and not re-create the symlink.
+            before_mtime = app.config_file.lstat().st_mtime_ns
+            result = app._ensure_hosts_yml_linked()
+            self.assertTrue(result)
+            self.assertEqual(app.config_file.lstat().st_mtime_ns, before_mtime)
+
+    def test_heal_skips_when_no_active_config_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            app, _ = self._prep_app(Path(td), "my-fleet")
+            # Clear the name to simulate a truly-unconfigured state.
+            app.active_config_file.write_text('{}')
+            app.config_manager.active_config.clear()
+            self.assertFalse(app._ensure_hosts_yml_linked())
+            self.assertFalse(app.config_file.exists())
+
+    def test_heal_skips_when_configs_yaml_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            app, config_yaml = self._prep_app(Path(td), "my-fleet")
+            config_yaml.unlink()  # stale active_config pointing at missing YAML
+            self.assertFalse(app._ensure_hosts_yml_linked())
+            self.assertFalse(app.config_file.exists())
+
+    def test_heal_replaces_symlink_pointing_at_wrong_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            app, active_yaml = self._prep_app(Path(td), "my-fleet")
+            stale = app.configs_dir / "other-fleet.yml"
+            stale.write_text("all:\n  children:\n    gpu_nodes:\n      hosts: {}\n")
+            app.config_file.symlink_to(stale)
+            app._ensure_hosts_yml_linked()
+            self.assertEqual(app.config_file.resolve(), active_yaml.resolve())
+
+
 class TestAutoUpdateConstants(unittest.TestCase):
     """Auto-update URL invariants. A broken primary URL is masked by the
     raw-main fallback, but leaves every upgrade paying a wasted 404 and

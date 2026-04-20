@@ -14085,8 +14085,67 @@ PY"""
             self.print_debug(f"Failed to restore active config: {config_name}")
         return restored
 
+    def _ensure_hosts_yml_linked(self) -> bool:
+        """Idempotently reconcile the <collection>/hosts.yml symlink with the
+        active config stored in active_config.json + configs/<name>.yml.
+
+        Returns True if the symlink now points at the active config's YAML
+        (either because it already did, or because we just linked it).
+        Returns False if there's nothing to link (no active config name, or
+        the backing YAML is missing on disk).
+
+        This is the single reconciliation point between the two sources of
+        truth ("what's active" in active_config.json vs "what Ansible reads"
+        via <collection>/hosts.yml). Call it anywhere you'd otherwise worry
+        that check_hosts_config() might be stale.
+        """
+        try:
+            self._load_active_config()
+        except Exception as exc:
+            self.print_debug(f"_ensure_hosts_yml_linked: could not load active_config: {exc}")
+            return False
+
+        config_name = self.active_config.get('config_name')
+        if not config_name:
+            return False
+
+        config_path = self.configs_dir / f"{config_name}.yml"
+        if not config_path.exists():
+            self.print_debug(
+                f"_ensure_hosts_yml_linked: configs/{config_name}.yml missing, nothing to link"
+            )
+            return False
+
+        # Already pointing at the right place? Fast path, no I/O churn.
+        if self.config_file.is_symlink():
+            try:
+                if self.config_file.resolve() == config_path.resolve():
+                    return True
+            except (OSError, RuntimeError):
+                pass
+
+        # Otherwise, heal. _update_hosts_symlink is already idempotent and
+        # handles the "file exists, not a symlink" edge case.
+        try:
+            self.config_manager._update_hosts_symlink(config_path)
+            self.print_debug(f"_ensure_hosts_yml_linked: linked hosts.yml -> {config_path}")
+            return True
+        except Exception as exc:
+            self.print_debug(f"_ensure_hosts_yml_linked: failed to link {config_path}: {exc}")
+            return False
+
     def ensure_active_configuration(self) -> bool:
         """Ensure there's an active configuration before proceeding to main menu"""
+        # Self-heal the <collection>/hosts.yml symlink from the active
+        # configuration before any gating checks. Two sources of truth
+        # exist — active_config.json + configs/<name>.{yml,json} (user data)
+        # vs <collection>/hosts.yml (Ansible runtime pointer). They can
+        # diverge (fresh dev HOME, deleted symlink, switched checkouts),
+        # and without this heal, has_active_config_shell() lets users into
+        # the main menu while every check_hosts_config()-gated action fails
+        # with "No nodes configured!". Idempotent and cheap.
+        self._ensure_hosts_yml_linked()
+
         # Check if we have a valid active configuration (hosts OR zero-host shell)
         if self.has_active_config_shell():
             return True
