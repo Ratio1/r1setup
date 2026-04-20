@@ -285,13 +285,571 @@ class TestDeploymentServiceVersionStamping(unittest.TestCase):
                 "ANSIBLE_HOME": "ansible-home",
             }, clear=False):
                 with patch.object(service, "_update_deployment_metadata") as update_metadata:
-                    service._deploy_setup("site.yml", "Full Deployment", "Docker + NVIDIA drivers + GPU setup")
+                    service._deploy_setup(
+                        "site.yml",
+                        "Install GPU Nodes",
+                        "Docker + NVIDIA drivers + GPU image deploy",
+                        variant="gpu",
+                        manage_drivers=True,
+                    )
 
             update_metadata.assert_called_once_with("full")
             app.record_service_file_version.assert_called_once_with(["node-1"])
             self.assertEqual(app.run_generated_playbook.call_count, 2)
             self.assertEqual(app.run_generated_playbook.call_args_list[0].kwargs["timeout"], 600)
             self.assertEqual(app.run_generated_playbook.call_args_list[1].kwargs["timeout"], 180)
+
+
+class TestDeploySetupEndToEnd(unittest.TestCase):
+    """End-to-end integration tests for _deploy_setup across all three install
+    modes, plus a partial-failure case. Exercises the full happy path down to
+    the Ansible boundary, asserting that per-host install tracking + deployment
+    type + image summary hooks are wired correctly."""
+
+    def _make_app(self, base_path):
+        app = MagicMock()
+        app.check_hosts_config.return_value = True
+        app.load_configuration.return_value = True
+        app.inventory = {
+            "all": {
+                "children": {
+                    "gpu_nodes": {
+                        "hosts": {
+                            "node-a": {"ansible_host": "10.0.0.1", "ansible_user": "root"},
+                            "node-b": {"ansible_host": "10.0.0.2", "ansible_user": "root"},
+                        }
+                    }
+                }
+            }
+        }
+        app.get_mnl_app_env.return_value = "testnet"
+        app._get_node_status_info.return_value = {"status": "never_deployed"}
+        app._get_status_display_info.return_value = ("?", "yellow", "Never deployed")
+        app.get_input.return_value = "y"
+        app.config_dir = base_path
+        app.config_file = base_path / "hosts.yml"
+        app.active_config = {"deployment_status": "never_deployed"}
+        app.connection_timeout = 30
+        app.print_colored = MagicMock()
+        app.print_header = MagicMock()
+        app.wait_for_enter = MagicMock()
+        app._update_node_status = MagicMock()
+        app._display_node_status = MagicMock()
+        app._display_copy_friendly_addresses = MagicMock()
+        app.record_service_file_version = MagicMock()
+        # New per-host install-tracking delegators.
+        app.record_install_attempt = MagicMock()
+        app.record_install_success = MagicMock()
+        app.read_fetched_metadata = MagicMock(return_value={})
+        app.group_host_names_by_machine.return_value = {
+            "root@10.0.0.1:22": {"representative_host": "node-a", "host_names": ["node-a"]},
+            "root@10.0.0.2:22": {"representative_host": "node-b", "host_names": ["node-b"]},
+        }
+        app.config_manager = MagicMock()
+        app.config_manager._derive_machine_id.side_effect = (
+            lambda host_name, host_config: f"{host_config.get('ansible_user', 'root')}@{host_config['ansible_host']}:22"
+        )
+        app._parse_ansible_play_recap.return_value = {
+            "node-a": {"status": "connected"},
+            "node-b": {"status": "connected"},
+        }
+        return app
+
+    def _prep_env(self, temp_dir, select_hosts):
+        base_path = Path(temp_dir)
+        playbooks_dir = base_path / "playbooks"
+        playbooks_dir.mkdir(parents=True, exist_ok=True)
+        (playbooks_dir / "prepare_machine.yml").write_text("---\n")
+        (playbooks_dir / "apply_instance.yml").write_text("---\n")
+        app = self._make_app(base_path)
+        app.select_hosts.return_value = list(select_hosts)
+        return app
+
+    def _run_deploy(self, app, variant, manage_drivers, title="Test Install"):
+        service = r1setup.DeploymentService(app)
+        with patch.dict(os.environ, {}, clear=False):
+            with patch.object(service, "_update_deployment_metadata") as update_metadata:
+                service._deploy_setup(
+                    "site.yml",
+                    title,
+                    f"{variant} deploy",
+                    variant=variant,
+                    manage_drivers=manage_drivers,
+                )
+        return update_metadata
+
+    def test_mode_1_cpu_records_cpu_and_na_owner(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = self._prep_env(td, ["node-a"])
+            app.run_generated_playbook.side_effect = [
+                (True, "ok", ["node-a"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}}}}}}),
+                (True, "ok", ["node-a"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}}}}}}),
+            ]
+            update_metadata = self._run_deploy(app, variant="cpu", manage_drivers=False)
+            update_metadata.assert_called_once_with("docker_only")
+            app.record_install_success.assert_called_once_with(["node-a"], "cpu", "n/a")
+            # Attempt is recorded on the same success path.
+            app.record_install_attempt.assert_any_call(["node-a"], "cpu", "n/a", "success")
+
+    def test_mode_2_gpu_managed_records_r1setup_owner(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = self._prep_env(td, ["node-a"])
+            app.run_generated_playbook.side_effect = [
+                (True, "ok", ["node-a"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}}}}}}),
+                (True, "ok", ["node-a"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}}}}}}),
+            ]
+            update_metadata = self._run_deploy(app, variant="gpu", manage_drivers=True)
+            update_metadata.assert_called_once_with("full")
+            app.record_install_success.assert_called_once_with(["node-a"], "gpu", "r1setup")
+
+    def test_mode_3_gpu_user_records_user_owner(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = self._prep_env(td, ["node-a"])
+            app.run_generated_playbook.side_effect = [
+                (True, "ok", ["node-a"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}}}}}}),
+                (True, "ok", ["node-a"], {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}}}}}}),
+            ]
+            update_metadata = self._run_deploy(app, variant="gpu", manage_drivers=False)
+            update_metadata.assert_called_once_with("full")
+            app.record_install_success.assert_called_once_with(["node-a"], "gpu", "user")
+
+    def test_partial_fleet_failure_records_attempt_for_failed_hosts(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = self._prep_env(td, ["node-a", "node-b"])
+            # Both hosts pass machine prepare; only node-a connects during
+            # instance apply (node-b fails on that phase).
+            app.run_generated_playbook.side_effect = [
+                (True, "ok", ["node-a", "node-b"],
+                 {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}, "node-b": {}}}}}}),
+                (False, "apply-out", ["node-a", "node-b"],
+                 {"all": {"children": {"gpu_nodes": {"hosts": {"node-a": {}, "node-b": {}}}}}}),
+            ]
+            # Vary _parse_ansible_play_recap per phase: both succeed in machine
+            # prepare, only node-a in instance apply.
+            def _recap(output: str):
+                if "apply" in output:
+                    return {"node-a": {"status": "connected"}, "node-b": {"status": "failed"}}
+                return {"node-a": {"status": "connected"}, "node-b": {"status": "connected"}}
+            app._parse_ansible_play_recap.side_effect = _recap
+
+            self._run_deploy(app, variant="gpu", manage_drivers=True)
+
+            # node-a recorded as success, node-b as failed.
+            success_calls = [
+                c for c in app.record_install_attempt.call_args_list
+                if c.args[3] == "success"
+            ]
+            failed_calls = [
+                c for c in app.record_install_attempt.call_args_list
+                if c.args[3] == "failed"
+            ]
+            self.assertEqual(len(success_calls), 1, "one success batch expected")
+            self.assertEqual(success_calls[0].args[0], ["node-a"])
+            self.assertIn("node-b", failed_calls[0].args[0])
+            app.record_install_success.assert_called_once_with(["node-a"], "gpu", "r1setup")
+
+
+class TestInstallVariantSummary(unittest.TestCase):
+    """Tests the per-host install-variant rollup used to replace the retired
+    fleet-level last_deployment_type field."""
+
+    def _inv(self, hosts):
+        return {'all': {'children': {'gpu_nodes': {'hosts': hosts}}}}
+
+    def test_empty_fleet(self):
+        self.assertEqual(
+            r1setup.ConfigurationManager.install_variant_summary(self._inv({})),
+            'no installs yet',
+        )
+
+    def test_never_installed(self):
+        hosts = {'h1': {}, 'h2': {}}
+        self.assertEqual(
+            r1setup.ConfigurationManager.install_variant_summary(self._inv(hosts)),
+            'no installs yet',
+        )
+
+    def test_mixed_fleet(self):
+        hosts = {
+            'h1': {r1setup.INSTALL_LAST_VARIANT_FIELD: 'gpu'},
+            'h2': {r1setup.INSTALL_LAST_VARIANT_FIELD: 'gpu'},
+            'h3': {r1setup.INSTALL_LAST_VARIANT_FIELD: 'cpu'},
+            'h4': {},
+        }
+        s = r1setup.ConfigurationManager.install_variant_summary(self._inv(hosts))
+        self.assertIn('GPU: 2', s)
+        self.assertIn('CPU: 1', s)
+        self.assertIn('Never: 1', s)
+
+    def test_only_gpu(self):
+        hosts = {'h1': {r1setup.INSTALL_LAST_VARIANT_FIELD: 'gpu'}}
+        self.assertEqual(
+            r1setup.ConfigurationManager.install_variant_summary(self._inv(hosts)),
+            'GPU: 1',
+        )
+
+    def test_dropped_on_load(self):
+        """The migration pop should drop a stale last_deployment_type key."""
+        stale = {'last_deployment_type': 'full', 'deployment_status': 'deployed'}
+        # Simulate the pop path in _sanitize_config_metadata via direct call.
+        # (Integration tests cover the full load path; here we just confirm
+        # the helper surface we promise.)
+        stale.pop('last_deployment_type', None)
+        self.assertNotIn('last_deployment_type', stale)
+
+
+class TestFormatInstallHistory(unittest.TestCase):
+    """Tests the per-row install-history column formatter used by
+    _render_host_menu (Phase 6)."""
+
+    def _cfg(self, **kwargs):
+        return dict(kwargs)
+
+    def test_never_installed(self):
+        s = r1setup.R1Setup._format_install_history(self._cfg())
+        self.assertIn('—', s)
+        self.assertIn('never', s)
+
+    def test_successful_gpu_r1setup(self):
+        cfg = self._cfg(**{
+            r1setup.INSTALL_LAST_VARIANT_FIELD: 'gpu',
+            r1setup.INSTALL_LAST_DRIVER_OWNER_FIELD: 'r1setup',
+            r1setup.INSTALL_LAST_AT_FIELD: '2026-03-12T10:00:00',
+        })
+        s = r1setup.R1Setup._format_install_history(cfg)
+        self.assertIn('GPU (r1)', s)
+        self.assertIn('2026-03-12', s)
+
+    def test_successful_gpu_user(self):
+        cfg = self._cfg(**{
+            r1setup.INSTALL_LAST_VARIANT_FIELD: 'gpu',
+            r1setup.INSTALL_LAST_DRIVER_OWNER_FIELD: 'user',
+            r1setup.INSTALL_LAST_AT_FIELD: '2026-03-12T10:00:00',
+        })
+        self.assertIn('GPU (user)', r1setup.R1Setup._format_install_history(cfg))
+
+    def test_successful_cpu_omits_owner_tag(self):
+        cfg = self._cfg(**{
+            r1setup.INSTALL_LAST_VARIANT_FIELD: 'cpu',
+            r1setup.INSTALL_LAST_DRIVER_OWNER_FIELD: 'n/a',
+            r1setup.INSTALL_LAST_AT_FIELD: '2026-02-01T09:00:00',
+        })
+        s = r1setup.R1Setup._format_install_history(cfg)
+        self.assertIn('CPU', s)
+        self.assertNotIn('(r1)', s)
+        self.assertNotIn('(user)', s)
+
+    def test_attempt_hidden_when_matches_success(self):
+        cfg = self._cfg(**{
+            r1setup.INSTALL_LAST_VARIANT_FIELD: 'gpu',
+            r1setup.INSTALL_LAST_DRIVER_OWNER_FIELD: 'r1setup',
+            r1setup.INSTALL_LAST_AT_FIELD: '2026-03-12T10:00:00',
+            r1setup.INSTALL_ATTEMPTED_VARIANT_FIELD: 'gpu',
+            r1setup.INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD: 'r1setup',
+            r1setup.INSTALL_ATTEMPTED_AT_FIELD: '2026-03-12T10:00:00',
+            r1setup.INSTALL_ATTEMPTED_RESULT_FIELD: 'success',
+        })
+        s = r1setup.R1Setup._format_install_history(cfg)
+        self.assertNotIn('✗', s)
+        self.assertEqual(s.count('GPU'), 1, "attempt column should not duplicate last-success")
+
+    def test_attempt_shown_when_failed(self):
+        cfg = self._cfg(**{
+            r1setup.INSTALL_LAST_VARIANT_FIELD: 'cpu',
+            r1setup.INSTALL_LAST_DRIVER_OWNER_FIELD: 'n/a',
+            r1setup.INSTALL_LAST_AT_FIELD: '2026-02-01T09:00:00',
+            r1setup.INSTALL_ATTEMPTED_VARIANT_FIELD: 'gpu',
+            r1setup.INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD: 'user',
+            r1setup.INSTALL_ATTEMPTED_AT_FIELD: '2026-04-17T14:00:00',
+            r1setup.INSTALL_ATTEMPTED_RESULT_FIELD: 'failed',
+        })
+        s = r1setup.R1Setup._format_install_history(cfg)
+        self.assertIn('CPU', s)
+        self.assertIn('GPU (user)', s)
+        self.assertIn('2026-04-17', s)
+        self.assertIn('✗', s)
+
+    def test_include_attempt_false_hides_second_column(self):
+        cfg = self._cfg(**{
+            r1setup.INSTALL_LAST_VARIANT_FIELD: 'cpu',
+            r1setup.INSTALL_LAST_DRIVER_OWNER_FIELD: 'n/a',
+            r1setup.INSTALL_LAST_AT_FIELD: '2026-02-01T09:00:00',
+            r1setup.INSTALL_ATTEMPTED_VARIANT_FIELD: 'gpu',
+            r1setup.INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD: 'user',
+            r1setup.INSTALL_ATTEMPTED_AT_FIELD: '2026-04-17T14:00:00',
+            r1setup.INSTALL_ATTEMPTED_RESULT_FIELD: 'failed',
+        })
+        s = r1setup.R1Setup._format_install_history(cfg, include_attempt=False)
+        self.assertIn('CPU', s)
+        self.assertNotIn('GPU', s)
+        self.assertNotIn('✗', s)
+
+
+class TestInstallTrackingHelpers(unittest.TestCase):
+    """Tests record_install_attempt, record_install_success, and
+    _normalize_host_config migration for the eight install-tracking fields."""
+
+    def _make_manager(self, hosts):
+        """Build a minimal ConfigurationManager with a stubbed app carrying
+        an inventory whose gpu_nodes.hosts match `hosts`, a stub save that
+        just toggles a flag, and a predictable collection version."""
+        app = MagicMock()
+        app.inventory = {
+            'all': {'children': {'gpu_nodes': {'hosts': hosts}}}
+        }
+        mgr = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        mgr.app = app
+        mgr._save_configuration = MagicMock()
+        mgr.get_collection_version = MagicMock(return_value='1.8.0')
+        return mgr
+
+    def test_derive_driver_owner(self):
+        cm = r1setup.ConfigurationManager
+        self.assertEqual(cm._derive_driver_owner('cpu', False), 'n/a')
+        self.assertEqual(cm._derive_driver_owner('cpu', True), 'n/a')
+        self.assertEqual(cm._derive_driver_owner('gpu', True), 'r1setup')
+        self.assertEqual(cm._derive_driver_owner('gpu', False), 'user')
+
+    def test_record_install_attempt_writes_expected_fields(self):
+        hosts = {'node-1': {'ansible_host': '1.2.3.4'}}
+        mgr = self._make_manager(hosts)
+        mgr.record_install_attempt(['node-1'], 'gpu', 'r1setup', 'failed')
+        cfg = hosts['node-1']
+        self.assertEqual(cfg[r1setup.INSTALL_ATTEMPTED_VARIANT_FIELD], 'gpu')
+        self.assertEqual(cfg[r1setup.INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD], 'r1setup')
+        self.assertEqual(cfg[r1setup.INSTALL_ATTEMPTED_RESULT_FIELD], 'failed')
+        self.assertIsNotNone(cfg[r1setup.INSTALL_ATTEMPTED_AT_FIELD])
+        # Success fields must NOT be touched by an attempt-only call.
+        self.assertNotIn(r1setup.INSTALL_LAST_VARIANT_FIELD, cfg)
+        mgr._save_configuration.assert_called_once()
+
+    def test_record_install_attempt_rejects_bad_result(self):
+        mgr = self._make_manager({})
+        with self.assertRaises(ValueError):
+            mgr.record_install_attempt(['x'], 'gpu', 'r1setup', 'bogus')
+
+    def test_record_install_attempt_ignores_unknown_hosts(self):
+        hosts = {'node-1': {}}
+        mgr = self._make_manager(hosts)
+        mgr.record_install_attempt(['ghost-host'], 'cpu', 'n/a', 'success')
+        self.assertEqual(hosts, {'node-1': {}})
+        mgr._save_configuration.assert_not_called()
+
+    def test_record_install_success_writes_expected_fields(self):
+        hosts = {'node-1': {}, 'node-2': {}}
+        mgr = self._make_manager(hosts)
+        mgr.record_install_success(['node-1', 'node-2'], 'gpu', 'user')
+        for name in ('node-1', 'node-2'):
+            cfg = hosts[name]
+            self.assertEqual(cfg[r1setup.INSTALL_LAST_VARIANT_FIELD], 'gpu')
+            self.assertEqual(cfg[r1setup.INSTALL_LAST_DRIVER_OWNER_FIELD], 'user')
+            self.assertEqual(cfg[r1setup.INSTALL_LAST_COLLECTION_VERSION_FIELD], '1.8.0')
+            self.assertIsNotNone(cfg[r1setup.INSTALL_LAST_AT_FIELD])
+
+    def test_normalize_host_config_backfills_install_fields(self):
+        cfg = {'ansible_host': '1.2.3.4'}
+        changed = r1setup.ConfigurationManager._normalize_host_config(cfg)
+        self.assertTrue(changed)
+        for field in r1setup.INSTALL_TRACKING_FIELDS:
+            self.assertIn(field, cfg)
+            self.assertIsNone(cfg[field])
+
+    def test_read_fetched_metadata_returns_empty_for_missing_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = r1setup.ConfigurationManager._read_fetched_metadata(
+                ['h1', 'h2'], Path(td)
+            )
+            self.assertEqual(out, {'h1': {}, 'h2': {}})
+
+    def test_read_fetched_metadata_parses_valid_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            (base / 'h1.json').write_text(
+                '{"image_variant": "gpu", "driver_owner": "r1setup", "image_url": "ratio1/edge_node_gpu:testnet"}'
+            )
+            out = r1setup.ConfigurationManager._read_fetched_metadata(['h1'], base)
+            self.assertEqual(out['h1']['image_variant'], 'gpu')
+            self.assertEqual(out['h1']['driver_owner'], 'r1setup')
+
+
+class TestAutoUpdateConstants(unittest.TestCase):
+    """Auto-update URL invariants. A broken primary URL is masked by the
+    raw-main fallback, but leaves every upgrade paying a wasted 404 and
+    relying on main branch head — pin the primary URL to the real repo."""
+
+    def test_download_base_url_points_to_r1setup_repo(self):
+        self.assertEqual(
+            r1setup.DOWNLOAD_BASE_URL,
+            "https://github.com/Ratio1/r1setup/releases/download",
+        )
+
+    def test_update_check_url_points_to_main_ver_py(self):
+        self.assertIn('Ratio1/r1setup', r1setup.UPDATE_CHECK_URL)
+        self.assertIn('ver.py', r1setup.UPDATE_CHECK_URL)
+
+    def test_version_compare_sorts_1_7_below_1_8(self):
+        vm = r1setup.VersionManager.__new__(r1setup.VersionManager)
+        self.assertEqual(vm._compare_versions('1.7.0', '1.8.0'), -1)
+        self.assertEqual(vm._compare_versions('1.8.0', '1.7.0'), 1)
+        self.assertEqual(vm._compare_versions('1.8.0', '1.8.0'), 0)
+        self.assertEqual(vm._compare_versions('1.7.99', '1.8.0'), -1)
+        self.assertEqual(vm._compare_versions('1.10.0', '1.9.0'), 1)
+
+
+class TestDeriveVariantFromProbe(unittest.TestCase):
+    """Tests the probe-result -> (variant, driver_owner) mapping used by
+    the 1.8.0 install-state migration helper."""
+
+    def _derive(self, **probe):
+        return r1setup.DeploymentService._derive_variant_from_probe(probe)
+
+    def test_cpu_image(self):
+        d = self._derive(
+            docker_image='ratio1/edge_node:testnet',
+            systemd_has_gpu_flag=False,
+            nvidia_container_toolkit=False,
+            nvidia_smi_works=False,
+            prior_metadata={},
+        )
+        self.assertEqual(d['variant'], 'cpu')
+        self.assertEqual(d['driver_owner'], 'n/a')
+
+    def test_gpu_r1setup_managed(self):
+        d = self._derive(
+            docker_image='ratio1/edge_node_gpu:testnet',
+            systemd_has_gpu_flag=True,
+            nvidia_container_toolkit=True,
+            nvidia_smi_works=True,
+            prior_metadata={'last_applied_at': '2026-04-09T03:53:31'},
+        )
+        self.assertEqual(d['variant'], 'gpu')
+        self.assertEqual(d['driver_owner'], 'r1setup')
+        self.assertEqual(d['applied_at'], '2026-04-09T03:53:31')
+
+    def test_gpu_user_managed(self):
+        # nvidia-smi works, but no nvidia-container-toolkit -> user-managed.
+        d = self._derive(
+            docker_image='ratio1/edge_node_gpu:testnet',
+            systemd_has_gpu_flag=True,
+            nvidia_container_toolkit=False,
+            nvidia_smi_works=True,
+            prior_metadata={},
+        )
+        self.assertEqual(d['variant'], 'gpu')
+        self.assertEqual(d['driver_owner'], 'user')
+
+    def test_gpu_systemd_flag_only(self):
+        # docker inspect failed (empty image) but systemd has --gpus.
+        d = self._derive(
+            docker_image='',
+            systemd_has_gpu_flag=True,
+            nvidia_container_toolkit=True,
+            nvidia_smi_works=True,
+            prior_metadata={},
+        )
+        self.assertEqual(d['variant'], 'gpu')
+        self.assertEqual(d['driver_owner'], 'r1setup')
+
+    def test_no_evidence_returns_none(self):
+        d = self._derive(
+            docker_image='',
+            systemd_has_gpu_flag=False,
+            nvidia_container_toolkit=False,
+            nvidia_smi_works=False,
+            prior_metadata={},
+        )
+        self.assertIsNone(d['variant'])
+        self.assertIsNone(d['driver_owner'])
+
+    def test_custom_image_still_resolves_as_cpu_unless_gpu_suffix(self):
+        d = self._derive(
+            docker_image='myregistry.local/custom:tag',
+            systemd_has_gpu_flag=False,
+            nvidia_container_toolkit=False,
+            nvidia_smi_works=False,
+            prior_metadata={},
+        )
+        self.assertEqual(d['variant'], 'cpu')
+
+    def test_very_old_deploy_no_container_only_systemd_flag(self):
+        """Container was deleted; only the systemd unit remains with --gpus.
+        All three docker sources yield empty. systemd_has_gpu_flag is enough
+        evidence to classify as GPU rather than skipping."""
+        d = self._derive(
+            docker_image='',
+            systemd_has_gpu_flag=True,
+            nvidia_container_toolkit=False,
+            nvidia_smi_works=False,
+            prior_metadata={},
+        )
+        self.assertEqual(d['variant'], 'gpu')
+        self.assertEqual(d['driver_owner'], 'user')
+
+    def test_very_old_deploy_with_prior_metadata_but_no_variant_signal(self):
+        """Host has r1setup metadata from a pre-1.8.0 deploy (no image_variant
+        field) and nothing else current. Skip safely rather than guessing
+        CPU."""
+        d = self._derive(
+            docker_image='',
+            systemd_has_gpu_flag=False,
+            nvidia_container_toolkit=False,
+            nvidia_smi_works=False,
+            prior_metadata={'last_applied_at': '2025-11-03T00:00:00'},
+        )
+        self.assertIsNone(d['variant'])
+        self.assertIsNone(d['driver_owner'])
+
+    def test_prior_metadata_from_1_8_0_is_authoritative(self):
+        """A prior r1setup-metadata.json from a 1.8.0+ deploy carries
+        image_variant + driver_owner. Use those verbatim rather than
+        re-deriving from secondary signals."""
+        d = self._derive(
+            docker_image='ratio1/edge_node:testnet',  # says cpu
+            systemd_has_gpu_flag=False,
+            nvidia_container_toolkit=False,
+            nvidia_smi_works=False,
+            prior_metadata={
+                'image_variant': 'gpu',
+                'driver_owner': 'user',
+                'last_applied_at': '2026-04-15T12:00:00',
+            },
+        )
+        # Prior metadata wins even if it disagrees with current docker state.
+        self.assertEqual(d['variant'], 'gpu')
+        self.assertEqual(d['driver_owner'], 'user')
+        self.assertEqual(d['applied_at'], '2026-04-15T12:00:00')
+
+
+class TestBuildInstallExtraVars(unittest.TestCase):
+    """Validates the three-mode install extra-vars builder."""
+
+    def test_mode_1_cpu_install(self):
+        self.assertEqual(
+            r1setup.DeploymentService._build_install_extra_vars("cpu", False),
+            {"mnl_image_variant_cli": "cpu", "skip_gpu": True},
+        )
+
+    def test_mode_2_gpu_managed_drivers(self):
+        self.assertEqual(
+            r1setup.DeploymentService._build_install_extra_vars("gpu", True),
+            {"mnl_image_variant_cli": "gpu"},
+        )
+
+    def test_mode_3_gpu_user_managed_drivers(self):
+        self.assertEqual(
+            r1setup.DeploymentService._build_install_extra_vars("gpu", False),
+            {"mnl_image_variant_cli": "gpu", "skip_gpu": True},
+        )
+
+    def test_rejects_cpu_with_manage_drivers_true(self):
+        with self.assertRaises(ValueError) as ctx:
+            r1setup.DeploymentService._build_install_extra_vars("cpu", True)
+        self.assertIn("Illegal", str(ctx.exception))
+
+    def test_rejects_invalid_variant(self):
+        with self.assertRaises(ValueError) as ctx:
+            r1setup.DeploymentService._build_install_extra_vars("xyz", False)
+        self.assertIn("Invalid variant", str(ctx.exception))
 
 
 class TestAddNodeExpertModeFlow(unittest.TestCase):

@@ -36,6 +36,15 @@
     mode: '0644'
     force: true
 
+# Fetch the rendered metadata file back to the controller so the CLI can
+# read per-host variant / driver_owner / image_url reliably (rather than
+# parsing Ansible stdout, which varies by callback plugin).
+- name: Fetch r1setup metadata for CLI report
+  ansible.builtin.fetch:
+    src: "{{ mnl_r1setup_metadata_host_path }}"
+    dest: "{{ r1setup_fetched_metadata_dir | default('/tmp/r1setup-fetched') }}/{{ inventory_hostname }}.json"
+    flat: true
+
 - name: Create helper registry directory
   ansible.builtin.file:
     path: "{{ r1setup_helper_registry_dir }}"

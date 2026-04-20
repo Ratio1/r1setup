@@ -19,8 +19,22 @@
 - name: Skip message if no NVIDIA GPU found
   debug:
     msg: "No NVIDIA GPU detected. Skipping driver installation."
-  when: 
+  when:
     - (skip_gpu is not defined or not skip_gpu)
+    - nvidia_gpu_check.rc != 0
+
+# Fail loudly when the GPU variant was requested but no NVIDIA GPU is present.
+# No silent fallback to CPU — the user either picks 'Install CPU Nodes' or
+# fixes the hardware before retrying.
+- name: Fail if GPU variant requested but no NVIDIA GPU detected
+  fail:
+    msg: |
+      GPU install requested on {{ inventory_hostname }} but no NVIDIA GPU
+      was detected. Re-run this host via 'Install CPU Nodes', or fix the
+      NVIDIA hardware/drivers before retrying GPU install.
+  when:
+    - (skip_gpu is not defined or not skip_gpu)
+    - mnl_image_variant | default('cpu') == 'gpu'
     - nvidia_gpu_check.rc != 0
 
 # GPU Installation and Setup - Only proceed if GPU is detected

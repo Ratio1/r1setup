@@ -65,14 +65,17 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.7.0"
+    CLI_VERSION = "1.8.0"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
 
 # Version information
 UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/ver.py"
-DOWNLOAD_BASE_URL = "https://github.com/Ratio1/multi_node_launcher/releases/download"
+# Release assets are published to this repo by .github/workflows/release.yml.
+# (Previously pointed at Ratio1/multi_node_launcher which 404s; the raw-main
+# fallback in _perform_update masked the bug. Fixed in 1.8.0.)
+DOWNLOAD_BASE_URL = "https://github.com/Ratio1/r1setup/releases/download"
 
 # Whitelist of service template variables that can be overridden via Advanced → Customize Service
 CUSTOMIZABLE_VARS = {
@@ -118,6 +121,26 @@ SSH_AUTH_MODE_VERIFICATION_FAILED = 'verification_failed'
 SERVICE_FILE_VERSION_FIELD = 'r1setup_service_file_version'
 DEFAULT_SERVICE_FILE_VERSION = 'v0'
 UNKNOWN_SERVICE_FILE_VERSION_MARKERS = {'', 'unknown', 'not found', 'n/a', 'none', 'null'}
+
+# Per-host install tracking fields (see docs/_todos/20260418T183123_r1setup_mixed_cpu_gpu_fleets.md).
+INSTALL_LAST_VARIANT_FIELD = 'r1setup_last_install_variant'
+INSTALL_LAST_DRIVER_OWNER_FIELD = 'r1setup_last_install_driver_owner'
+INSTALL_LAST_AT_FIELD = 'r1setup_last_install_at'
+INSTALL_LAST_COLLECTION_VERSION_FIELD = 'r1setup_last_install_collection_version'
+INSTALL_ATTEMPTED_VARIANT_FIELD = 'r1setup_last_attempted_variant'
+INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD = 'r1setup_last_attempted_driver_owner'
+INSTALL_ATTEMPTED_AT_FIELD = 'r1setup_last_attempted_at'
+INSTALL_ATTEMPTED_RESULT_FIELD = 'r1setup_last_attempted_result'
+INSTALL_TRACKING_FIELDS = (
+    INSTALL_LAST_VARIANT_FIELD,
+    INSTALL_LAST_DRIVER_OWNER_FIELD,
+    INSTALL_LAST_AT_FIELD,
+    INSTALL_LAST_COLLECTION_VERSION_FIELD,
+    INSTALL_ATTEMPTED_VARIANT_FIELD,
+    INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD,
+    INSTALL_ATTEMPTED_AT_FIELD,
+    INSTALL_ATTEMPTED_RESULT_FIELD,
+)
 CONFIG_SCHEMA_VERSION = 1
 DEFAULT_MACHINE_TOPOLOGY_MODE = 'standard'
 DEFAULT_MACHINE_DEPLOYMENT_STATE = 'unknown'
@@ -1152,7 +1175,9 @@ class ConfigurationManager:
             'last_deployed_network': None,
             'deployment_status': 'never_deployed',
             'last_deleted_date': None,
-            'last_deployment_type': None
+            'last_written_cli_version': None,
+            'last_written_collection_version': None,
+            'last_written_at': None,
         }
 
     def _load_active_config(self) -> None:
@@ -1169,7 +1194,9 @@ class ConfigurationManager:
             'last_deployed_network': None,
             'deployment_status': 'never_deployed',
             'last_deleted_date': None,
-            'last_deployment_type': None
+            'last_written_cli_version': None,
+            'last_written_collection_version': None,
+            'last_written_at': None,
         }
 
         if self.app.active_config_file.exists():
@@ -2713,13 +2740,21 @@ class ConfigurationManager:
             metadata['deployment_status'] = 'never_deployed'
         if 'last_deleted_date' not in metadata:
             metadata['last_deleted_date'] = None
-        if 'last_deployment_type' not in metadata:
-            metadata['last_deployment_type'] = None
+        # last_deployment_type was fleet-level and lied on mixed fleets — drop
+        # it on load so stale values don't linger in the config file.
+        metadata.pop('last_deployment_type', None)
 
         # Always update these fields
         metadata['environment'] = environment
         metadata['nodes_count'] = nodes_count
         metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
+        # Version stamping: record the CLI + collection versions that wrote
+        # this config, plus the write timestamp, so post-mortems can reason
+        # about what tooling produced it. Added in 1.8.0; older configs gain
+        # these keys on first save under 1.8.0.
+        metadata['last_written_cli_version'] = CLI_VERSION
+        metadata['last_written_collection_version'] = self.get_collection_version()
+        metadata['last_written_at'] = datetime.now().isoformat()
         fleet_for_save = self._merge_fleet_state(self.fleet_state or metadata.get('fleet_state'), self.app.inventory)
         metadata['machines_count'] = len(fleet_for_save.get('fleet', {}).get('machines', {}))
         metadata['fleet_state'] = fleet_for_save
@@ -2953,6 +2988,118 @@ class ConfigurationManager:
         if changed:
             self._save_configuration()
 
+    @staticmethod
+    def _derive_driver_owner(variant: str, manage_drivers: bool) -> str:
+        """Map (variant, manage_drivers) → the driver_owner label persisted on each host."""
+        if variant != 'gpu':
+            return 'n/a'
+        return 'r1setup' if manage_drivers else 'user'
+
+    def record_install_attempt(
+        self,
+        host_names: List[str],
+        variant: str,
+        driver_owner: str,
+        result: str,
+    ) -> None:
+        """Persist the last-attempted install metadata for each host.
+
+        Attempts are recorded regardless of success, so the selection menu
+        can show e.g. 'GPU (user) • 2026-04-17 ✗' next to a host whose last
+        attempt failed but which still has a prior successful CPU install.
+        """
+        if result not in ('success', 'failed'):
+            raise ValueError(f"Invalid attempt result {result!r}; expected 'success' or 'failed'")
+        hosts = _get_gpu_hosts(self.app.inventory)
+        now = datetime.now().isoformat()
+        changed = False
+        for name in host_names:
+            host_config = hosts.get(name)
+            if host_config is None:
+                continue
+            host_config[INSTALL_ATTEMPTED_VARIANT_FIELD] = variant
+            host_config[INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD] = driver_owner
+            host_config[INSTALL_ATTEMPTED_AT_FIELD] = now
+            host_config[INSTALL_ATTEMPTED_RESULT_FIELD] = result
+            changed = True
+        if changed:
+            self._save_configuration()
+
+    def record_install_success(
+        self,
+        host_names: List[str],
+        variant: str,
+        driver_owner: str,
+    ) -> None:
+        """Persist the last-successful install metadata for each host."""
+        hosts = _get_gpu_hosts(self.app.inventory)
+        now = datetime.now().isoformat()
+        collection_version = self.get_collection_version()
+        changed = False
+        for name in host_names:
+            host_config = hosts.get(name)
+            if host_config is None:
+                continue
+            host_config[INSTALL_LAST_VARIANT_FIELD] = variant
+            host_config[INSTALL_LAST_DRIVER_OWNER_FIELD] = driver_owner
+            host_config[INSTALL_LAST_AT_FIELD] = now
+            host_config[INSTALL_LAST_COLLECTION_VERSION_FIELD] = collection_version
+            changed = True
+        if changed:
+            self._save_configuration()
+
+    @staticmethod
+    def install_variant_summary(inventory: Dict[str, Any]) -> str:
+        """Per-host variant rollup for display, e.g. 'GPU: 2, CPU: 3' or
+        'no installs yet'. Reads r1setup_last_install_variant from each host.
+
+        Replaces the fleet-level last_deployment_type field, which lied on
+        mixed fleets.
+        """
+        hosts = _get_gpu_hosts(inventory)
+        counts: Dict[str, int] = {'gpu': 0, 'cpu': 0}
+        never = 0
+        for cfg in hosts.values():
+            v = cfg.get(INSTALL_LAST_VARIANT_FIELD)
+            if v in counts:
+                counts[v] += 1
+            else:
+                never += 1
+        pieces = []
+        if counts['gpu']:
+            pieces.append(f"GPU: {counts['gpu']}")
+        if counts['cpu']:
+            pieces.append(f"CPU: {counts['cpu']}")
+        if not pieces:
+            return 'no installs yet'
+        if never:
+            pieces.append(f"Never: {never}")
+        return ", ".join(pieces)
+
+    @staticmethod
+    def _read_fetched_metadata(
+        host_names: List[str],
+        fetched_dir: Optional[Path] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Read per-host metadata JSON files pulled from each host by the
+        `fetch` task in render_edge_node_definition.yml. Returns a mapping
+        {hostname: metadata_dict}. Missing or malformed files yield an
+        empty entry for that host so callers can uniformly iterate.
+        """
+        base = fetched_dir if fetched_dir is not None else Path('/tmp/r1setup-fetched')
+        out: Dict[str, Dict[str, Any]] = {}
+        for name in host_names:
+            fpath = base / f"{name}.json"
+            if not fpath.exists():
+                out[name] = {}
+                continue
+            try:
+                with fpath.open('r') as fh:
+                    out[name] = json.load(fh)
+            except (OSError, ValueError):
+                out[name] = {}
+        return out
+
     def _save_configuration(self) -> None:
         """Save configuration to file (legacy method - now uses new config management)"""
         # Get current environment and node count
@@ -2991,6 +3138,13 @@ class ConfigurationManager:
         if 'last_status_check' in host_config:
             del host_config['last_status_check']
             changed = True
+
+        # Backfill install-tracking fields for old inventories so the menu
+        # renderer can rely on them always being present (None = never).
+        for field in INSTALL_TRACKING_FIELDS:
+            if field not in host_config:
+                host_config[field] = None
+                changed = True
 
         return changed
 
@@ -3839,8 +3993,12 @@ class ConfigurationManager:
                     deployment_status = metadata.get('deployment_status', 'never_deployed')
                     last_deployed_date = metadata.get('last_deployed_date')
                     last_deployed_network = metadata.get('last_deployed_network')
-                    last_deployment_type = metadata.get('last_deployment_type')
                     last_deleted_date = metadata.get('last_deleted_date')
+                    # Per-host variant rollup replaces the retired
+                    # fleet-level last_deployment_type field.
+                    variant_summary = self.install_variant_summary(
+                        metadata.get('inventory') or self.app.inventory
+                    )
 
                     if deployment_status == 'deployed' and last_deployed_date:
                         deployed_str = _parse_iso_datetime(last_deployed_date)
@@ -3848,8 +4006,8 @@ class ConfigurationManager:
                             deployment_info = f"🚀 Last deployed: {deployed_str}"
                             if last_deployed_network:
                                 deployment_info += f" ({last_deployed_network}"
-                            if last_deployment_type:
-                                deployment_info += f", {last_deployment_type})"
+                            if variant_summary and variant_summary != 'no installs yet':
+                                deployment_info += f", {variant_summary})"
                             elif last_deployed_network:
                                 deployment_info += ")"
                         else:
@@ -3987,7 +4145,6 @@ class ConfigurationManager:
                         'last_deployed_network': None,
                         'deployment_status': 'never_deployed',
                         'last_deleted_date': None,
-                        'last_deployment_type': None
                     }
                     self._save_active_config()
 
@@ -5417,22 +5574,227 @@ class DeploymentService:
         self.app.wait_for_enter()
 
     def deploy_full(self) -> None:
-        """Deploy full setup (Docker + NVIDIA + GPU)"""
+        """Install GPU Nodes — deploys the GPU edge_node image.
+
+        Sub-prompts whether r1setup should install/manage the NVIDIA drivers
+        (Mode 2) or whether the user has already set them up themselves
+        (Mode 3). Mode 3 skips the nvidia_gpu role entirely and runs a
+        preflight nvidia-smi check before the Docker pull.
+        """
+        self.app.print_header("Install GPU Nodes")
+        self.app.print_colored(
+            "\nThis deploys the GPU image (ratio1/edge_node_gpu:{env}) on the hosts you select.\n"
+            "GPU installs never silently fall back to CPU — if anything goes wrong, the affected\n"
+            "hosts fail loudly and are listed for retry.",
+            'cyan',
+        )
+        self.app.print_colored(
+            "\nShould r1setup install and manage the NVIDIA drivers on the selected hosts?",
+            'yellow',
+            bold=True,
+        )
+        self.app.print_colored(
+            "   Y = r1setup installs drivers + NVIDIA Container Toolkit (default)",
+            'white',
+        )
+        self.app.print_colored(
+            "   N = drivers are already installed by you; r1setup only verifies nvidia-smi and deploys the image",
+            'white',
+        )
+        answer = self.app.get_input(
+            "Install/manage NVIDIA drivers? (Y/n)", "Y"
+        ).strip().lower()
+        manage_drivers = answer not in ('n', 'no')
+
+        if manage_drivers:
+            description = "Docker + NVIDIA drivers + GPU image deploy"
+            last_applied_action = "deploy_gpu_managed"
+        else:
+            description = "GPU image deploy (user-managed NVIDIA drivers)"
+            last_applied_action = "deploy_gpu_user_drivers"
+
         self._deploy_setup(
             "site.yml",
-            "Full Deployment",
-            "Docker + NVIDIA drivers + GPU setup",
-            last_applied_action="deploy_full",
+            "Install GPU Nodes",
+            description,
+            variant="gpu",
+            manage_drivers=manage_drivers,
+            last_applied_action=last_applied_action,
         )
 
+    @staticmethod
+    def _derive_variant_from_probe(probe: Dict[str, Any]) -> Dict[str, Any]:
+        """Map a probe-summary dict (from probe_install_state.yml) to
+        (variant, driver_owner, applied_at). Returns None values when there's
+        no concrete evidence, letting the caller skip the host rather than
+        guess. Prefers, in order:
+          1. image_variant recorded by a prior 1.8.0+ deploy (authoritative).
+          2. The current docker image name (suffix-based).
+          3. The systemd unit having --gpus (last-resort for deploys where
+             the container is gone and no metadata JSON exists).
+        """
+        prior = probe.get('prior_metadata') or {}
+        image = (probe.get('docker_image') or '').strip()
+        variant: Optional[str] = None
+        driver_owner: Optional[str] = None
+        applied_at = prior.get('last_applied_at') or prior.get('applied_at')
+
+        # 1. Authoritative: prior metadata written by 1.8.0+.
+        if prior.get('image_variant') in ('cpu', 'gpu'):
+            variant = prior['image_variant']
+            if prior.get('driver_owner') in ('r1setup', 'user', 'n/a'):
+                driver_owner = prior['driver_owner']
+
+        # 2. Derive from current docker image suffix.
+        if variant is None and image:
+            variant = 'gpu' if image.endswith('_gpu') or '_gpu:' in image else 'cpu'
+
+        # 3. Last-resort: systemd unit has --gpus and nothing else survived.
+        if variant is None and probe.get('systemd_has_gpu_flag'):
+            variant = 'gpu'
+
+        if variant is None:
+            # No concrete evidence — skip rather than guess. Prior metadata
+            # with only a timestamp is not enough to pick CPU vs GPU.
+            return {'variant': None, 'driver_owner': None, 'applied_at': None}
+
+        # Derive driver_owner only if prior metadata didn't already carry it.
+        if driver_owner is None:
+            if variant == 'gpu':
+                # nvidia_gpu role installs the NVIDIA Container Toolkit (Mode 2).
+                # Toolkit + working nvidia-smi => r1setup-managed; working
+                # nvidia-smi without toolkit => user-managed; no working
+                # nvidia-smi at all but GPU image was deployed => the drivers
+                # are currently broken. Classify those as 'user' so we don't
+                # incorrectly attribute them to r1setup.
+                if probe.get('nvidia_container_toolkit') and probe.get('nvidia_smi_works'):
+                    driver_owner = 'r1setup'
+                else:
+                    driver_owner = 'user'
+            else:
+                driver_owner = 'n/a'
+
+        return {'variant': variant, 'driver_owner': driver_owner, 'applied_at': applied_at}
+
+    def migrate_install_tracking(self) -> None:
+        """Probe running hosts and back-populate the 1.8.0 install tracking
+        fields. Read-only on the target hosts (no package or config changes).
+        """
+        if not self.app.check_hosts_config():
+            self.app.print_colored("No nodes configured! Please configure nodes first.", 'red')
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_header("Migrate Install State")
+        self.app.print_colored(
+            "\nProbes each selected host for its currently-deployed image, NVIDIA\n"
+            "driver state, and prior r1setup metadata, then back-populates the\n"
+            "per-host install-tracking fields introduced in 1.8.0.\n\n"
+            "Read-only: no packages are installed, no configs are changed on\n"
+            "the target hosts. Safe to run on live fleets.",
+            'cyan',
+        )
+
+        self.app.load_configuration()
+        all_hosts = _get_gpu_hosts(self.app.inventory)
+
+        # Default to hosts that look like they were deployed before 1.8.0:
+        # node_status indicates a deploy happened, but install-tracking is
+        # still empty.
+        candidates = {
+            name for name, cfg in all_hosts.items()
+            if cfg.get('node_status') in ('running', 'stopped', 'error')
+            and not cfg.get(INSTALL_LAST_VARIANT_FIELD)
+        }
+        preselect_label = None
+        if candidates:
+            preselect_label = "hosts deployed before 1.8.0 (running, no install tracking yet)"
+
+        selected = self.app.select_hosts(
+            all_hosts, "install-state migration",
+            preselect_mode='none' if not candidates else 'all',
+            initial_selection=candidates if candidates else None,
+            preselection_label=preselect_label,
+        )
+        if not selected:
+            self.app.print_colored("Migration cancelled - no hosts selected.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        playbook = self.app.config_dir / 'playbooks/probe_install_state.yml'
+        if not playbook.exists():
+            self.app.print_colored(f"Probe playbook not found: {playbook}", 'red')
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_colored(f"\nProbing {len(selected)} host(s)...", 'cyan')
+        success, output, executed_hosts, _ = self.app.run_generated_playbook(
+            playbook,
+            selected,
+            machine_scope=False,
+            last_applied_action='migrate_install_tracking',
+            show_output=True,
+            timeout=self.app.connection_timeout,
+        )
+        reachable = self._extract_successful_hosts_from_output(output, executed_hosts)
+        unreachable = [h for h in selected if h not in reachable]
+
+        # Fetched probes land at /tmp/r1setup-fetched/probe-<host>.json
+        fetched_dir = Path('/tmp/r1setup-fetched')
+        migrated: List[str] = []
+        skipped: List[Tuple[str, str]] = []
+        for host in reachable:
+            probe_path = fetched_dir / f"probe-{host}.json"
+            if not probe_path.exists():
+                skipped.append((host, "probe result not fetched"))
+                continue
+            try:
+                probe = json.loads(probe_path.read_text())
+            except (OSError, ValueError) as exc:
+                skipped.append((host, f"probe parse error: {exc}"))
+                continue
+            derived = self._derive_variant_from_probe(probe)
+            if not derived['variant']:
+                skipped.append((host, "no deploy evidence on host"))
+                continue
+            variant = derived['variant']
+            owner = derived['driver_owner']
+            self.app.record_install_attempt([host], variant, owner, "success")
+            self.app.record_install_success([host], variant, owner)
+            migrated.append(f"{host}: {variant.upper()} ({owner})")
+
+        # Report.
+        self.app.print_colored("\n📊 Migration Summary:", 'cyan', bold=True)
+        if migrated:
+            self.app.print_colored(f"   ✅ Back-populated {len(migrated)} host(s):", 'green')
+            for line in migrated:
+                self.app.print_colored(f"      • {line}", 'white')
+        if skipped:
+            self.app.print_colored(f"   ⚠️  Skipped {len(skipped)} host(s):", 'yellow')
+            for host, reason in skipped:
+                self.app.print_colored(f"      • {host}: {reason}", 'yellow')
+        if unreachable:
+            self.app.print_colored(f"   ❌ Unreachable {len(unreachable)} host(s):", 'red')
+            for host in unreachable:
+                self.app.print_colored(f"      • {host}", 'red')
+            self.app.print_colored(
+                "   Retry the migration after these hosts come back online.",
+                'yellow',
+            )
+        if not success and not migrated:
+            self.app.print_colored("\n❌ Probe playbook failed. See output above.", 'red')
+
+        self.app.wait_for_enter()
+
     def deploy_docker_only(self) -> None:
-        """Deploy Docker only"""
+        """Install CPU Nodes — deploys the CPU edge_node image, skips all GPU setup."""
         self._deploy_setup(
             "site.yml",
-            "Docker-Only Deployment",
-            "Docker without GPU setup",
-            extra_vars={"skip_gpu": True},
-            last_applied_action="deploy_docker_only",
+            "Install CPU Nodes",
+            "Docker only (CPU image deploy)",
+            variant="cpu",
+            manage_drivers=False,
+            last_applied_action="deploy_cpu",
         )
 
     def delete_edge_node(self) -> None:
@@ -5544,15 +5906,56 @@ class DeploymentService:
 
         self.app.wait_for_enter()
 
+    @staticmethod
+    def _build_install_extra_vars(
+        variant: str,
+        manage_drivers: bool,
+    ) -> Dict[str, Any]:
+        """Validate the (variant, manage_drivers) pair and return the
+        extra-vars dict that the Ansible playbook expects.
+
+        Legal combinations:
+          - ('cpu', False) -> Mode 1 (CPU install)
+          - ('gpu', True)  -> Mode 2 (GPU install, r1setup manages drivers)
+          - ('gpu', False) -> Mode 3 (GPU image only, user-managed drivers)
+
+        Rejects 'cpu' + manage_drivers=True: installing drivers for a CPU
+        deploy makes no sense and almost always signals a refactor bug.
+        """
+        if variant not in ('cpu', 'gpu'):
+            raise ValueError(f"Invalid variant {variant!r}; expected 'cpu' or 'gpu'")
+        if variant == 'cpu' and manage_drivers:
+            raise ValueError(
+                "Illegal install mode: variant='cpu' with manage_drivers=True. "
+                "CPU install does not install NVIDIA drivers."
+            )
+
+        extra_vars: Dict[str, Any] = {"mnl_image_variant_cli": variant}
+        # skip_gpu is true for Mode 1 and Mode 3 — in both, we don't run
+        # the nvidia_gpu role. Only Mode 2 (manage_drivers=True) runs it.
+        if not manage_drivers:
+            extra_vars["skip_gpu"] = True
+        return extra_vars
+
     def _deploy_setup(
         self,
         playbook: str,
         title: str,
         description: str,
-        extra_vars: Optional[Dict[str, Any]] = None,
+        variant: str,
+        manage_drivers: bool,
         last_applied_action: str = "deploy",
     ) -> None:
-        """Common deployment logic with host selection"""
+        """Common deployment logic with host selection.
+
+        variant: 'cpu' or 'gpu' — selects the image variant.
+        manage_drivers: when True (Mode 2), r1setup runs the nvidia_gpu role
+            to install/manage drivers. When False for variant='gpu' (Mode 3),
+            the nvidia_gpu role is skipped and a preflight nvidia-smi check
+            runs instead. For variant='cpu', always False.
+        """
+        extra_vars = self._build_install_extra_vars(variant, manage_drivers)
+
         if not self.app.check_hosts_config():
             self.app.print_colored("No nodes configured! Please configure nodes first.", 'red')
             self.app.wait_for_enter()
@@ -5605,17 +6008,27 @@ class DeploymentService:
             status_emoji, _, status_desc = self.app._get_status_display_info(status_info['status'])
             self.app.print_colored(f"   • {name}: {user}@{ip} [{status_emoji} {status_desc}]", 'white')
 
+        # Mode-specific confirmation copy, keyed on (variant, manage_drivers).
         self.app.print_colored(f"\n⚠️  This will:", 'yellow', bold=True)
-        if "Docker + NVIDIA" in description:
+        if variant == "gpu" and manage_drivers:
+            # Mode 2 — r1setup installs/manages NVIDIA drivers.
             self.app.print_colored("   • Install Docker and Docker Compose", 'yellow')
-            self.app.print_colored("   • Install NVIDIA drivers and CUDA toolkit", 'yellow')
-            self.app.print_colored("   • Configure GPU access for containers", 'yellow')
-            self.app.print_colored("   • Deploy and start the Edge Node", 'yellow')
-        elif "Docker only" in description:
+            self.app.print_colored("   • Install NVIDIA drivers + NVIDIA Container Toolkit", 'yellow')
+            self.app.print_colored(f"   • Pull the GPU image (ratio1/edge_node_gpu:{env})", 'yellow')
+            self.app.print_colored("   • Deploy and start the Edge Node with GPU access", 'yellow')
+            self.app.print_colored("   • Abort per host if GPU setup fails — no silent CPU fallback", 'yellow')
+        elif variant == "gpu" and not manage_drivers:
+            # Mode 3 — user-managed drivers.
             self.app.print_colored("   • Install Docker and Docker Compose", 'yellow')
-            self.app.print_colored("   • Deploy and start the Edge Node (CPU mode)", 'yellow')
+            self.app.print_colored("   • Preflight nvidia-smi (r1setup will NOT touch your NVIDIA drivers)", 'yellow')
+            self.app.print_colored(f"   • Pull the GPU image (ratio1/edge_node_gpu:{env})", 'yellow')
+            self.app.print_colored("   • Deploy and start the Edge Node with GPU access", 'yellow')
+            self.app.print_colored("   • Abort per host if nvidia-smi fails — no silent CPU fallback, no driver changes", 'yellow')
         else:
-            self.app.print_colored(f"   • {description}", 'yellow')
+            # Mode 1 — CPU install.
+            self.app.print_colored("   • Install Docker and Docker Compose", 'yellow')
+            self.app.print_colored(f"   • Pull the CPU image (ratio1/edge_node:{env})", 'yellow')
+            self.app.print_colored("   • Deploy and start the Edge Node in CPU mode", 'yellow')
 
         # Check for network change warning for selected hosts
         deployment_status = self.app.active_config.get('deployment_status', 'never_deployed')
@@ -5730,10 +6143,22 @@ class DeploymentService:
         successful_instance_hosts = self._extract_successful_hosts_from_output(instance_output, deployable_host_names)
         failed_instance_hosts = [host_name for host_name in deployable_host_names if host_name not in successful_instance_hosts]
 
+        # Record install attempt + success on every run (not only on the
+        # overall-success branch below) so per-host history reflects
+        # reality for mixed-fleet partial failures.
+        driver_owner = ConfigurationManager._derive_driver_owner(variant, manage_drivers)
+        if successful_instance_hosts:
+            self.app.record_install_attempt(successful_instance_hosts, variant, driver_owner, "success")
+            self.app.record_install_success(successful_instance_hosts, variant, driver_owner)
+        failed_for_tracking = list(failed_instance_hosts) + list(skipped_host_names)
+        if failed_for_tracking:
+            self.app.record_install_attempt(failed_for_tracking, variant, driver_owner, "failed")
+
         if success:
             self.app.print_colored(f"\n✅ Deployment succeeded on {len(successful_instance_hosts)} node(s)", 'green')
-            # Update deployment metadata after successful deployment
-            deployment_type = "full" if "NVIDIA" in description else "docker_only"
+            # Update deployment metadata after successful deployment.
+            # deployment_type derives from variant (not a description string sniff).
+            deployment_type = "full" if variant == "gpu" else "docker_only"
             self._update_deployment_metadata(deployment_type)
             self.app.record_service_file_version(successful_instance_hosts)
 
@@ -5750,6 +6175,9 @@ class DeploymentService:
                 self.app._display_node_status(host_name, compact=True)
                 print()  # New line after each status
 
+            # Image Summary — per-host variant / URL pulled from fetched metadata.
+            self._render_image_summary(successful_instance_hosts)
+
             # Display copy-friendly node addresses after successful deployment
             if successful_instance_hosts:
                 self.app._display_copy_friendly_addresses(successful_instance_hosts)
@@ -5762,7 +6190,67 @@ class DeploymentService:
                 self.app._update_node_status(host_name, 'error')
             self.app.print_colored(f"\n📊 Selected node statuses updated to Error due to deployment failure.", 'yellow')
 
+        # Mode-specific failure hint: only for GPU runs with failed hosts.
+        all_failed = list(failed_instance_hosts) + list(skipped_host_names)
+        if variant == "gpu" and all_failed:
+            self._render_gpu_failure_hint(all_failed, manage_drivers)
+
         self.app.wait_for_enter()
+
+    def _render_image_summary(self, host_names: List[str]) -> None:
+        """Print a per-host "Image Summary" block from the fetched metadata."""
+        if not host_names:
+            return
+        metadata = self.app.read_fetched_metadata(host_names)
+        self.app.print_colored("\n🖼️  Image Summary:", 'cyan', bold=True)
+        for host in host_names:
+            meta = metadata.get(host) or {}
+            variant_label = (meta.get('image_variant') or '?').upper()
+            image_url = meta.get('image_url') or 'unknown'
+            owner = meta.get('driver_owner') or 'n/a'
+            owner_suffix = f" ({owner})" if owner in ('r1setup', 'user') else ''
+            self.app.print_colored(
+                f"   • {host}: {variant_label}{owner_suffix} → {image_url}",
+                'white',
+            )
+
+    def _render_gpu_failure_hint(self, failed_hosts: List[str], manage_drivers: bool) -> None:
+        """Print a mode-specific hint after a GPU run that had failed hosts."""
+        joined = ", ".join(failed_hosts)
+        if manage_drivers:
+            # Mode 2
+            self.app.print_colored("\n⚠️  GPU install failed on: " + joined, 'yellow', bold=True)
+            self.app.print_colored(
+                "   Partial NVIDIA driver state has been cleaned up on these hosts.",
+                'yellow',
+            )
+            self.app.print_colored(
+                "   Re-run them via 'Install CPU Nodes', or fix the underlying driver",
+                'yellow',
+            )
+            self.app.print_colored(
+                "   issue and retry GPU install. No CPU image was deployed.",
+                'yellow',
+            )
+        else:
+            # Mode 3
+            self.app.print_colored("\n⚠️  GPU image deploy failed on: " + joined, 'yellow', bold=True)
+            self.app.print_colored(
+                "   nvidia-smi did not work on these hosts. r1setup did NOT touch the",
+                'yellow',
+            )
+            self.app.print_colored(
+                "   drivers (you marked them as user-managed). Either install/repair",
+                'yellow',
+            )
+            self.app.print_colored(
+                "   them yourself, or retry via 'Install GPU Nodes' with driver",
+                'yellow',
+            )
+            self.app.print_colored(
+                "   management enabled. No image was deployed.",
+                'yellow',
+            )
 
     def _update_deployment_metadata(self, deployment_type: str) -> None:
         """Update deployment metadata after successful deployment"""
@@ -5795,7 +6283,8 @@ class DeploymentService:
             metadata['last_deployed_date'] = datetime.now().isoformat()
             metadata['last_deployed_network'] = current_network
             metadata['deployment_status'] = 'deployed'
-            metadata['last_deployment_type'] = deployment_type
+            # last_deployment_type retired: per-host variant is the truth now.
+            metadata.pop('last_deployment_type', None)
 
             self.app.print_debug(f"Updated metadata: {metadata}")
 
@@ -5881,11 +6370,11 @@ class DeploymentService:
             self.app.print_colored(f"ℹ️  {deployment_display['status_note']}", 'white')
         if deployment_status == 'deployed':
             last_deployed_network = self.app.active_config.get('last_deployed_network')
-            last_deployment_type = self.app.active_config.get('last_deployment_type')
+            variant_summary = self.app.config_manager.install_variant_summary(self.app.inventory)
             if last_deployed_network:
                 self.app.print_colored(f"🌐 Network: {last_deployed_network}", 'cyan')
-            if last_deployment_type:
-                self.app.print_colored(f"🔧 Type: {last_deployment_type}", 'cyan')
+            if variant_summary and variant_summary != 'no installs yet':
+                self.app.print_colored(f"🔧 Per-host variants: {variant_summary}", 'cyan')
 
         # Individual node status - check in real-time
         self.app.print_section(f"Machine Status Overview")
@@ -9412,6 +9901,9 @@ class R1Setup:
     def deploy_docker_only(self):
         return self.deployment_service.deploy_docker_only()
 
+    def migrate_install_tracking(self):
+        return self.deployment_service.migrate_install_tracking()
+
     def prepare_registered_machines(self, skip_gpu=False):
         return self.deployment_service.prepare_registered_machines(skip_gpu=skip_gpu)
 
@@ -9479,6 +9971,30 @@ class R1Setup:
 
     def record_service_file_versions(self, host_versions: Dict[str, str]) -> None:
         return self.config_manager.record_service_file_versions(host_versions)
+
+    def record_install_attempt(
+        self,
+        host_names: List[str],
+        variant: str,
+        driver_owner: str,
+        result: str,
+    ) -> None:
+        return self.config_manager.record_install_attempt(host_names, variant, driver_owner, result)
+
+    def record_install_success(
+        self,
+        host_names: List[str],
+        variant: str,
+        driver_owner: str,
+    ) -> None:
+        return self.config_manager.record_install_success(host_names, variant, driver_owner)
+
+    @staticmethod
+    def read_fetched_metadata(
+        host_names: List[str],
+        fetched_dir: Optional[Path] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        return ConfigurationManager._read_fetched_metadata(host_names, fetched_dir)
 
     def detect_helper_mode_conflicts(
         self,
@@ -10935,8 +11451,11 @@ PY"""
         deployment_status = str(metadata.get('deployment_status') or 'never_deployed')
         last_deployed_date = metadata.get('last_deployed_date')
         last_deployed_network = metadata.get('last_deployed_network')
-        last_deployment_type = metadata.get('last_deployment_type')
         last_deleted_date = metadata.get('last_deleted_date')
+        # Per-host variant rollup replaces retired fleet-level last_deployment_type.
+        variant_summary = self.config_manager.install_variant_summary(
+            inventory if inventory is not None else self.inventory
+        )
 
         if deployment_status == 'deployed':
             deployed_str = _parse_iso_datetime(last_deployed_date) if last_deployed_date else None
@@ -10944,8 +11463,8 @@ PY"""
             main_menu_text = f"🚀 deployed {deployed_str}" if deployed_str else "✓ deployed"
             if deployed_str and last_deployed_network:
                 summary_text += f" ({last_deployed_network}"
-                if last_deployment_type:
-                    summary_text += f", {last_deployment_type})"
+                if variant_summary and variant_summary != 'no installs yet':
+                    summary_text += f", {variant_summary})"
                 else:
                     summary_text += ")"
                 main_menu_text += f" ({last_deployed_network})"
@@ -11266,11 +11785,11 @@ PY"""
                 self.print_colored(f"ℹ️  {deployment_display['status_note']}", 'white')
             if deployment_status == 'deployed':
                 last_deployed_network = self.active_config.get('last_deployed_network')
-                last_deployment_type = self.active_config.get('last_deployment_type')
+                variant_summary = self.config_manager.install_variant_summary(self.inventory)
                 if last_deployed_network:
                     self.print_colored(f"🌐 Network: {last_deployed_network}", 'cyan')
-                if last_deployment_type:
-                    self.print_colored(f"🔧 Type: {last_deployment_type}", 'cyan')
+                if variant_summary and variant_summary != 'no installs yet':
+                    self.print_colored(f"🔧 Per-host variants: {variant_summary}", 'cyan')
             migration_plan_state = self.active_config.get('migration_plan_state')
             if migration_plan_state:
                 self.print_colored(
@@ -11280,8 +11799,8 @@ PY"""
 
             self.print_colored("Deployment Menu", 'cyan', bold=True)
             print()
-            self.print_colored("  1) Deploy with GPU        - Deploy full Edge Node with GPU support")
-            self.print_colored("  2) Deploy CPU Only        - Deploy Edge Node without GPU capabilities")
+            self.print_colored("  1) Install GPU Nodes      - Deploy Edge Node with GPU image (ratio1/edge_node_gpu)")
+            self.print_colored("  2) Install CPU Nodes      - Deploy Edge Node with CPU image (ratio1/edge_node)")
             self.print_colored("  3) Prepare Machines       - Prepare registered machines without deploying nodes")
             self.print_colored("  4) Plan Migration        - Build and save a migration plan without executing it")
             self.print_colored("  5) Execute Migration    - Run the saved migration plan")
@@ -11289,6 +11808,7 @@ PY"""
             self.print_colored("  7) Finalize Migration   - Clean up source artifacts after verified migration")
             self.print_colored("  8) Delete Deployment      - Remove deployed Edge Node")
             self.print_colored("  9) Deployment Status      - Check detailed deployment status")
+            self.print_colored("  m) Migrate Install State  - Back-populate 1.8.0 tracking from running hosts")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -11316,8 +11836,10 @@ PY"""
                 self.delete_edge_node()
             elif choice == '9':
                 self.deployment_status()
+            elif choice.lower() == 'm':
+                self.migrate_install_tracking()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-9.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-9 or m.", 'red')
                 self.wait_for_enter()
 
     def operations_menu(self) -> None:
@@ -14133,6 +14655,58 @@ PY"""
         except ImportError:
             return self._fallback_select_hosts(hosts, operation_name, initial_selection, preselection_label)
 
+    @staticmethod
+    def _format_install_history(host_config: Dict[str, Any], include_attempt: bool = True) -> str:
+        """Return a compact one-line summary of a host's install history.
+
+        Shape: ``<last-success>  [<recent-attempt-if-divergent-or-failed>]``
+
+        Examples:
+            ``GPU (r1) • 2026-03-12``
+            ``CPU      • 2026-02-01    GPU (user) • 2026-04-17 ✗``
+            ``—        • never``
+        """
+        def _fmt_variant(v: Optional[str], owner: Optional[str]) -> str:
+            if not v:
+                return '—  '
+            owner_short = {'r1setup': 'r1', 'user': 'user'}.get(owner or '', '')
+            suffix = f" ({owner_short})" if owner_short else ''
+            return f"{v.upper()}{suffix}"
+
+        def _fmt_date(ts: Optional[str]) -> str:
+            if not ts:
+                return 'never'
+            return ts.split('T')[0]
+
+        last_variant = host_config.get(INSTALL_LAST_VARIANT_FIELD)
+        last_owner = host_config.get(INSTALL_LAST_DRIVER_OWNER_FIELD)
+        last_at = host_config.get(INSTALL_LAST_AT_FIELD)
+        success_col = f"{_fmt_variant(last_variant, last_owner):<12} • {_fmt_date(last_at):<10}"
+
+        if not include_attempt:
+            return success_col
+
+        attempt_variant = host_config.get(INSTALL_ATTEMPTED_VARIANT_FIELD)
+        attempt_owner = host_config.get(INSTALL_ATTEMPTED_DRIVER_OWNER_FIELD)
+        attempt_at = host_config.get(INSTALL_ATTEMPTED_AT_FIELD)
+        attempt_result = host_config.get(INSTALL_ATTEMPTED_RESULT_FIELD)
+
+        # Show attempt column only when it tells the user something new:
+        # either the last attempt failed, or it diverges from the last success.
+        diverges = (
+            attempt_variant and (
+                attempt_result == 'failed'
+                or attempt_variant != last_variant
+                or attempt_owner != last_owner
+            )
+        )
+        if not diverges:
+            return success_col
+
+        result_mark = '✗' if attempt_result == 'failed' else '✓'
+        attempt_col = f"{_fmt_variant(attempt_variant, attempt_owner):<12} • {_fmt_date(attempt_at):<10} {result_mark}"
+        return f"{success_col}    {attempt_col}"
+
     def _render_host_menu(self, hosts, host_list, selected_hosts, current_index, operation_name,
                           initial_selection=None, interactive=True, preselection_label=None):
         """Render the host selection menu (shared by interactive and fallback modes)."""
@@ -14201,17 +14775,34 @@ PY"""
                 is_preselected = initial_selection is not None and host_name in initial_selection and initial_selection != set(hosts.keys())
                 marker = "✓" if is_selected else " "
 
+                # Install history column (per-host variant + date + attempt,
+                # degrades to just the success column on narrow terminals).
+                host_cfg = hosts.get(host_name, {})
+                try:
+                    import shutil as _sh
+                    term_width = _sh.get_terminal_size((100, 24)).columns
+                except Exception:
+                    term_width = 100
+                include_attempt = term_width >= 110
+                history = self._format_install_history(host_cfg, include_attempt=include_attempt)
+
                 if interactive:
                     prefix = "→ " if is_current else "  "
                     color = 'yellow' if is_current else ('green' if is_selected else 'white')
                     style = 'bold' if is_current else False
                     preselect_indicator = " (pre-selected)" if is_preselected else ""
-                    self.print_colored(f"{prefix}[{marker}] {host_name}{preselect_indicator}", color, bold=style)
+                    self.print_colored(
+                        f"{prefix}[{marker}] {host_name:<24}  {history}{preselect_indicator}",
+                        color, bold=style,
+                    )
                 else:
                     idx = host_list.index(item)  # 0 is "All hosts", so real index starts at 1
                     color = 'green' if is_selected else 'white'
                     preselect_indicator = " (pre-selected)" if is_preselected else ""
-                    self.print_colored(f"  {idx}) [{marker}] {host_name}{preselect_indicator}", color, bold=is_selected)
+                    self.print_colored(
+                        f"  {idx}) [{marker}] {host_name:<24}  {history}{preselect_indicator}",
+                        color, bold=is_selected,
+                    )
 
         print()
         self.print_colored("─" * 60, 'blue')

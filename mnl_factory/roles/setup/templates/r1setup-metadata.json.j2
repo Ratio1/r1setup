@@ -7,5 +7,9 @@
   "app_env": {{ mnl_app_env | default('unknown', true) | to_json }},
   "node_name": {{ inventory_hostname | to_json }},
   "last_applied_action": {{ r1setup_last_applied_action_effective | default('unknown', true) | to_json }},
-  "last_applied_at": {{ ansible_date_time.iso8601 | default('unknown', true) | to_json }}
+  "last_applied_at": {{ ansible_date_time.iso8601 | default('unknown', true) | to_json }},
+  "image_variant": {{ mnl_image_variant | default('cpu') | to_json }},
+  "image_url": {{ mnl_docker_image_url | to_json }},
+  "driver_owner": {{ ('r1setup' if (mnl_image_variant | default('cpu') == 'gpu' and not (skip_gpu | default(false))) else ('user' if (mnl_image_variant | default('cpu') == 'gpu' and (skip_gpu | default(false))) else 'n/a')) | to_json }},
+  "applied_at": {{ ansible_date_time.iso8601 | default('unknown', true) | to_json }}
 }
