@@ -672,6 +672,30 @@ class TestInstallTrackingHelpers(unittest.TestCase):
             self.assertEqual(out['h1']['driver_owner'], 'r1setup')
 
 
+class TestAutoUpdateConstants(unittest.TestCase):
+    """Auto-update URL invariants. A broken primary URL is masked by the
+    raw-main fallback, but leaves every upgrade paying a wasted 404 and
+    relying on main branch head — pin the primary URL to the real repo."""
+
+    def test_download_base_url_points_to_r1setup_repo(self):
+        self.assertEqual(
+            r1setup.DOWNLOAD_BASE_URL,
+            "https://github.com/Ratio1/r1setup/releases/download",
+        )
+
+    def test_update_check_url_points_to_main_ver_py(self):
+        self.assertIn('Ratio1/r1setup', r1setup.UPDATE_CHECK_URL)
+        self.assertIn('ver.py', r1setup.UPDATE_CHECK_URL)
+
+    def test_version_compare_sorts_1_7_below_1_8(self):
+        vm = r1setup.VersionManager.__new__(r1setup.VersionManager)
+        self.assertEqual(vm._compare_versions('1.7.0', '1.8.0'), -1)
+        self.assertEqual(vm._compare_versions('1.8.0', '1.7.0'), 1)
+        self.assertEqual(vm._compare_versions('1.8.0', '1.8.0'), 0)
+        self.assertEqual(vm._compare_versions('1.7.99', '1.8.0'), -1)
+        self.assertEqual(vm._compare_versions('1.10.0', '1.9.0'), 1)
+
+
 class TestDeriveVariantFromProbe(unittest.TestCase):
     """Tests the probe-result -> (variant, driver_owner) mapping used by
     the 1.8.0 install-state migration helper."""

@@ -72,7 +72,10 @@ DEBUG = False  # Set to True to enable debug output, or use --debug flag
 
 # Version information
 UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/ver.py"
-DOWNLOAD_BASE_URL = "https://github.com/Ratio1/multi_node_launcher/releases/download"
+# Release assets are published to this repo by .github/workflows/release.yml.
+# (Previously pointed at Ratio1/multi_node_launcher which 404s; the raw-main
+# fallback in _perform_update masked the bug. Fixed in 1.8.0.)
+DOWNLOAD_BASE_URL = "https://github.com/Ratio1/r1setup/releases/download"
 
 # Whitelist of service template variables that can be overridden via Advanced → Customize Service
 CUSTOMIZABLE_VARS = {
@@ -1172,6 +1175,9 @@ class ConfigurationManager:
             'last_deployed_network': None,
             'deployment_status': 'never_deployed',
             'last_deleted_date': None,
+            'last_written_cli_version': None,
+            'last_written_collection_version': None,
+            'last_written_at': None,
         }
 
     def _load_active_config(self) -> None:
@@ -1188,6 +1194,9 @@ class ConfigurationManager:
             'last_deployed_network': None,
             'deployment_status': 'never_deployed',
             'last_deleted_date': None,
+            'last_written_cli_version': None,
+            'last_written_collection_version': None,
+            'last_written_at': None,
         }
 
         if self.app.active_config_file.exists():
@@ -2739,6 +2748,13 @@ class ConfigurationManager:
         metadata['environment'] = environment
         metadata['nodes_count'] = nodes_count
         metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
+        # Version stamping: record the CLI + collection versions that wrote
+        # this config, plus the write timestamp, so post-mortems can reason
+        # about what tooling produced it. Added in 1.8.0; older configs gain
+        # these keys on first save under 1.8.0.
+        metadata['last_written_cli_version'] = CLI_VERSION
+        metadata['last_written_collection_version'] = self.get_collection_version()
+        metadata['last_written_at'] = datetime.now().isoformat()
         fleet_for_save = self._merge_fleet_state(self.fleet_state or metadata.get('fleet_state'), self.app.inventory)
         metadata['machines_count'] = len(fleet_for_save.get('fleet', {}).get('machines', {}))
         metadata['fleet_state'] = fleet_for_save
