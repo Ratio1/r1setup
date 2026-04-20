@@ -771,6 +771,54 @@ class TestDeriveVariantFromProbe(unittest.TestCase):
         )
         self.assertEqual(d['variant'], 'cpu')
 
+    def test_very_old_deploy_no_container_only_systemd_flag(self):
+        """Container was deleted; only the systemd unit remains with --gpus.
+        All three docker sources yield empty. systemd_has_gpu_flag is enough
+        evidence to classify as GPU rather than skipping."""
+        d = self._derive(
+            docker_image='',
+            systemd_has_gpu_flag=True,
+            nvidia_container_toolkit=False,
+            nvidia_smi_works=False,
+            prior_metadata={},
+        )
+        self.assertEqual(d['variant'], 'gpu')
+        self.assertEqual(d['driver_owner'], 'user')
+
+    def test_very_old_deploy_with_prior_metadata_but_no_variant_signal(self):
+        """Host has r1setup metadata from a pre-1.8.0 deploy (no image_variant
+        field) and nothing else current. Skip safely rather than guessing
+        CPU."""
+        d = self._derive(
+            docker_image='',
+            systemd_has_gpu_flag=False,
+            nvidia_container_toolkit=False,
+            nvidia_smi_works=False,
+            prior_metadata={'last_applied_at': '2025-11-03T00:00:00'},
+        )
+        self.assertIsNone(d['variant'])
+        self.assertIsNone(d['driver_owner'])
+
+    def test_prior_metadata_from_1_8_0_is_authoritative(self):
+        """A prior r1setup-metadata.json from a 1.8.0+ deploy carries
+        image_variant + driver_owner. Use those verbatim rather than
+        re-deriving from secondary signals."""
+        d = self._derive(
+            docker_image='ratio1/edge_node:testnet',  # says cpu
+            systemd_has_gpu_flag=False,
+            nvidia_container_toolkit=False,
+            nvidia_smi_works=False,
+            prior_metadata={
+                'image_variant': 'gpu',
+                'driver_owner': 'user',
+                'last_applied_at': '2026-04-15T12:00:00',
+            },
+        )
+        # Prior metadata wins even if it disagrees with current docker state.
+        self.assertEqual(d['variant'], 'gpu')
+        self.assertEqual(d['driver_owner'], 'user')
+        self.assertEqual(d['applied_at'], '2026-04-15T12:00:00')
+
 
 class TestBuildInstallExtraVars(unittest.TestCase):
     """Validates the three-mode install extra-vars builder."""

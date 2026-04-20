@@ -5625,41 +5625,55 @@ class DeploymentService:
     @staticmethod
     def _derive_variant_from_probe(probe: Dict[str, Any]) -> Dict[str, Any]:
         """Map a probe-summary dict (from probe_install_state.yml) to
-        (variant, driver_owner, applied_at). Returns None for values that
-        couldn't be derived, letting the caller decide to skip or fall back.
+        (variant, driver_owner, applied_at). Returns None values when there's
+        no concrete evidence, letting the caller skip the host rather than
+        guess. Prefers, in order:
+          1. image_variant recorded by a prior 1.8.0+ deploy (authoritative).
+          2. The current docker image name (suffix-based).
+          3. The systemd unit having --gpus (last-resort for deploys where
+             the container is gone and no metadata JSON exists).
         """
+        prior = probe.get('prior_metadata') or {}
         image = (probe.get('docker_image') or '').strip()
         variant: Optional[str] = None
-        if image:
-            variant = 'gpu' if image.endswith('_gpu') or '_gpu:' in image else 'cpu'
-        elif probe.get('systemd_has_gpu_flag'):
-            variant = 'gpu'
-        # No deploy evidence at all -> can't migrate this host.
-        if not variant and not probe.get('prior_metadata'):
-            return {'variant': None, 'driver_owner': None, 'applied_at': None}
-        # Fallback: if the systemd unit has --gpus and image was unreadable,
-        # assume gpu.
-        if variant is None:
-            variant = 'gpu' if probe.get('systemd_has_gpu_flag') else 'cpu'
-
-        if variant == 'gpu':
-            # nvidia-container-toolkit is installed by the nvidia_gpu role
-            # (Mode 2). If the toolkit is present AND nvidia-smi works, assume
-            # r1setup-managed. If nvidia-smi works but the toolkit isn't
-            # installed, it's user-managed (Mode 3).
-            if probe.get('nvidia_container_toolkit') and probe.get('nvidia_smi_works'):
-                driver_owner = 'r1setup'
-            elif probe.get('nvidia_smi_works'):
-                driver_owner = 'user'
-            else:
-                # GPU image deployed but drivers broken. Best guess: whatever
-                # was in prior metadata, else 'user' so we don't blame r1setup.
-                driver_owner = 'user'
-        else:
-            driver_owner = 'n/a'
-
-        prior = probe.get('prior_metadata') or {}
+        driver_owner: Optional[str] = None
         applied_at = prior.get('last_applied_at') or prior.get('applied_at')
+
+        # 1. Authoritative: prior metadata written by 1.8.0+.
+        if prior.get('image_variant') in ('cpu', 'gpu'):
+            variant = prior['image_variant']
+            if prior.get('driver_owner') in ('r1setup', 'user', 'n/a'):
+                driver_owner = prior['driver_owner']
+
+        # 2. Derive from current docker image suffix.
+        if variant is None and image:
+            variant = 'gpu' if image.endswith('_gpu') or '_gpu:' in image else 'cpu'
+
+        # 3. Last-resort: systemd unit has --gpus and nothing else survived.
+        if variant is None and probe.get('systemd_has_gpu_flag'):
+            variant = 'gpu'
+
+        if variant is None:
+            # No concrete evidence — skip rather than guess. Prior metadata
+            # with only a timestamp is not enough to pick CPU vs GPU.
+            return {'variant': None, 'driver_owner': None, 'applied_at': None}
+
+        # Derive driver_owner only if prior metadata didn't already carry it.
+        if driver_owner is None:
+            if variant == 'gpu':
+                # nvidia_gpu role installs the NVIDIA Container Toolkit (Mode 2).
+                # Toolkit + working nvidia-smi => r1setup-managed; working
+                # nvidia-smi without toolkit => user-managed; no working
+                # nvidia-smi at all but GPU image was deployed => the drivers
+                # are currently broken. Classify those as 'user' so we don't
+                # incorrectly attribute them to r1setup.
+                if probe.get('nvidia_container_toolkit') and probe.get('nvidia_smi_works'):
+                    driver_owner = 'r1setup'
+                else:
+                    driver_owner = 'user'
+            else:
+                driver_owner = 'n/a'
+
         return {'variant': variant, 'driver_owner': driver_owner, 'applied_at': applied_at}
 
     def migrate_install_tracking(self) -> None:

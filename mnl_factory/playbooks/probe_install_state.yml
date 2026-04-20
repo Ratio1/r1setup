@@ -22,6 +22,32 @@
       changed_when: false
       failed_when: false
 
+    # Fallback: extract the image URL from the rendered systemd unit.
+    # edge_node.service includes a literal "docker pull <url>" line that the
+    # template rendered at deploy time, so even if the container was removed
+    # or renamed we still have evidence of which image was last deployed.
+    - name: Extract image URL from systemd unit (fallback)
+      ansible.builtin.shell: |
+        awk '/docker pull/ {for (i=1;i<=NF;i++) if ($i ~ /\//) {print $i; exit}}' \
+          /etc/systemd/system/{{ edge_node_service_name }}.service 2>/dev/null \
+          || true
+      register: probe_unit_image
+      changed_when: false
+      failed_when: false
+
+    # Second fallback: if our expected container name isn't present, enumerate
+    # every ratio1/edge_node* container on the host. Handles very old deploys
+    # that used a different container name.
+    - name: List any ratio1 edge_node containers on the host (fallback)
+      ansible.builtin.shell: |
+        docker ps -a --format '{{ "{{" }}.Image{{ "}}" }}' 2>/dev/null \
+          | grep -E '(^|/)edge_node(_gpu)?(:|$)' \
+          | head -1 \
+          || true
+      register: probe_any_image
+      changed_when: false
+      failed_when: false
+
     - name: Check for --gpus in the rendered systemd unit
       ansible.builtin.shell: |
         grep -c -- '--gpus' /etc/systemd/system/{{ edge_node_service_name }}.service 2>/dev/null || echo 0
@@ -53,7 +79,13 @@
     - name: Compose probe summary
       ansible.builtin.set_fact:
         r1setup_probe_summary:
-          docker_image: "{{ probe_docker_image.stdout | default('') | trim }}"
+          # Primary, then systemd-unit fallback, then any-ratio1-container fallback.
+          docker_image: >-
+            {{
+              (probe_docker_image.stdout | default('') | trim)
+              or (probe_unit_image.stdout | default('') | trim)
+              or (probe_any_image.stdout | default('') | trim)
+            }}
           systemd_has_gpu_flag: "{{ (probe_gpu_flag.stdout | default('0') | trim | int) > 0 }}"
           nvidia_container_toolkit: "{{ (probe_nvct.stdout | default('no') | trim) == 'yes' }}"
           nvidia_smi_works: "{{ (probe_nvidia_smi.stdout | default('no') | trim) == 'yes' }}"
