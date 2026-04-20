@@ -11394,7 +11394,11 @@ PY"""
 
         machine_id = registered_ids[0]
         self.print_colored(f"Machine '{machine_id}' registered successfully.", 'green')
-        if self.get_input("Discover existing edge-node services on this machine now? (y/n)", "n").lower() == 'y':
+        # Default Y: most fleets being registered already have edge_node
+        # running and the user expects an immediate monitoring path. Users
+        # who explicitly want a bare machine for a future deploy can still
+        # type 'n'.
+        if self.get_input("Discover existing edge-node services on this machine now? (Y/n)", "Y").lower() != 'n':
             self.discover_and_import_existing_services(machine_id)
             return
         self.wait_for_enter()
