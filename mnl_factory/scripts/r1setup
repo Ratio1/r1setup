@@ -10775,11 +10775,25 @@ def parse_candidate(service_name):
     metadata_host_path = ''
     service_file_version = ''
 
-    container_match = re.search(r'--name\\s+([^\\s\\\\]+)', service_text or '')
+    # Strip comment lines so commented-out backup images / names don't bleed
+    # into the regex matches below. (Systemd-unit comments start with # at
+    # the beginning of a line, possibly after whitespace.)
+    active_text_lines = []
+    for line in (service_text or '').splitlines():
+        stripped = line.lstrip()
+        if not stripped.startswith('#'):
+            active_text_lines.append(line)
+    active_text = '\\n'.join(active_text_lines)
+
+    container_match = re.search(r'--name\\s+([^\\s\\\\]+)', active_text)
     if container_match:
         container_name = container_match.group(1).strip().strip("'\\\"")
 
-    image_match = re.search(r'([A-Za-z0-9./_-]*edge_node:[A-Za-z0-9._-]+)', service_text or '')
+    # Accept both CPU (edge_node) and GPU (edge_node_gpu) image names.
+    image_match = re.search(
+        r'([A-Za-z0-9./_-]*edge_node(?:_gpu)?:[A-Za-z0-9._-]+)',
+        active_text,
+    )
     if image_match:
         image = image_match.group(1).strip().strip("'\\\"")
 
