@@ -5,6 +5,20 @@ Ansible collection are recorded here. The CLI version (`scripts/ver.py`)
 and the collection version (`mnl_factory/galaxy.yml`) track separate
 lineages and may bump independently.
 
+## CLI 1.8.1 — 2026-04-20
+
+Patch release. CLI-only — no collection changes, Galaxy stays at 1.4.0.
+
+### Fixed
+
+- Self-heal `<collection>/hosts.yml` symlink on startup. `ensure_active_configuration()`
+  now reconciles the two sources of truth about the active fleet
+  (`active_config.json` + `configs/<name>.yml` vs the runtime symlink) before
+  any gating check. Fixes the false-positive "No nodes configured!" error
+  that hit when the symlink was missing despite a valid active config (fresh
+  dev HOME, deleted symlink, `<collection>` dir rebuilt from template, etc.).
+  Idempotent and cheap.
+
 ## CLI 1.8.0 / Collection 1.4.0 — 2026-04-19
 
 Mixed CPU/GPU fleets with per-host install tracking.
