@@ -11919,25 +11919,30 @@ PY"""
         self.wait_for_enter()
 
     def configure_nodes_menu(self) -> None:
-        """Show node configuration submenu"""
+        """Show node configuration submenu.
+
+        Shared options 1-4 keep the same positions in both modes. Advanced
+        mode adds option 5) Add Multiple Nodes for bulk registration.
+        """
         while True:
             self.print_header("Node Configuration")
 
             # Load current configuration
             self.load_configuration()
             hosts = _get_gpu_hosts(self.inventory)
+            mode = self.active_config.get('mode') or DEFAULT_CONFIG_MODE
 
             if hosts:
                 self.print_section(f"Current Nodes ({len(hosts)})")
                 for i, (name, config) in enumerate(hosts.items(), 1):
                     ip = config.get('ansible_host', 'Unknown')
                     user = config.get('ansible_user', 'Unknown')
-                    
+
                     # Get status information
                     status_info = self._get_node_status_info(name)
                     status = status_info['status']
                     status_emoji, status_color, status_desc = self._get_status_display_info(status)
-                    
+
                     last_update = status_info.get('last_update', '')
                     age_str = self._format_timestamp_ago(last_update) if last_update else "Never"
 
@@ -11955,6 +11960,8 @@ PY"""
                 self.print_colored("  2) Edit Existing Node             - Modify node settings")
                 self.print_colored("  3) Remove Node                    - Delete node from config")
                 self.print_colored("  4) Create New Configuration       - Start fresh configuration")
+                if mode == CONFIG_MODE_ADVANCED:
+                    self.print_colored("  5) Add Multiple Nodes             - Bulk-register N machines + nodes")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -11974,9 +11981,34 @@ PY"""
                 self._delete_node()
             elif choice == '4' and hosts:
                 self._create_new_configuration()
+            elif choice == '5' and hosts and mode == CONFIG_MODE_ADVANCED:
+                self._add_multiple_nodes()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
+                valid = "0-5" if (hosts and mode == CONFIG_MODE_ADVANCED) else ("0-4" if hosts else "0-1")
+                self.print_colored(f"Invalid option. Valid choices are {valid}.", 'red')
                 self.wait_for_enter()
+
+    def _add_multiple_nodes(self) -> None:
+        """Bulk-add nodes in advanced mode: prompt for a count, then loop Add Node.
+
+        Reuses the same _add_node flow per iteration so discovery, binding,
+        and validation all behave identically to one-at-a-time adds. If any
+        iteration aborts (e.g. user cancels expert-mode promotion), the loop
+        stops cleanly without rolling back previously-added nodes.
+        """
+        while True:
+            try:
+                count = int(self.get_input("How many nodes do you want to add? (1-20)", "2"))
+            except ValueError:
+                self.print_colored("Please enter a number.", 'red')
+                continue
+            if 1 <= count <= 20:
+                break
+            self.print_colored("Enter a number between 1 and 20.", 'red')
+
+        for i in range(count):
+            self.print_section(f"Adding node {i + 1} of {count}")
+            self._add_node()
 
     def deployment_menu(self) -> None:
         """Show deployment submenu"""
