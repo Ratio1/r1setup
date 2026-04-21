@@ -12128,22 +12128,218 @@ PY"""
                 self.wait_for_enter()
 
     def _add_nodes_loop(self) -> None:
-        """Add one or more nodes, prompting between each for another.
+        """Add one or more nodes in two phases.
 
-        Each iteration runs the full _add_node flow (name → SSH → bind →
-        per-machine service discovery → save), so any machine check that
-        would fail surfaces immediately rather than after a batch. If the
-        user wants to abort mid-sequence they just answer ``n`` at the
-        "Add another?" prompt.
+        Phase 1 — collect: for each iteration prompt the node name + SSH
+        config. Confirm each entry. After the user answers ``n`` at the
+        "Add another?" prompt, move to phase 2. No machine registration,
+        no discovery, no save happens in this phase.
+
+        Phase 2 — process: for every queued entry register the machine
+        (if new), run a single batched discovery across all new machines,
+        then either import an existing service or save as a fresh
+        instance. All changes are persisted in one final save.
         """
-        added = 0
+        hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
+        pending: List[Tuple[str, Dict[str, Any]]] = []
+
         while True:
-            self._add_node()
-            added += 1
-            if self.get_input(f"\nAdded {added} node(s). Add another? (y/n)", "n").lower() != 'y':
+            self.print_section(f"Add Node #{len(pending) + 1}")
+
+            while True:
+                name = self._get_valid_hostname("Enter name for the new node", "")
+                if name in hosts:
+                    self.print_colored(
+                        f"You already have a node named '{name}' in this config. Choose another.",
+                        'red',
+                    )
+                    continue
+                if any(n == name for n, _ in pending):
+                    self.print_colored(
+                        f"'{name}' is already queued in this batch. Choose another.",
+                        'red',
+                    )
+                    continue
                 break
-        if added:
-            self.print_colored(f"✅ Finished. {added} node(s) added to the configuration.", 'green')
+
+            # Seed defaults from the last queued or last saved host.
+            if pending:
+                previous_config = pending[-1][1]
+            elif hosts:
+                previous_config = hosts[list(hosts.keys())[-1]]
+            else:
+                previous_config = None
+
+            new_host = self._configure_single_node(previous_config=previous_config)
+            pending.append((name, new_host))
+            self.print_colored(f"✓ '{name}' queued ({len(pending)} pending).", 'green')
+
+            if self.get_input(f"\nAdd another? (y/n)", "n").lower() != 'y':
+                break
+
+        if not pending:
+            return
+
+        self._process_pending_nodes(pending)
+
+    def _process_pending_nodes(
+        self,
+        pending: List[Tuple[str, Dict[str, Any]]],
+    ) -> None:
+        """Phase 2 of the Add Node(s) loop: register, scan, import-or-fresh, save."""
+        self.print_section(f"Processing {len(pending)} queued node(s)")
+
+        # Step 1: resolve/register each pending node's machine. After this
+        # step every entry has a machine_id and we know whether the machine
+        # already had instances tracked in this config.
+        enriched: List[Tuple[str, Dict[str, Any], str, bool]] = []
+        for name, new_host in pending:
+            new_host = self.config_manager.bind_host_to_existing_machine(name, new_host)
+            bound_id = str(new_host.get('r1setup_machine_id') or '').strip()
+            had_existing = False
+
+            if bound_id:
+                fleet = self.config_manager._normalize_fleet_state(self.config_manager.get_fleet_state_copy())
+                machine_rec = fleet.get('fleet', {}).get('machines', {}).get(bound_id, {})
+                had_existing = bool(machine_rec.get('instance_names'))
+            else:
+                derived = self.config_manager._derive_machine_id(name, new_host)
+                access = self._extract_machine_access_config(new_host)
+                self.config_manager.upsert_machine_record(derived, {
+                    'topology_mode': DEFAULT_MACHINE_TOPOLOGY_MODE,
+                    'deployment_state': DEFAULT_MACHINE_DEPLOYMENT_STATE,
+                    'instance_names': [],
+                    **access,
+                })
+                new_host['r1setup_machine_id'] = derived
+                bound_id = derived
+
+            enriched.append((name, new_host, bound_id, had_existing))
+
+        # Step 2: scan unique machines that don't already have tracked
+        # instances. Machines with existing instances are expert-mode
+        # territory and skip discovery here (the expert path handles them).
+        scannable = sorted({mid for _, _, mid, had in enriched if not had})
+        scan_results: Dict[str, Dict[str, Any]] = {}
+        if scannable:
+            scan_results = self.config_manager._batch_discover_machines(scannable)
+
+        # Step 3: for each queued entry, offer import when candidates exist,
+        # else add as a fresh instance.
+        hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
+        imported_count = 0
+        fresh_count = 0
+        for name, new_host, machine_id, had_existing in enriched:
+            if had_existing:
+                self.print_colored(
+                    f"'{name}' binds to '{machine_id}' which already has instances. "
+                    "Saving as fresh; use Edit Existing Node to review expert-mode topology.",
+                    'yellow',
+                )
+                self.config_manager.apply_runtime_snapshot_to_host_config(name, new_host)
+                hosts[name] = new_host
+                fresh_count += 1
+                continue
+
+            scan = scan_results.get(machine_id, {})
+            candidates = scan.get('candidates') if scan.get('status') == 'success' else None
+            imported = False
+            if candidates:
+                imported = self._offer_import_from_candidates(machine_id, name, candidates)
+
+            if imported:
+                imported_count += 1
+            else:
+                self.config_manager.apply_runtime_snapshot_to_host_config(name, new_host)
+                hosts[name] = new_host
+                fresh_count += 1
+
+        self._save_configuration()
+
+        summary_bits = []
+        if imported_count:
+            summary_bits.append(f"{imported_count} imported")
+        if fresh_count:
+            summary_bits.append(f"{fresh_count} fresh")
+        self.print_colored(
+            f"✅ Finished — {len(enriched)} node(s) processed ({', '.join(summary_bits)}).",
+            'green',
+        )
+        self.print_colored("💡 Next: Deploy from Main Menu → Deployment Menu", 'cyan')
+
+    def _offer_import_from_candidates(
+        self,
+        machine_id: str,
+        desired_name: str,
+        candidates: List[Dict[str, Any]],
+    ) -> bool:
+        """Offer to import one of ``candidates`` under ``desired_name``.
+
+        Returns ``True`` when an import succeeded, ``False`` otherwise
+        (user declined, simple-mode multi-service block, or import error).
+        Does NOT run discovery itself — the caller passes scan results.
+        """
+        mode = self.active_config.get('mode') or DEFAULT_CONFIG_MODE
+        config_env = self.active_config.get('environment') or self.get_mnl_app_env() or 'unknown'
+
+        matching = [
+            c for c in candidates
+            if c.get('environment') in (config_env, '', 'unknown')
+        ]
+        if not matching:
+            return False
+
+        if len(matching) > 1 and mode == CONFIG_MODE_SIMPLE:
+            self.print_colored(
+                f"Machine '{machine_id}' runs {len(matching)} services. "
+                "Simple mode supports one node per machine — switch to Advanced Mode to import multiple. "
+                f"Keeping '{desired_name}' as a fresh instance.",
+                'yellow',
+            )
+            return False
+
+        self.print_section(f"Machine '{machine_id}' has {len(matching)} existing service(s)")
+        for i, c in enumerate(matching, 1):
+            self.print_colored(
+                f"  {i}) {c.get('service_name')} [{c.get('service_state', '?')}]",
+                'green',
+            )
+        print()
+
+        choice = self.get_input(
+            f"Import one of these services as '{desired_name}', or create a fresh instance? (i/f)",
+            "i",
+        ).lower()
+        if choice != 'i':
+            return False
+
+        if len(matching) == 1:
+            picked = matching[0]
+        else:
+            while True:
+                try:
+                    idx = int(self.get_input(f"Which service to import? (1-{len(matching)})", "1"))
+                    if 1 <= idx <= len(matching):
+                        picked = matching[idx - 1]
+                        break
+                except ValueError:
+                    pass
+                self.print_colored("Invalid selection.", 'red')
+
+        result = self.import_discovery_candidates(
+            machine_id, [picked], {picked['service_name']: desired_name},
+        )
+        if result.get('status') == 'success':
+            self.print_colored(
+                f"✅ Imported service '{picked['service_name']}' as '{desired_name}'.",
+                'green',
+            )
+            return True
+        self.print_colored(
+            f"Import failed: {result.get('message', 'unknown error')}. Falling back to fresh instance.",
+            'red',
+        )
+        return False
 
     def deployment_menu(self) -> None:
         """Show deployment submenu"""
