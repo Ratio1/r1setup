@@ -4470,6 +4470,10 @@ class ConfigurationManager:
                 metadata['config_name'] = restored_config_name
                 metadata['restored_from'] = backup_name
                 metadata['restored_at'] = datetime.now().isoformat()
+                # Legacy backups may predate the mode field — derive if missing.
+                if not metadata.get('mode'):
+                    metadata['mode'] = self._derive_legacy_mode(metadata.get('fleet_state'))
+                metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
 
                 with open(restored_metadata_path, 'w') as f:
                     json.dump(metadata, f, indent=2)
@@ -4677,6 +4681,11 @@ class ConfigurationManager:
             updated_metadata['imported_at'] = datetime.now().isoformat()
             updated_metadata['imported_from'] = str(import_path)
             updated_metadata['original_name'] = original_name
+            # Ensure mode is populated. If the imported metadata was written
+            # by a pre-v2 CLI it may lack the field — derive from fleet state.
+            if not updated_metadata.get('mode'):
+                updated_metadata['mode'] = self._derive_legacy_mode(updated_metadata.get('fleet_state'))
+            updated_metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
 
             # Save configuration files
             with open(config_path, 'w') as f:
