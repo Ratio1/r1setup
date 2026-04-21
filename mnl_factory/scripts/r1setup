@@ -16062,8 +16062,9 @@ PY"""
         # configs, etc.) — those belong in Fleet Summary, not in the
         # "status of my nodes" view. Without this filter a config with 1
         # node can render 7 noisy "📭 No Instances" entries for machines
-        # that are not what the user is asking about.
-        machine_views = [v for v in machine_views if v.get('instance_views')]
+        # that are not what the user is asking about. The dict key on the
+        # view is 'instances' (see build_machine_group_views).
+        machine_views = [v for v in machine_views if v.get('instances')]
 
         # Count status
         running = sum(1 for data in node_status_data.values() if data['status'] == 'running')
