@@ -4,8 +4,30 @@
   become: false
   gather_facts: true
   tasks:
-    - name: Run get_node_info command
-      ansible.builtin.shell: "{{ r1setup_remote_get_node_info_command }}"
+    - name: Run get_node_info command (host wrapper first, docker exec fallback)
+      # The host wrapper (/usr/local/bin/get_node_info in standard mode,
+      # /usr/local/bin/r1service in expert mode) is installed by the setup
+      # role during apply_instance. If that role didn't run or was
+      # incomplete, fall back to running the equivalent command directly
+      # inside the container: it just cats the local_info.json file that
+      # the edge_node writes. This keeps Node Status → detailed info
+      # working even when the host wrapper is missing.
+      vars:
+        _node_info_cmd: "{{ r1setup_remote_get_node_info_command }}"
+      ansible.builtin.shell: |
+        set -o pipefail
+        CMD={{ _node_info_cmd | quote }}
+        FIRST_WORD="${CMD%% *}"
+        if command -v "$FIRST_WORD" >/dev/null 2>&1; then
+          eval "$CMD"
+        elif command -v docker >/dev/null 2>&1 && docker inspect {{ mnl_docker_container_name | quote }} >/dev/null 2>&1; then
+          docker exec -i {{ mnl_docker_container_name | quote }} bash -lc 'cat /edge_node/_local_cache/_data/local_info.json'
+        else
+          echo "neither '${FIRST_WORD}' wrapper nor container '{{ mnl_docker_container_name }}' is reachable on this host" >&2
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
       register: node_info
       ignore_errors: true
 
@@ -17,4 +39,5 @@
     - name: Display error if command failed
       debug:
         var: node_info.stderr_lines
-      when: node_info.stderr_lines is defined and node_info.stderr_lines | length > 0 
+      when: node_info.stderr_lines is defined and node_info.stderr_lines | length > 0
+
