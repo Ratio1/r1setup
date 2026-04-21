@@ -1237,15 +1237,23 @@ class ConfigurationManager:
     # -- Shared config-creation primitives (Phase 1) --
 
     def _prompt_new_config_name(self) -> str:
-        """Prompt the operator for a valid configuration base name."""
+        """Prompt the operator for a valid and unique configuration base name."""
         self.app.print_colored("\n📝 Configuration Naming", 'cyan', bold=True)
         self.app.print_colored("Give your configuration a meaningful name to identify it later.", 'yellow')
         self.app.print_colored("Examples: 'production-cluster', 'test-env', 'gpu-farm-1'", 'white')
         while True:
             custom_name = self.app.get_input("Enter configuration name (letters, numbers, -, _)", required=True)
-            if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
-                return custom_name
-            self.app.print_colored("Invalid name. Use only letters, numbers, hyphens (-), and underscores (_)", 'red')
+            if not re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
+                self.app.print_colored("Invalid name. Use only letters, numbers, hyphens (-), and underscores (_)", 'red')
+                continue
+            clash = self._is_config_name_taken(custom_name)
+            if clash:
+                self.app.print_colored(
+                    f"A configuration named '{custom_name}' already exists ({clash}). Choose a different name.",
+                    'red',
+                )
+                continue
+            return custom_name
 
     def _prompt_new_config_environment(self) -> str:
         """Prompt for network environment and persist the selection."""
