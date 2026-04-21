@@ -3974,25 +3974,13 @@ class ConfigurationManager:
                     created = metadata.get('created_at', '')
                     description = metadata.get('description', '')
 
-                    # Extract custom name from the config name (everything before the first timestamp)
-                    # Format: customname_YYYYMMDD_HHMM_Nnodes_environment
-                    custom_name = display_name
-                    if '_' in display_name:
-                        parts = display_name.split('_')
-                        if len(parts) >= 2:
-                            # Find where the timestamp starts (8 digits)
-                            for idx, part in enumerate(parts):
-                                if len(part) == 8 and part.isdigit():
-                                    custom_name = '_'.join(parts[:idx])
-                                    break
-
                     # Format creation date
                     created_str = _parse_iso_datetime(created) or "Unknown"
 
                     # Mark active configuration
                     active_marker = " ← ACTIVE" if display_name == active_config_name else ""
 
-                    self.app.print_colored(f"  {i}. {custom_name}", 'cyan' if active_marker else 'white', bold=bool(active_marker))
+                    self.app.print_colored(f"  {i}. {display_name}", 'cyan' if active_marker else 'white', bold=bool(active_marker))
                     info_line = f"     {env} | {nodes} node(s) | {created_str}{active_marker}"
                     if description:
                         info_line = f"     {description} | {created_str}{active_marker}"
@@ -14248,17 +14236,6 @@ PY"""
                 config_name, metadata = configs[0]
                 display_name = config_name.replace('.yml', '')
 
-                # Extract custom name for display
-                custom_name = display_name
-                if '_' in display_name:
-                    parts = display_name.split('_')
-                    if len(parts) >= 2:
-                        # Find where the timestamp starts (8 digits)
-                        for idx, part in enumerate(parts):
-                            if len(part) == 8 and part.isdigit():
-                                custom_name = '_'.join(parts[:idx])
-                                break
-
                 env = metadata.get('environment', 'unknown')
                 nodes = metadata.get('nodes_count', 0)
                 machines = metadata.get('machines_count', 0)
@@ -14267,16 +14244,16 @@ PY"""
                 else:
                     count_label = f"{nodes} node(s)"
 
-                self.print_colored(f"\n📁 Found 1 saved configuration: {custom_name} ({env}, {count_label})", 'cyan')
+                self.print_colored(f"\n📁 Found 1 saved configuration: {display_name} ({env}, {count_label})", 'cyan')
                 self.print_colored("Automatically activating the only available configuration...", 'yellow')
 
                 if self._load_config_by_name(display_name):
-                    self.print_colored(f"✅ Successfully activated configuration: {custom_name}", 'green')
+                    self.print_colored(f"✅ Successfully activated configuration: {display_name}", 'green')
                     self.print_colored("Proceeding to main menu...", 'green')
                     self.wait_for_enter()
                     return True
                 else:
-                    self.print_colored(f"❌ Failed to activate configuration: {custom_name}", 'red')
+                    self.print_colored(f"❌ Failed to activate configuration: {display_name}", 'red')
                     self.print_colored("The configuration file may be corrupted. Please create a new one.", 'red')
                     self._create_machine_first_configuration()
                     return True
@@ -14295,17 +14272,6 @@ PY"""
                 created_at = metadata.get('created_at')
                 last_deployed_date = metadata.get('last_deployed_date')
                 deployment_status = metadata.get('deployment_status', 'never_deployed')
-
-                # Extract custom name from the config name
-                custom_name = display_name
-                if '_' in display_name:
-                    parts = display_name.split('_')
-                    if len(parts) >= 2:
-                        # Find where the timestamp starts (8 digits)
-                        for idx, part in enumerate(parts):
-                            if len(part) == 8 and part.isdigit():
-                                custom_name = '_'.join(parts[:idx])
-                                break
 
                 # Format creation date
                 created_str = _parse_iso_datetime(created_at) or "Unknown"
@@ -14327,7 +14293,7 @@ PY"""
                     count_label = f"{machines} machine(s), 0 instances"
                 else:
                     count_label = f"{nodes} node(s)"
-                self.print_colored(f"  {i}. {custom_name}", 'cyan', bold=True)
+                self.print_colored(f"  {i}. {display_name}", 'cyan', bold=True)
                 self.print_colored(f"     {env} | {count_label} | Created: {created_str}{deployment_str}", 'white')
 
             while True:
