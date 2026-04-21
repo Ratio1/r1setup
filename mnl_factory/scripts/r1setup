@@ -69,6 +69,7 @@ except ImportError:
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
+DEBUG_ANSIBLE = False  # Set via --debug-ansible; enables Ansible -vvv and debug stdout callback
 
 # Version information
 UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/ver.py"
@@ -5444,10 +5445,12 @@ class NodeStatusTracker:
             self.app.wait_for_enter()
             return
 
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+        debug_env = "ANSIBLE_STDOUT_CALLBACK=debug " if DEBUG_ANSIBLE else ""
+        verbosity = " -vvv" if DEBUG_ANSIBLE else ""
+        cmd = (f"{debug_env}ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
                f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.app.config_file} {playbook_path}")
+               f"ansible-playbook{verbosity} -i {self.app.config_file} {playbook_path}")
 
         self.app.print_colored("\n🔍 Checking actual service status on all nodes...", 'cyan')
         self.app.print_debug(f"Running ansible command: {cmd}")
@@ -9028,10 +9031,12 @@ class SSHKeyManager:
         host_limit = ','.join(selected_hosts)
         extra_vars_path = None
         try:
-            cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+            debug_env = "ANSIBLE_STDOUT_CALLBACK=debug " if DEBUG_ANSIBLE else ""
+            verbosity = " -vvv" if DEBUG_ANSIBLE else ""
+            cmd = (f"{debug_env}ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
                    f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
                    f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-                   f"ansible-playbook -i {self.app.config_file} --limit {host_limit} {playbook_path}")
+                   f"ansible-playbook{verbosity} -i {self.app.config_file} --limit {host_limit} {playbook_path}")
 
             if extra_vars:
                 with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tmp:
@@ -10497,12 +10502,7 @@ class R1Setup:
         )
         execution_host_names = self._get_execution_inventory_host_names(execution_inventory)
 
-        cmd = (
-            f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-            f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-            f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-            f"ansible-playbook -i {shlex.quote(str(inventory_path))} {shlex.quote(str(playbook_path))}"
-        )
+        cmd = self._build_ansible_playbook_command(inventory_path, playbook_path)
 
         if machine_scope:
             payload = self.build_machine_extra_vars(extra_vars)
@@ -10524,6 +10524,32 @@ class R1Setup:
 
         return success, output, execution_host_names, execution_inventory
 
+    def _build_ansible_playbook_command(
+        self,
+        inventory_path: Path,
+        playbook_path: Path,
+    ) -> str:
+        """Build the base `ansible-playbook` shell command.
+
+        When DEBUG_ANSIBLE is active, injects ``ANSIBLE_STDOUT_CALLBACK=debug``
+        and the ``-vvv`` verbosity flag so users see the full task-level
+        output and per-module details.
+        """
+        env_prefix = (
+            f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+            f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+            f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+        )
+        if DEBUG_ANSIBLE:
+            env_prefix += "ANSIBLE_STDOUT_CALLBACK=debug "
+
+        verbosity = " -vvv" if DEBUG_ANSIBLE else ""
+        return (
+            f"{env_prefix}"
+            f"ansible-playbook{verbosity} "
+            f"-i {shlex.quote(str(inventory_path))} {shlex.quote(str(playbook_path))}"
+        )
+
     def run_custom_inventory_playbook(
         self,
         playbook_path: Path,
@@ -10539,12 +10565,7 @@ class R1Setup:
         inventory_path, execution_inventory = self._write_provided_execution_inventory(execution_inventory)
         execution_host_names = self._get_execution_inventory_host_names(execution_inventory)
 
-        cmd = (
-            f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-            f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-            f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-            f"ansible-playbook -i {shlex.quote(str(inventory_path))} {shlex.quote(str(playbook_path))}"
-        )
+        cmd = self._build_ansible_playbook_command(inventory_path, playbook_path)
         if machine_scope:
             payload = self.build_machine_extra_vars(extra_vars)
         else:
@@ -14078,10 +14099,12 @@ PY"""
             self.wait_for_enter()
             return
 
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+        debug_env = "ANSIBLE_STDOUT_CALLBACK=debug " if DEBUG_ANSIBLE else ""
+        verbosity = " -vvv" if DEBUG_ANSIBLE else ""
+        cmd = (f"{debug_env}ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
                f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} {playbook_path}")
+               f"ansible-playbook{verbosity} -i {self.config_file} {playbook_path}")
 
         self.print_colored(f"\n🔍 Running connectivity test...", 'yellow')
         success, output = self.run_command(cmd, show_output=False, timeout=self.connection_timeout)
@@ -15112,14 +15135,20 @@ PY"""
     def run(self) -> None:
         """Main program loop"""
         # Handle command line arguments
-        global DEBUG
-        if len(sys.argv) > 1:
-            if sys.argv[1] == '--version':
+        global DEBUG, DEBUG_ANSIBLE
+        for arg in sys.argv[1:]:
+            if arg == '--version':
                 print(f"r1setup version {CLI_VERSION}")
                 sys.exit(0)
-            elif sys.argv[1] == '--debug':
+            elif arg == '--debug':
                 DEBUG = True
                 self.print_colored("Debug mode enabled", 'yellow')
+            elif arg == '--debug-ansible':
+                DEBUG_ANSIBLE = True
+                self.print_colored(
+                    "Ansible debug mode enabled (ansible-playbook -vvv, ANSIBLE_STDOUT_CALLBACK=debug)",
+                    'yellow',
+                )
 
         # Check prerequisites
         if not self.check_ansible_installation():
