@@ -16012,6 +16012,15 @@ PY"""
         target_service_version = self.get_mnl_service_version()
         machine_views = self.build_machine_group_views(node_status_data=node_status_data)
 
+        # Restrict the view to machines that carry at least one instance in
+        # this config's inventory. Fleet-state may contain empty registered
+        # machines (legacy Register-Machine flow, leftovers from other
+        # configs, etc.) — those belong in Fleet Summary, not in the
+        # "status of my nodes" view. Without this filter a config with 1
+        # node can render 7 noisy "📭 No Instances" entries for machines
+        # that are not what the user is asking about.
+        machine_views = [v for v in machine_views if v.get('instance_views')]
+
         # Count status
         running = sum(1 for data in node_status_data.values() if data['status'] == 'running')
         stopped = sum(1 for data in node_status_data.values() if data['status'] == 'stopped')
