@@ -1962,6 +1962,24 @@ class ConfigurationManager:
         configs.sort(key=lambda x: x[1]['created_at'], reverse=True)
         return configs
 
+    def _is_config_name_taken(self, base_name: str) -> Optional[str]:
+        """Check whether a configuration with this name already exists.
+
+        Returns the offending filename (e.g. ``"alpha.yml"``) when
+        ``{base_name}.yml`` is already present in ``configs_dir``, or
+        ``None`` when the name is free.
+
+        Legacy timestamped filenames are not back-parsed: a user typing
+        ``prod-cluster`` is allowed even if
+        ``prod-cluster_20260101_0900_2m.yml`` exists on disk, because
+        they are distinct filenames and the legacy file is displayed
+        as-is.
+        """
+        candidate = self.app.configs_dir / f"{base_name}.yml"
+        if candidate.exists():
+            return candidate.name
+        return None
+
     def find_runtime_identity_claims(
         self,
         machine_config: Dict[str, Any],
