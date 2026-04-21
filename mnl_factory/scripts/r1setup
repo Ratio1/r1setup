@@ -1523,20 +1523,20 @@ class ConfigurationManager:
         # Save config shell first (required before upsert_machine_record)
         self.ensure_configuration_shell(config_name, env, mode=config_mode)
 
-        # Simple mode: stop at the empty shell. Users grow the config one
-        # node at a time from Configure Nodes → Add New Node, which handles
-        # the register-machine + create-instance pair atomically.
+        # Simple mode: shell is ready — drop straight into the Add Node(s)
+        # loop so the user isn't bounced through a separate menu just to
+        # populate the config they just created. The loop itself asks
+        # "Add another?" after each node; answering n finishes and returns
+        # here. Adding nodes later is still available at any time from
+        # Configure Nodes → Add Node(s).
         if config_mode == CONFIG_MODE_SIMPLE:
             self.app.print_section("Configuration Summary")
             self.app.print_colored(
                 f"Simple-mode configuration '{config_name}' created and activated.",
                 'green',
             )
-            self.app.print_colored(
-                "\n\U0001f4a1 Next: Configure Nodes → Add New Node to register your first machine and deploy a node.",
-                'cyan',
-            )
-            self.app.wait_for_enter()
+            self.app.print_colored("\nLet's add your first node now.", 'cyan')
+            self.app._add_nodes_loop()
             return
 
         # Advanced mode: run the full bulk machine-first flow.
