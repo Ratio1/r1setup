@@ -12140,7 +12140,7 @@ PY"""
         while True:
             self._add_node()
             added += 1
-            if self.get_input(f"\nAdded {added} node(s). Add another? (y/n)", "y").lower() != 'y':
+            if self.get_input(f"\nAdded {added} node(s). Add another? (y/n)", "n").lower() != 'y':
                 break
         if added:
             self.print_colored(f"✅ Finished. {added} node(s) added to the configuration.", 'green')
