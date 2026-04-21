@@ -4053,49 +4053,57 @@ class ConfigurationManager:
                 self.app.print_colored("No configurations found.", 'yellow')
                 print()
 
+            # Build the action list after the configuration list so everything
+            # is one consistent numbered menu.
+            action_labels: List[str] = []
+            action_handlers: List[Any] = []
+
+            action_labels.append("Create new configuration")
+            action_handlers.append(self._create_machine_first_configuration)
+
+            action_labels.append("Import configuration from .r1config file")
+            action_handlers.append(self._import_configuration)
+
+            action_labels.append("Restore configuration from backup")
+            action_handlers.append(self._restore_configuration)
+
+            if self.active_config.get('config_name'):
+                action_labels.append("Quick-export current active configuration")
+                action_handlers.append(self._quick_export_current)
+
+            first_action_num = len(configs) + 1
             self.app.print_colored("Actions", 'cyan', bold=True)
             print()
-            if configs:
-                self.app.print_colored("  Enter a number (1-{max}) to select a configuration".format(max=len(configs)))
-            self.app.print_colored("  n) Create new configuration")
-            self.app.print_colored("  i) Import configuration from .r1config file")
-            self.app.print_colored("  r) Restore configuration from backup")
-            if self.active_config.get('config_name'):
-                self.app.print_colored("  q) Quick-export current active configuration")
+            for i, label in enumerate(action_labels, first_action_num):
+                self.app.print_colored(f"  {i}) {label}")
             self.app.print_colored("  0) Back to Configuration Menu")
             print()
 
-            choice = self.app.get_input("Select", "0").strip().lower()
-
-            if choice == '0':
-                break
-            if choice == 'n':
-                self._create_machine_first_configuration()
-                continue
-            if choice == 'i':
-                self._import_configuration()
-                continue
-            if choice == 'r':
-                self._restore_configuration()
-                continue
-            if choice == 'q':
-                self._quick_export_current()
-                continue
-
-            # Numeric selection → per-config action submenu
             try:
-                idx = int(choice) - 1
+                choice = int(self.app.get_input("Select option", "0"))
             except ValueError:
-                self.app.print_colored("Invalid input.", 'red')
+                self.app.print_colored("Please enter a number.", 'red')
                 self.app.wait_for_enter()
                 continue
 
-            if not configs or not (0 <= idx < len(configs)):
-                self.app.print_colored("Invalid configuration number.", 'red')
-                self.app.wait_for_enter()
+            if choice == 0:
+                break
+
+            if configs and 1 <= choice <= len(configs):
+                self._config_action_submenu(configs[choice - 1], configs)
                 continue
 
-            self._config_action_submenu(configs[idx], configs)
+            action_idx = choice - first_action_num
+            if 0 <= action_idx < len(action_handlers):
+                action_handlers[action_idx]()
+                continue
+
+            last_valid = first_action_num + len(action_handlers) - 1
+            self.app.print_colored(
+                f"Invalid option. Valid choices are 0-{last_valid}.",
+                'red',
+            )
+            self.app.wait_for_enter()
 
     def _render_config_list_entry(
         self,
