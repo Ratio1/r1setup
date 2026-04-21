@@ -11794,7 +11794,15 @@ PY"""
             print()
 
     def configuration_menu(self) -> None:
-        """Show configuration submenu"""
+        """Show configuration submenu.
+
+        Layout is mode-driven. Simple mode shows only the core options
+        (shared slots 1-5) and an upgrade-to-advanced toggle at slot 9.
+        Advanced mode adds Register Machine (6) and Fleet Summary (7).
+        The 'Machines: N registered' counter is intentionally hidden —
+        machine membership is implicit in the node list (simple) or
+        visible via Fleet Summary (advanced).
+        """
         while True:
             self.print_header("Configuration Menu")
 
@@ -11803,6 +11811,7 @@ PY"""
             has_shell = self.has_active_config_shell()
             current_env = self.get_mnl_app_env()
             active_config_name = self.active_config.get('config_name', 'None')
+            mode = self.active_config.get('mode') or DEFAULT_CONFIG_MODE
 
             self.print_section("Current Status")
             self.print_colored(f"Active Config: {active_config_name if active_config_name != 'None' else '✗ No active config'}",
@@ -11812,17 +11821,17 @@ PY"""
                                'green' if is_configured else 'red')
             self.print_colored(f"Network: {current_env if current_env else '✗ Not set'}",
                                'green' if current_env else 'red')
+            self.print_colored(f"Mode: {mode}",
+                               'cyan' if mode == CONFIG_MODE_ADVANCED else 'white')
 
-            # Show node/machine counts
+            # Show node count for the active config. Machine count is
+            # intentionally hidden: in simple mode it is redundant with the
+            # node list; in advanced mode it is reachable via Fleet Summary.
             if has_config or has_shell:
                 self.load_configuration()
                 hosts = _get_gpu_hosts(self.inventory)
                 if hosts:
                     self.print_colored(f"Nodes: {len(hosts)} configured", 'cyan')
-                fleet_state = self.get_fleet_state_copy()
-                machines = fleet_state.get('fleet', {}).get('machines', {})
-                if machines:
-                    self.print_colored(f"Machines: {len(machines)} registered", 'cyan')
 
             self.print_colored("Configuration Menu", 'cyan', bold=True)
             print()
@@ -11830,9 +11839,12 @@ PY"""
             self.print_colored("  2) Manage Configurations  - Switch, backup, restore configurations")
             self.print_colored("  3) View Configuration     - Display current configuration")
             self.print_colored("  4) Switch Environment     - Change network environment (mainnet/testnet/devnet)")
-            self.print_colored("  5) Register Machine       - Add a fleet machine without deploying a node")
-            self.print_colored("  6) Fleet Summary          - Show machines and current assignments")
-            self.print_colored("  7) Discover Services      - Scan a machine and import selected existing services")
+            self.print_colored("  5) Discover Services      - Scan a machine and import selected existing services")
+            if mode == CONFIG_MODE_ADVANCED:
+                self.print_colored("  6) Register Machine       - Add a fleet machine without deploying a node")
+                self.print_colored("  7) Fleet Summary          - Show machines and current assignments")
+            else:
+                self.print_colored("  9) Switch to Advanced Mode — Unlock machine-level controls (one-way)")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -11850,14 +11862,61 @@ PY"""
             elif choice == '4':
                 self.switch_environment()
             elif choice == '5':
-                self.register_machine_without_deployment()
-            elif choice == '6':
-                self.fleet_summary()
-            elif choice == '7':
                 self.discover_and_import_existing_services()
+            elif choice == '6' and mode == CONFIG_MODE_ADVANCED:
+                self.register_machine_without_deployment()
+            elif choice == '7' and mode == CONFIG_MODE_ADVANCED:
+                self.fleet_summary()
+            elif choice == '9' and mode == CONFIG_MODE_SIMPLE:
+                self._switch_to_advanced_mode()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-7.", 'red')
+                valid = "0-5, 9" if mode == CONFIG_MODE_SIMPLE else "0-5, 6-7"
+                self.print_colored(f"Invalid option. Valid choices are {valid}.", 'red')
                 self.wait_for_enter()
+
+    def _switch_to_advanced_mode(self) -> None:
+        """Flip the active config's mode from simple to advanced.
+
+        One-way by design — once advanced, a config cannot be downgraded to
+        simple because advanced-mode state (multi-instance machines) has no
+        representation in simple mode. Users who want a "clean" simple
+        config should create a new one.
+        """
+        current_mode = self.active_config.get('mode') or DEFAULT_CONFIG_MODE
+        if current_mode == CONFIG_MODE_ADVANCED:
+            self.print_colored("Already in advanced mode.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        self.print_section("Switch to Advanced Mode")
+        self.print_colored(
+            "Advanced mode exposes machine-level controls (Register Machine, Fleet Summary)\n"
+            "and allows multiple node instances per machine.",
+            'white',
+        )
+        self.print_colored(
+            "This change is ONE-WAY — once advanced, you cannot return to simple mode.\n"
+            "To get back to a simple-mode config you would have to create a new one.",
+            'yellow',
+        )
+        if self.get_input("Continue? (y/n)", "n").lower() != 'y':
+            self.print_colored("Mode switch cancelled.", 'cyan')
+            self.wait_for_enter()
+            return
+
+        self.active_config['mode'] = CONFIG_MODE_ADVANCED
+        config_name = self.active_config.get('config_name')
+        env = self.get_mnl_app_env() or self.active_config.get('environment') or 'mainnet'
+        hosts = _get_gpu_hosts(self.inventory)
+        if config_name:
+            self.config_manager._save_config_with_metadata(
+                config_name, env, len(hosts), update_symlink=False, mode=CONFIG_MODE_ADVANCED,
+            )
+        else:
+            self.config_manager._save_active_config()
+
+        self.print_colored("✅ Switched to advanced mode.", 'green')
+        self.wait_for_enter()
 
     def configure_nodes_menu(self) -> None:
         """Show node configuration submenu"""
