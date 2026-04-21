@@ -13447,12 +13447,14 @@ PY"""
                 self.print_colored(f"\nPrevious node: {prev_user}, {prev_auth} auth", 'cyan')
                 use_same = self.get_input("Reuse these credentials for this node? (y/n)", "y")
                 if use_same.lower() == 'y':
-                    # Ask for IP and username (with previous as default)
+                    # Only the host differs — reuse everything else including
+                    # the username. If the user needs a different account on
+                    # the new host, answering 'n' drops them into the full
+                    # flow with previous values pre-filled as defaults.
                     host_address = self.get_input("Enter host (IP address or URL)", "", required=True)
-                    username = self.get_input("Enter SSH username", prev_user)
                     # Copy credentials from previous config
                     host['ansible_host'] = host_address
-                    host['ansible_user'] = username or prev_user
+                    host['ansible_user'] = prev_user
                     host['ansible_ssh_common_args'] = previous_config.get('ansible_ssh_common_args', '-o StrictHostKeyChecking=no')
                     for key in ('ansible_ssh_pass', 'ansible_become_password', 'ansible_ssh_private_key_file'):
                         if key in previous_config:
