@@ -13363,6 +13363,23 @@ PY"""
         new_host = self.config_manager.bind_host_to_existing_machine(name, new_host)
 
         bound_machine_id = str(new_host.get('r1setup_machine_id') or '').strip()
+
+        # If the bind did not match any existing fleet machine (the normal
+        # first-node-on-a-brand-new-machine case), register this machine in
+        # fleet state now. Without this step the single-machine discovery
+        # below would not fire because bound_machine_id stays empty.
+        if not bound_machine_id:
+            derived_id = self.config_manager._derive_machine_id(name, new_host)
+            machine_access = self._extract_machine_access_config(new_host)
+            self.config_manager.upsert_machine_record(derived_id, {
+                'topology_mode': DEFAULT_MACHINE_TOPOLOGY_MODE,
+                'deployment_state': DEFAULT_MACHINE_DEPLOYMENT_STATE,
+                'instance_names': [],
+                **machine_access,
+            })
+            new_host['r1setup_machine_id'] = derived_id
+            bound_machine_id = derived_id
+
         if bound_machine_id:
             fleet_state = self.config_manager.get_fleet_state_copy()
             normalized_fleet = self.config_manager._normalize_fleet_state(fleet_state)
