@@ -14225,12 +14225,15 @@ PY"""
 
         self.print_colored(progress_message, 'yellow')
         target_hosts = host_names or list(_get_gpu_hosts(self.inventory).keys())
+        # Stream the playbook output live when debug-ansible is on so the user
+        # can see exactly what get_node_info returned on each host. Otherwise
+        # capture silently and only surface the raw output on a parse miss.
         success, output, _, _ = self.run_generated_playbook(
             playbook_path,
             target_hosts,
             machine_scope=False,
             last_applied_action='get_node_info',
-            show_output=False,
+            show_output=bool(DEBUG_ANSIBLE),
             timeout=self.connection_timeout * 2,
         )
 
@@ -14242,7 +14245,37 @@ PY"""
         node_results = self._parse_node_info_output(output)
         if not node_results:
             self.print_colored("No node information could be parsed from the playbook output.", 'yellow')
-            self.print_colored("This might be because the nodes are not running or not accessible.", 'yellow')
+            # Distinguish the obvious failure modes instead of lumping them
+            # under the generic "nodes not running / not accessible" line.
+            hints: List[str] = []
+            if 'command not found' in output.lower() or 'no such file' in output.lower():
+                hints.append(
+                    "  • 'get_node_info' wrapper is missing at /usr/local/bin on the host — "
+                    "re-run Install for this node or check the setup role."
+                )
+            if 'permission denied' in output.lower() and 'docker' in output.lower():
+                hints.append(
+                    "  • ssh user lacks docker group access — the install adds them, but "
+                    "existing sessions may be stale; open a new SSH session or reboot."
+                )
+            if 'UNREACHABLE' in output:
+                hints.append(
+                    "  • one or more nodes were unreachable via SSH during the probe."
+                )
+            if not hints:
+                hints.append(
+                    "  • the container may still be initializing — wait ~30s after install "
+                    "and retry, or run with --debug-ansible to see the raw playbook output."
+                )
+            for hint in hints:
+                self.print_colored(hint, 'yellow')
+            # Print the last ~40 lines of the raw playbook output so the user
+            # has something concrete to paste into a bug report.
+            tail = (output or '').splitlines()[-40:]
+            if tail:
+                self.print_colored("Last playbook lines:", 'cyan')
+                for line in tail:
+                    self.print_colored(f"    {line}", 'white')
             return None
 
         return node_results
