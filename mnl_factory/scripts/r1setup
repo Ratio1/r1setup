@@ -11765,27 +11765,39 @@ PY"""
                     'cyan'
                 )
 
+        has_active = active_config_name != 'None'
+        gated_suffix = "" if has_active else "  (disabled — no active config)"
+        gated_color = 'white' if has_active else 'yellow'
+
         self.print_section("R1Setup Main Menu")
         print()
         self.print_colored("\U0001f4cb CONFIGURATION", 'cyan', bold=True)
         self.print_colored("  1) Configuration Menu      - Node setup, environments, and management")
         print()
         self.print_colored("\U0001f680 DEPLOYMENT", 'cyan', bold=True)
-        self.print_colored("  2) Deployment Menu         - Deploy, delete, and manage deployments")
+        self.print_colored(f"  2) Deployment Menu         - Deploy, delete, and manage deployments{gated_suffix}", gated_color)
         print()
         self.print_colored("\U0001f527 OPERATIONS", 'cyan', bold=True)
-        self.print_colored("  3) Operations Menu         - Start, stop, restart service and test connectivity")
+        self.print_colored(f"  3) Operations Menu         - Start, stop, restart service and test connectivity{gated_suffix}", gated_color)
         print()
         self.print_colored("\U0001f4ca MONITORING & INFO", 'cyan', bold=True)
-        self.print_colored("  4) Node Status & Info      - Get latest info and show detailed status")
-        self.print_colored("  5) Node Addresses & Export - Display addresses and export to CSV")
+        self.print_colored(f"  4) Node Status & Info      - Get latest info and show detailed status{gated_suffix}", gated_color)
+        self.print_colored(f"  5) Node Addresses & Export - Display addresses and export to CSV{gated_suffix}", gated_color)
         print()
         self.print_colored("\u2699\ufe0f  SETTINGS & TOOLS", 'cyan', bold=True)
         self.print_colored("  6) Settings                - Toggle live status display and preferences")
-        self.print_colored("  7) Advanced Menu           - SSH, logs, and security tools")
+        self.print_colored(f"  7) Advanced Menu           - SSH, logs, and security tools{gated_suffix}", gated_color)
         print()
         self.print_colored("  0) Exit")
         print()
+
+        if not has_active:
+            self.print_colored(
+                "\U0001f4a1 No active configuration. Use 1) Configuration Menu → Manage Configurations "
+                "to pick or create one before using other menus.",
+                'yellow',
+            )
+            print()
 
         # Show contextual suggestion
         _, hint = self._get_suggested_action()
@@ -14715,6 +14727,20 @@ PY"""
             try:
                 self.show_main_menu()
                 choice = self.get_input("Select option (0-7)", "0")
+
+                # Gate entries 2-5 and 7 when no active config.
+                # Entry 1 (Configuration Menu) and 6 (Settings) and 0 (Exit)
+                # remain always available. The user must pick or create a
+                # config from Configuration Menu → Manage Configurations
+                # before the deployment/operations/monitoring paths reopen.
+                has_active = bool(self.active_config.get('config_name'))
+                if not has_active and choice in ('2', '3', '4', '5', '7'):
+                    self.print_colored(
+                        "No active configuration. Open 1) Configuration Menu → 2) Manage Configurations to pick or create one.",
+                        'yellow',
+                    )
+                    self.wait_for_enter()
+                    continue
 
                 if choice == '0':
                     self.print_colored("Thank you for using Ratio1 Multi-Node Launcher Setup!", 'green')
