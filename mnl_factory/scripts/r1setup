@@ -10158,6 +10158,43 @@ class R1Setup:
     def _get_real_time_node_status(self):
         return self.status_tracker._get_real_time_node_status()
 
+    def _reconcile_deployment_status_from_probes(
+        self,
+        node_status_data: Dict[str, Dict[str, Any]],
+    ) -> None:
+        """Reconcile config-level ``deployment_status`` with probe results.
+
+        Called right after Node Status & Info collects fresh node probes.
+        Rule: if any node is observed running, flip the config-level
+        deployment_status to ``'deployed'`` (overriding a stale
+        ``'deleted'`` or ``'never_deployed'`` left over from past actions).
+        Non-running probe results do NOT downgrade a ``'deployed'`` config
+        to ``'deleted'`` — unreachable or stopped could be transient, and
+        only an explicit Delete operation should mark the config as
+        deleted.
+        """
+        if not node_status_data:
+            return
+        any_running = any(
+            (data or {}).get('status') == 'running'
+            for data in node_status_data.values()
+        )
+        if not any_running:
+            return
+
+        current = self.active_config.get('deployment_status')
+        if current == 'deployed':
+            return  # already correct
+
+        self.active_config['deployment_status'] = 'deployed'
+        # last_deployed_date is "when a deploy was last written." Don't
+        # forge a timestamp; leave the old value (or None) so the label
+        # says "Deployed" without claiming a false deploy date.
+        self.config_manager._save_active_config()
+        self.print_debug(
+            f"Reconciled deployment_status: {current!r} → 'deployed' based on live probes"
+        )
+
     # -- SSHKeyManager delegation stubs --
     def migrate_legacy_ssh_metadata(self):
         return self.ssh_key_manager.migrate_legacy_ssh_metadata()
@@ -15989,10 +16026,17 @@ PY"""
             self._update_node_status(node_name, status_data['status'])
         self.settings_manager.mark_status_refreshed()
 
+        # Reconcile the config-level deployment_status with what the probe
+        # just observed. A stale "deleted" label from a prior teardown
+        # shouldn't persist once we've confirmed nodes are actually running
+        # again — that was the footgun where the banner kept saying
+        # "🗑️ deleted" while the per-node line showed "🟢 running".
+        self._reconcile_deployment_status_from_probes(node_status_data)
+
         # Clear and display beautiful status
         self.clear_screen()
         self.print_header("Container Status")
-        
+
         # Show deployment status overview (like deployment menu does)
         self._load_active_config()
         deployment_display = self._get_deployment_display_state(
