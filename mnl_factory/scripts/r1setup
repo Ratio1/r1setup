@@ -11394,15 +11394,9 @@ PY"""
         self.print_colored("This can be an empty fleet configuration with no deployed nodes yet.", 'white')
         print()
 
-        while True:
-            custom_name = self.get_input("Enter configuration name (letters, numbers, -, _)", required=True)
-            if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
-                break
-            self.print_colored("Invalid name. Use only letters, numbers, hyphens (-), and underscores (_)", 'red')
-
+        config_name = self.config_manager._prompt_new_config_name()
         env = self._select_network_environment()
         self.set_mnl_app_env(env)
-        config_name = custom_name
         self.ensure_configuration_shell(config_name, env)
         self.print_colored(f"Configuration '{config_name}' created and activated.", 'green')
         return True
