@@ -4029,121 +4029,227 @@ class ConfigurationManager:
         }
 
     def manage_configurations_menu(self) -> None:
-        """Show configuration management submenu"""
+        """Show configuration management — list-then-action picker.
+
+        Step 1: user picks a config from the numbered list, or chooses one of
+        the global actions (new / import / restore / back).
+
+        Step 2: per-config action submenu (Use this config / Rename / Backup
+        / Export / Delete) — consistent single-digit numbering across all
+        configs, no renumbering pressure as actions are added.
+        """
         while True:
             self.app.print_header("Configuration Management")
 
-            # List available configurations
             configs = self._list_available_configs()
             active_config_name = self.active_config.get('config_name')
 
             if configs:
                 self.app.print_section(f"Available Configurations ({len(configs)})")
                 for i, (config_name, metadata) in enumerate(configs, 1):
-                    # Remove .yml extension and format display
-                    display_name = config_name.replace('.yml', '')
-                    env = metadata.get('environment', 'unknown')
-                    nodes = metadata.get('nodes_count', 0)
-                    created = metadata.get('created_at', '')
-                    description = metadata.get('description', '')
-
-                    # Format creation date
-                    created_str = _parse_iso_datetime(created) or "Unknown"
-
-                    # Mark active configuration
-                    active_marker = " ← ACTIVE" if display_name == active_config_name else ""
-
-                    self.app.print_colored(f"  {i}. {display_name}", 'cyan' if active_marker else 'white', bold=bool(active_marker))
-                    info_line = f"     {env} | {nodes} node(s) | {created_str}{active_marker}"
-                    if description:
-                        info_line = f"     {description} | {created_str}{active_marker}"
-
-                    # Add deployment status info
-                    deployment_status = metadata.get('deployment_status', 'never_deployed')
-                    last_deployed_date = metadata.get('last_deployed_date')
-                    last_deployed_network = metadata.get('last_deployed_network')
-                    last_deleted_date = metadata.get('last_deleted_date')
-                    # Per-host variant rollup replaces the retired
-                    # fleet-level last_deployment_type field.
-                    variant_summary = self.install_variant_summary(
-                        metadata.get('inventory') or self.app.inventory
-                    )
-
-                    if deployment_status == 'deployed' and last_deployed_date:
-                        deployed_str = _parse_iso_datetime(last_deployed_date)
-                        if deployed_str:
-                            deployment_info = f"🚀 Last deployed: {deployed_str}"
-                            if last_deployed_network:
-                                deployment_info += f" ({last_deployed_network}"
-                            if variant_summary and variant_summary != 'no installs yet':
-                                deployment_info += f", {variant_summary})"
-                            elif last_deployed_network:
-                                deployment_info += ")"
-                        else:
-                            deployment_info = "🚀 Deployed"
-                    elif deployment_status == 'deleted' and last_deleted_date:
-                        deleted_str = _parse_iso_datetime(last_deleted_date)
-                        if deleted_str:
-                            deployment_info = f"🗑️ Last deleted: {deleted_str}"
-                        else:
-                            deployment_info = "🗑️ Deleted"
-                    else:
-                        deployment_info = "📋 Never deployed"
-
-                    self.app.print_colored(info_line, 'green' if active_marker else 'white')
-                    deployment_color = 'cyan' if deployment_status == 'deployed' else 'red' if deployment_status == 'deleted' else 'yellow'
-                    self.app.print_colored(f"     {deployment_info}", deployment_color)
+                    self._render_config_list_entry(i, config_name, metadata, active_config_name)
+                print()
+            else:
+                self.app.print_colored("No configurations found.", 'yellow')
                 print()
 
-            self.app.print_colored("Manage Configurations Menu", 'cyan', bold=True)
+            self.app.print_colored("Actions", 'cyan', bold=True)
             print()
-            self.app.print_colored("  1) Create New Configuration       - Set up new configuration")
             if configs:
-                self.app.print_colored("  2) Switch Configuration          - Activate different configuration")
-                self.app.print_colored("  3) Delete Configuration          - Remove saved configuration")
-                self.app.print_colored("  4) Rename Configuration          - Change configuration name")
-                self.app.print_colored("")
-                self.app.print_colored("  5) Backup Configuration          - Save configuration backup")
-                self.app.print_colored("  6) Restore Configuration         - Restore from backup")
-                self.app.print_colored("  7) Export Configuration          - Create portable config file")
-                self.app.print_colored("  8) Quick Export Current Config   - Export active config")
-            else:
-                self.app.print_colored("  7) Export Configuration          - Create portable config file (no configs)")
-                self.app.print_colored("  8) Quick Export Current          - Export active config")
-            self.app.print_colored("  9) Import Configuration          - Import from portable file")
-            print()
-            self.app.print_colored("  0) Back to Main Menu")
+                self.app.print_colored("  Enter a number (1-{max}) to select a configuration".format(max=len(configs)))
+            self.app.print_colored("  n) Create new configuration")
+            self.app.print_colored("  i) Import configuration from .r1config file")
+            self.app.print_colored("  r) Restore configuration from backup")
+            if self.active_config.get('config_name'):
+                self.app.print_colored("  q) Quick-export current active configuration")
+            self.app.print_colored("  0) Back to Configuration Menu")
             print()
 
-            choice = self.app.get_input("Select option", "0")
+            choice = self.app.get_input("Select", "0").strip().lower()
 
             if choice == '0':
                 break
-            elif choice == '1':
+            if choice == 'n':
                 self._create_machine_first_configuration()
-            elif choice == '2' and configs:
-                self._switch_configuration(configs)
-            elif choice == '3' and configs:
-                self._delete_configuration(configs)
-            elif choice == '4' and configs:
-                self._rename_configuration(configs)
-            elif choice == '5' and configs:
-                self._backup_configuration(configs)
-            elif choice == '6' and configs:
-                self._restore_configuration()
-            elif choice == '7':
-                if configs:
-                    self._export_configuration(configs)
-                else:
-                    self.app.print_colored("No configurations available to export.", 'yellow')
-                    self.app.wait_for_enter()
-            elif choice == '8':
-                self._quick_export_current()
-            elif choice == '9':
+                continue
+            if choice == 'i':
                 self._import_configuration()
-            else:
-                self.app.print_colored("Invalid option. Valid choices are 0-9.", 'red')
+                continue
+            if choice == 'r':
+                self._restore_configuration()
+                continue
+            if choice == 'q':
+                self._quick_export_current()
+                continue
+
+            # Numeric selection → per-config action submenu
+            try:
+                idx = int(choice) - 1
+            except ValueError:
+                self.app.print_colored("Invalid input.", 'red')
                 self.app.wait_for_enter()
+                continue
+
+            if not configs or not (0 <= idx < len(configs)):
+                self.app.print_colored("Invalid configuration number.", 'red')
+                self.app.wait_for_enter()
+                continue
+
+            self._config_action_submenu(configs[idx], configs)
+
+    def _render_config_list_entry(
+        self,
+        index: int,
+        config_filename: str,
+        metadata: Dict,
+        active_config_name: Optional[str],
+    ) -> None:
+        """Render one row of the manage-configurations picker list."""
+        display_name = config_filename.replace('.yml', '')
+        env = metadata.get('environment', 'unknown')
+        nodes = metadata.get('nodes_count', 0)
+        mode = metadata.get('mode') or DEFAULT_CONFIG_MODE
+        created = metadata.get('created_at', '')
+        description = metadata.get('description', '')
+
+        created_str = _parse_iso_datetime(created) or "Unknown"
+        active_marker = " ← ACTIVE" if display_name == active_config_name else ""
+
+        self.app.print_colored(
+            f"  {index}. {display_name}",
+            'cyan' if active_marker else 'white',
+            bold=bool(active_marker),
+        )
+        info_line = f"     {env} | {mode} | {nodes} node(s) | {created_str}{active_marker}"
+        if description:
+            info_line = f"     {description} | {mode} | {created_str}{active_marker}"
+
+        deployment_status = metadata.get('deployment_status', 'never_deployed')
+        last_deployed_date = metadata.get('last_deployed_date')
+        last_deployed_network = metadata.get('last_deployed_network')
+        last_deleted_date = metadata.get('last_deleted_date')
+        variant_summary = self.install_variant_summary(
+            metadata.get('inventory') or self.app.inventory
+        )
+
+        if deployment_status == 'deployed' and last_deployed_date:
+            deployed_str = _parse_iso_datetime(last_deployed_date)
+            if deployed_str:
+                deployment_info = f"🚀 Last deployed: {deployed_str}"
+                if last_deployed_network:
+                    deployment_info += f" ({last_deployed_network}"
+                if variant_summary and variant_summary != 'no installs yet':
+                    deployment_info += f", {variant_summary})"
+                elif last_deployed_network:
+                    deployment_info += ")"
+            else:
+                deployment_info = "🚀 Deployed"
+        elif deployment_status == 'deleted' and last_deleted_date:
+            deleted_str = _parse_iso_datetime(last_deleted_date)
+            deployment_info = f"🗑️ Last deleted: {deleted_str}" if deleted_str else "🗑️ Deleted"
+        else:
+            deployment_info = "📋 Never deployed"
+
+        self.app.print_colored(info_line, 'green' if active_marker else 'white')
+        deployment_color = (
+            'cyan' if deployment_status == 'deployed'
+            else 'red' if deployment_status == 'deleted'
+            else 'yellow'
+        )
+        self.app.print_colored(f"     {deployment_info}", deployment_color)
+
+    def _config_action_submenu(
+        self,
+        selected: Tuple[str, Dict],
+        configs: List[Tuple[str, Dict]],
+    ) -> None:
+        """Per-config action submenu: Use / Rename / Backup / Export / Delete."""
+        config_name = selected[0].replace('.yml', '')
+
+        while True:
+            self.app.print_section(f"Actions for '{config_name}'")
+            is_active = self.active_config.get('config_name') == config_name
+            active_note = " (currently active)" if is_active else ""
+            self.app.print_colored(f"  1) Use this config{active_note}   - Switch to it and open node management")
+            self.app.print_colored("  2) Rename")
+            self.app.print_colored("  3) Backup")
+            self.app.print_colored("  4) Export")
+            self.app.print_colored("  5) Delete")
+            print()
+            self.app.print_colored("  0) Back")
+            print()
+
+            choice = self.app.get_input("Select", "0")
+
+            if choice == '0':
+                return
+            if choice == '1':
+                self._use_config(config_name)
+                return
+            if choice == '2':
+                self._rename_configuration([selected])
+                return
+            if choice == '3':
+                self._backup_configuration([selected])
+                return
+            if choice == '4':
+                self._export_configuration([selected])
+                return
+            if choice == '5':
+                self._delete_configuration([selected])
+                return
+            self.app.print_colored("Invalid option. Valid choices are 0-5.", 'red')
+            self.app.wait_for_enter()
+
+    def _use_config(self, config_name: str) -> None:
+        """Switch to ``config_name`` and open Configure Nodes.
+
+        Snapshot+rollback: on any failure during the switch, restore the
+        prior active-config state (in-memory + symlink) so the CLI never
+        ends up half-switched.
+        """
+        if self.active_config.get('config_name') == config_name:
+            # Already active — skip the switch, just open node management.
+            self.app.configure_nodes_menu()
+            return
+
+        # Snapshot for rollback
+        snapshot = {
+            'active_config': copy.deepcopy(self.active_config),
+            'fleet_state': copy.deepcopy(self.fleet_state),
+            'inventory': copy.deepcopy(self.app.inventory),
+            'symlink_target': None,
+        }
+        try:
+            if self.app.config_file.is_symlink():
+                snapshot['symlink_target'] = os.readlink(str(self.app.config_file))
+        except OSError:
+            pass
+
+        try:
+            if not self._load_config_by_name(config_name):
+                raise RuntimeError(f"_load_config_by_name returned False for '{config_name}'")
+        except Exception as e:
+            # Restore from snapshot
+            self.active_config = snapshot['active_config']
+            self.fleet_state = snapshot['fleet_state']
+            self.app.inventory = snapshot['inventory']
+            try:
+                if self.app.config_file.is_symlink():
+                    self.app.config_file.unlink()
+                if snapshot['symlink_target']:
+                    self.app.config_file.symlink_to(snapshot['symlink_target'])
+            except OSError:
+                pass
+            self.app.print_colored(
+                f"❌ Failed to switch to '{config_name}': {e}. Previous active config restored.",
+                'red',
+            )
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_colored(f"→ Switched active configuration to '{config_name}'.", 'green')
+        self.app.configure_nodes_menu()
 
     def _switch_configuration(self, configs: List[Tuple[str, Dict]]) -> None:
         """Switch to a different configuration"""
