@@ -1504,13 +1504,18 @@ class ConfigurationManager:
         return counts
 
     def _create_machine_first_configuration(self) -> None:
-        """Create a machine-first configuration: register machines, zero hosts."""
+        """Create a new configuration.
+
+        Simple mode produces an empty zero-host shell — the user adds nodes
+        one at a time via Configure Nodes → Add New Node. Advanced mode runs
+        the full bulk machine-first flow (register N machines up front, run
+        batch discovery, gap-fill fresh instances).
+        """
         self.app.print_section("Create New Configuration")
 
         custom_name = self._prompt_new_config_name()
         env = self._prompt_new_config_environment()
         config_mode = self._select_configuration_mode()
-        num_machines = self._prompt_machine_count()
         config_name = custom_name
 
         self._reset_inventory_for_new_config()
@@ -1518,13 +1523,30 @@ class ConfigurationManager:
         # Save config shell first (required before upsert_machine_record)
         self.ensure_configuration_shell(config_name, env, mode=config_mode)
 
+        # Simple mode: stop at the empty shell. Users grow the config one
+        # node at a time from Configure Nodes → Add New Node, which handles
+        # the register-machine + create-instance pair atomically.
+        if config_mode == CONFIG_MODE_SIMPLE:
+            self.app.print_section("Configuration Summary")
+            self.app.print_colored(
+                f"Simple-mode configuration '{config_name}' created and activated.",
+                'green',
+            )
+            self.app.print_colored(
+                "\n\U0001f4a1 Next: Configure Nodes → Add New Node to register your first machine and deploy a node.",
+                'cyan',
+            )
+            self.app.wait_for_enter()
+            return
+
+        # Advanced mode: run the full bulk machine-first flow.
+        num_machines = self._prompt_machine_count()
+
         # Register machines
         registered_ids = self._collect_machine_registration_entries(num_machines)
 
         # Advanced mode: collect desired instance counts per machine
-        desired_counts: Dict[str, int] = {}
-        if config_mode == 'advanced':
-            desired_counts = self._collect_advanced_instance_counts(registered_ids)
+        desired_counts: Dict[str, int] = self._collect_advanced_instance_counts(registered_ids)
 
         # Offer batch discovery and import
         discovery_result = self._onboarding_batch_discovery_and_import(
