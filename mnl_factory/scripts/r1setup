@@ -141,7 +141,10 @@ INSTALL_TRACKING_FIELDS = (
     INSTALL_ATTEMPTED_AT_FIELD,
     INSTALL_ATTEMPTED_RESULT_FIELD,
 )
-CONFIG_SCHEMA_VERSION = 1
+CONFIG_SCHEMA_VERSION = 2
+CONFIG_MODE_SIMPLE = 'simple'
+CONFIG_MODE_ADVANCED = 'advanced'
+DEFAULT_CONFIG_MODE = CONFIG_MODE_SIMPLE
 DEFAULT_MACHINE_TOPOLOGY_MODE = 'standard'
 DEFAULT_MACHINE_DEPLOYMENT_STATE = 'unknown'
 DEFAULT_RUNTIME_SERVICE_NAME = 'edge_node'
@@ -1171,6 +1174,7 @@ class ConfigurationManager:
             'created_at': None,
             'nodes_count': 0,
             'config_schema_version': CONFIG_SCHEMA_VERSION,
+            'mode': DEFAULT_CONFIG_MODE,
             'last_deployed_date': None,
             'last_deployed_network': None,
             'deployment_status': 'never_deployed',
@@ -1179,6 +1183,21 @@ class ConfigurationManager:
             'last_written_collection_version': None,
             'last_written_at': None,
         }
+
+    @staticmethod
+    def _derive_legacy_mode(fleet_state: Optional[Dict[str, Any]]) -> str:
+        """Infer config mode for a legacy config missing the ``mode`` field.
+
+        If any machine in the fleet has ``topology_mode == 'expert'`` (i.e.
+        multi-instance), the config is treated as advanced. Otherwise simple.
+        """
+        if not isinstance(fleet_state, dict):
+            return DEFAULT_CONFIG_MODE
+        machines = (fleet_state.get('fleet') or {}).get('machines') or {}
+        for machine in machines.values():
+            if str((machine or {}).get('topology_mode') or '').strip() == 'expert':
+                return CONFIG_MODE_ADVANCED
+        return CONFIG_MODE_SIMPLE
 
     def _load_active_config(self) -> None:
         """Load the active configuration settings"""
@@ -1190,6 +1209,7 @@ class ConfigurationManager:
             'created_at': None,
             'nodes_count': 0,
             'config_schema_version': CONFIG_SCHEMA_VERSION,
+            'mode': DEFAULT_CONFIG_MODE,
             'last_deployed_date': None,
             'last_deployed_network': None,
             'deployment_status': 'never_deployed',
@@ -1204,8 +1224,27 @@ class ConfigurationManager:
                 with open(self.app.active_config_file) as f:
                     loaded_config = json.load(f)
                     self.app.print_debug(f"Loaded active config from file: {loaded_config}")
+
+                    # Warn once if the on-disk config declares a newer schema
+                    # than this CLI knows about. We still try to load it.
+                    loaded_version = int(loaded_config.get('config_schema_version') or 0)
+                    if loaded_version > CONFIG_SCHEMA_VERSION:
+                        self.app.print_colored(
+                            f"Warning: active config declares schema v{loaded_version}; this CLI supports v{CONFIG_SCHEMA_VERSION}. "
+                            "Some fields may be ignored. Consider upgrading r1setup.",
+                            'yellow',
+                        )
+
                     self.active_config.update(loaded_config)
                     self.fleet_state = self._normalize_fleet_state(loaded_config.get('fleet_state'))
+
+                    # Legacy derivation: configs written by older CLI versions
+                    # have no ``mode`` field. Infer it from per-machine topology
+                    # and fold it back into active_config so downstream code
+                    # sees a normalized value. The next save will persist it.
+                    if not loaded_config.get('mode'):
+                        self.active_config['mode'] = self._derive_legacy_mode(loaded_config.get('fleet_state'))
+
                     self.app.print_debug(f"Final active config after update: {self.active_config}")
 
                 # Ensure network environment is synchronized after loading active config
@@ -1477,7 +1516,7 @@ class ConfigurationManager:
         self._reset_inventory_for_new_config()
 
         # Save config shell first (required before upsert_machine_record)
-        self.ensure_configuration_shell(config_name, env)
+        self.ensure_configuration_shell(config_name, env, mode=config_mode)
 
         # Register machines
         registered_ids = self._collect_machine_registration_entries(num_machines)
@@ -2464,10 +2503,10 @@ class ConfigurationManager:
         """Return a deep copy of the current fleet state."""
         return copy.deepcopy(self.fleet_state)
 
-    def ensure_configuration_shell(self, config_name: str, environment: str) -> None:
+    def ensure_configuration_shell(self, config_name: str, environment: str, mode: Optional[str] = None) -> None:
         """Persist the current empty-or-existing inventory as an active configuration shell."""
         hosts = _get_gpu_hosts(self.app.inventory)
-        self._save_config_with_metadata(config_name, environment, len(hosts), update_symlink=True)
+        self._save_config_with_metadata(config_name, environment, len(hosts), update_symlink=True, mode=mode)
 
     def upsert_machine_record(self, machine_id: str, machine_data: Dict[str, Any]) -> None:
         """Persist or update a machine record in the current fleet state."""
@@ -2696,8 +2735,14 @@ class ConfigurationManager:
         """Return the metadata path for a named configuration."""
         return configs_dir / f"{config_name}.json"
 
-    def _save_config_with_metadata(self, config_name: str, environment: str, nodes_count: int, update_symlink: bool = True) -> None:
-        """Save configuration with metadata"""
+    def _save_config_with_metadata(self, config_name: str, environment: str, nodes_count: int, update_symlink: bool = True, mode: Optional[str] = None) -> None:
+        """Save configuration with metadata.
+
+        ``mode`` sets the config-level UI mode (``'simple'`` or ``'advanced'``).
+        When ``None``, the existing mode is preserved from disk metadata; if
+        the on-disk metadata also lacks it (legacy), it is derived from the
+        fleet's per-machine topology.
+        """
         config_path = self.app.configs_dir / f"{config_name}.yml"
         metadata_path = self._metadata_path_for_config(self.app.configs_dir, config_name)
 
@@ -2755,6 +2800,12 @@ class ConfigurationManager:
         metadata['environment'] = environment
         metadata['nodes_count'] = nodes_count
         metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
+        # Config mode: explicit parameter wins; otherwise preserve existing;
+        # otherwise fall back to legacy derivation.
+        if mode is not None:
+            metadata['mode'] = mode
+        elif not metadata.get('mode'):
+            metadata['mode'] = self._derive_legacy_mode(metadata.get('fleet_state') or self.fleet_state)
         # Version stamping: record the CLI + collection versions that wrote
         # this config, plus the write timestamp, so post-mortems can reason
         # about what tooling produced it. Added in 1.8.0; older configs gain
@@ -9730,8 +9781,8 @@ class R1Setup:
     def _list_available_configs(self):
         return self.config_manager._list_available_configs()
 
-    def _save_config_with_metadata(self, config_name, environment, nodes_count, update_symlink=True):
-        return self.config_manager._save_config_with_metadata(config_name, environment, nodes_count, update_symlink)
+    def _save_config_with_metadata(self, config_name, environment, nodes_count, update_symlink=True, mode=None):
+        return self.config_manager._save_config_with_metadata(config_name, environment, nodes_count, update_symlink, mode=mode)
 
     def _update_hosts_symlink(self, config_path):
         return self.config_manager._update_hosts_symlink(config_path)
@@ -9792,8 +9843,8 @@ class R1Setup:
     def get_fleet_state_copy(self):
         return self.config_manager.get_fleet_state_copy()
 
-    def ensure_configuration_shell(self, config_name, environment):
-        return self.config_manager.ensure_configuration_shell(config_name, environment)
+    def ensure_configuration_shell(self, config_name, environment, mode=None):
+        return self.config_manager.ensure_configuration_shell(config_name, environment, mode=mode)
 
     def upsert_machine_record(self, machine_id, machine_data):
         return self.config_manager.upsert_machine_record(machine_id, machine_data)
@@ -11407,7 +11458,7 @@ PY"""
         config_name = self.config_manager._prompt_new_config_name()
         env = self._select_network_environment()
         self.set_mnl_app_env(env)
-        self.ensure_configuration_shell(config_name, env)
+        self.ensure_configuration_shell(config_name, env, mode=DEFAULT_CONFIG_MODE)
         self.print_colored(f"Configuration '{config_name}' created and activated.", 'green')
         return True
 
