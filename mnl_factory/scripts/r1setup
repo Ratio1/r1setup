@@ -1472,7 +1472,7 @@ class ConfigurationManager:
         env = self._prompt_new_config_environment()
         config_mode = self._select_configuration_mode()
         num_machines = self._prompt_machine_count()
-        config_name = self._generate_config_name(num_machines, custom_name, unit='m')
+        config_name = custom_name
 
         self._reset_inventory_for_new_config()
 
@@ -1910,25 +1910,6 @@ class ConfigurationManager:
         self._save_config_with_metadata(config_name, config_env, nodes_count)
 
         return created_count
-
-    def _generate_config_name(self, nodes_count: int, custom_name: str = None, *, unit: str = 'n') -> str:
-        """Generate a configuration name with user input, timestamp and metadata.
-
-        The *unit* suffix defaults to ``'n'`` (node count) for existing callers.
-        Machine-first flows pass ``unit='m'`` so the resulting name reflects
-        machine count instead of the (initially zero) node count.
-        """
-        if not custom_name:
-            custom_name = self._prompt_new_config_name()
-
-        # Generate timestamp components
-        now = datetime.now()
-        date_str = now.strftime('%Y%m%d')  # YYYYMMDD
-        time_str = now.strftime('%H%M')    # HHMM
-
-        config_name = f"{custom_name}_{date_str}_{time_str}_{nodes_count}{unit}"
-
-        return config_name
 
     def _list_available_configs(self) -> List[Tuple[str, Dict]]:
         """List all available configurations with their metadata"""
@@ -3133,9 +3114,10 @@ class ConfigurationManager:
         hosts = _get_gpu_hosts(self.app.inventory)
         nodes_count = len(hosts)
 
-        # Generate config name if not set
+        # Prompt for a name if not set (covers legacy / edge cases only — normal
+        # creation flows always set a name before we reach this save path).
         if not self.active_config.get('config_name'):
-            config_name = self._generate_config_name(nodes_count)
+            config_name = self._prompt_new_config_name()
             self._save_config_with_metadata(config_name, env, nodes_count, update_symlink=True)
         else:
             # Update existing config - no need to update symlink since we're not switching configs
@@ -4212,28 +4194,23 @@ class ConfigurationManager:
             self.app.wait_for_enter()
             return
 
-        # Generate new config name with timestamp and metadata (like the original creation)
-        # Extract environment and node count from existing metadata
-        old_metadata_path = self.app.configs_dir / f"{old_config_name}.json"
-        nodes_count = 1
-        environment = 'mainnet'
-
-        if old_metadata_path.exists():
-            try:
-                with open(old_metadata_path) as f:
-                    metadata = json.load(f)
-                nodes_count = metadata.get('nodes_count', 1)
-                environment = metadata.get('environment', 'mainnet')
-            except Exception:
-                pass
-
-        new_config_name = self._generate_config_name(nodes_count, new_name)
-
-        # Check if new name already exists
-        if (self.app.configs_dir / f"{new_config_name}.yml").exists():
-            self.app.print_colored("A configuration with this name already exists!", 'red')
+        # Self-rename is a silent no-op (not an error).
+        if new_name == old_config_name:
+            self.app.print_colored("New name is the same as current name — no change.", 'yellow')
             self.app.wait_for_enter()
             return
+
+        # Uniqueness check (exempt self-match by filename)
+        clash = self._is_config_name_taken(new_name)
+        if clash and clash != f"{old_config_name}.yml":
+            self.app.print_colored(
+                f"A configuration named '{new_name}' already exists ({clash}). Choose a different name.",
+                'red',
+            )
+            self.app.wait_for_enter()
+            return
+
+        new_config_name = new_name
 
         try:
             # Rename files
@@ -4401,12 +4378,16 @@ class ConfigurationManager:
                 except Exception:
                     pass
 
-            # Generate proper configuration name
-            restored_config_name = self._generate_config_name(nodes_count, new_name)
+            # Use the user-provided name directly
+            restored_config_name = new_name
 
             # Check if restored name already exists
-            if (self.app.configs_dir / f"{restored_config_name}.yml").exists():
-                self.app.print_colored("A configuration with this name already exists!", 'red')
+            clash = self._is_config_name_taken(restored_config_name)
+            if clash:
+                self.app.print_colored(
+                    f"A configuration named '{restored_config_name}' already exists ({clash}).",
+                    'red',
+                )
                 self.app.wait_for_enter()
                 return
 
@@ -4616,12 +4597,10 @@ class ConfigurationManager:
 
             # Get new configuration name
             suggested_name = self.app.get_input(f"Configuration name [{original_name}]", original_name)
+            final_config_name = suggested_name
 
-            # Generate proper config filename
-            final_config_name = self._generate_config_name(nodes_count, suggested_name)
-
-            # Check if config already exists
-            if (self.app.configs_dir / f"{final_config_name}.yml").exists():
+            # Check if config already exists (prompt for overwrite)
+            if self._is_config_name_taken(final_config_name):
                 if self.app.get_input(f"Configuration '{final_config_name}' already exists. Overwrite? (y/n)", "n").lower() != 'y':
                     self.app.print_colored("Import cancelled.", 'yellow')
                     self.app.wait_for_enter()
@@ -9738,9 +9717,6 @@ class R1Setup:
     def _create_machine_first_configuration(self):
         return self.config_manager._create_machine_first_configuration()
 
-    def _generate_config_name(self, nodes_count, custom_name=None, *, unit='n'):
-        return self.config_manager._generate_config_name(nodes_count, custom_name, unit=unit)
-
     def _list_available_configs(self):
         return self.config_manager._list_available_configs()
 
@@ -11426,7 +11402,7 @@ PY"""
 
         env = self._select_network_environment()
         self.set_mnl_app_env(env)
-        config_name = self._generate_config_name(0, custom_name)
+        config_name = custom_name
         self.ensure_configuration_shell(config_name, env)
         self.print_colored(f"Configuration '{config_name}' created and activated.", 'green')
         return True
