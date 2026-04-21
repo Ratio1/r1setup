@@ -10746,9 +10746,14 @@ class R1Setup:
         probe_path.mkdir(parents=True, exist_ok=True)
         return shutil.disk_usage(probe_path).free
 
-    @staticmethod
-    def _build_machine_ssh_command(machine_config: Dict[str, Any], remote_command: str) -> List[str]:
-        """Build an SSH command list for a machine-scoped remote command."""
+    def _build_machine_ssh_command(self, machine_config: Dict[str, Any], remote_command: str) -> List[str]:
+        """Build an SSH command list for a machine-scoped remote command.
+
+        Matches the SSH hardening of sibling probes (``_probe_machine_specs``
+        etc.): disables interactive host-key verification and host-key
+        persistence so a fresh machine or a changed remote identity doesn't
+        block a non-mutating probe with a ``yes/no/[fingerprint]`` prompt.
+        """
         host = machine_config.get('ansible_host', '')
         user = machine_config.get('ansible_user', '')
         if not host or not user:
@@ -10765,7 +10770,14 @@ class R1Setup:
                 key_file = os.path.expanduser(key_file)
             ssh_cmd.extend(['-i', str(key_file)])
 
-        ssh_cmd.extend([f"{user}@{host}", remote_command])
+        ssh_cmd.extend([
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=/dev/null',
+            '-o', 'BatchMode=yes',
+            '-o', f'ConnectTimeout={getattr(self, "ssh_connect_timeout", 10)}',
+            f"{user}@{host}",
+            remote_command,
+        ])
         if 'ansible_ssh_pass' in machine_config:
             return ['sshpass', '-p', machine_config['ansible_ssh_pass']] + ssh_cmd
         return ssh_cmd
