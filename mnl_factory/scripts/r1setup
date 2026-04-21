@@ -12097,15 +12097,17 @@ PY"""
 
             self.print_colored("Configure Nodes Menu", 'cyan', bold=True)
             print()
-            if not hosts:
-                self.print_colored("  1) Create New Configuration        - Register machines and set up instances")
-            else:
-                self.print_colored("  1) Add New Node                   - Add node to existing config")
+            # Option 1 (Add New Node) is always shown as long as the user has
+            # an active config — including the empty zero-host shell that
+            # simple-mode creation produces on purpose. Edit/Remove are gated
+            # behind having at least one host.
+            self.print_colored("  1) Add New Node                   - Add node to existing config")
+            if hosts:
                 self.print_colored("  2) Edit Existing Node             - Modify node settings")
                 self.print_colored("  3) Remove Node                    - Delete node from config")
-                self.print_colored("  4) Create New Configuration       - Start fresh configuration")
-                if mode == CONFIG_MODE_ADVANCED:
-                    self.print_colored("  5) Add Multiple Nodes             - Bulk-register N machines + nodes")
+            self.print_colored("  4) Create New Configuration       - Start fresh configuration")
+            if hosts and mode == CONFIG_MODE_ADVANCED:
+                self.print_colored("  5) Add Multiple Nodes             - Bulk-register N machines + nodes")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -12115,20 +12117,22 @@ PY"""
             if choice == '0':
                 break
             elif choice == '1':
-                if not hosts:
-                    self._create_machine_first_configuration()
-                else:
-                    self._add_node()
+                self._add_node()
             elif choice == '2' and hosts:
                 self._update_node()
             elif choice == '3' and hosts:
                 self._delete_node()
-            elif choice == '4' and hosts:
+            elif choice == '4':
                 self._create_new_configuration()
             elif choice == '5' and hosts and mode == CONFIG_MODE_ADVANCED:
                 self._add_multiple_nodes()
             else:
-                valid = "0-5" if (hosts and mode == CONFIG_MODE_ADVANCED) else ("0-4" if hosts else "0-1")
+                if hosts and mode == CONFIG_MODE_ADVANCED:
+                    valid = "0-5"
+                elif hosts:
+                    valid = "0-4"
+                else:
+                    valid = "1, 4, 0"
                 self.print_colored(f"Invalid option. Valid choices are {valid}.", 'red')
                 self.wait_for_enter()
 
