@@ -1093,6 +1093,25 @@ class SettingsManager:
         """SSH ConnectTimeout derived from connection_timeout. Floor of 10s."""
         return max(10, self.connection_timeout // 3)
 
+    @property
+    def playbook_timeout(self) -> int:
+        """Wall-clock ceiling (seconds) for an Ansible playbook run.
+
+        Playbooks do full remote work (installs, deletions, migrations)
+        and routinely take many minutes — the per-probe
+        ``connection_timeout`` (30-600s) is not the right ceiling. Default
+        is 30 minutes; settable via the ``playbook_timeout`` preference
+        and clamped to [300, 7200] (5 min - 2 h).
+        """
+        val = self.get('playbook_timeout')
+        if val in (None, ''):
+            val = 1800
+        try:
+            val = int(val)
+        except (TypeError, ValueError):
+            val = 1800
+        return max(300, min(7200, val))
+
     def settings_menu(self):
         """Interactive toggle UI for user preferences."""
         while True:
@@ -6149,7 +6168,7 @@ class DeploymentService:
             machine_scope=False,
             last_applied_action='delete_edge_node',
             show_output=True,
-            timeout=self.app.connection_timeout,
+            timeout=self.app.playbook_timeout,
         )
 
         if success:
@@ -10207,6 +10226,10 @@ class R1Setup:
     def ssh_connect_timeout(self) -> int:
         return self.settings_manager.ssh_connect_timeout
 
+    @property
+    def playbook_timeout(self) -> int:
+        return self.settings_manager.playbook_timeout
+
     # -- Service override helpers --
 
     def _get_service_overrides(self) -> dict:
@@ -12727,7 +12750,7 @@ PY"""
             extra_vars=overrides,
             last_applied_action=last_applied_action,
             show_output=True,
-            timeout=self.connection_timeout,
+            timeout=self.playbook_timeout,
         )
 
         if success:
@@ -16233,7 +16256,7 @@ PY"""
             machine_scope=False,
             last_applied_action=playbook_name.replace('.yml', ''),
             show_output=True,
-            timeout=self.connection_timeout,
+            timeout=self.playbook_timeout,
         )
 
         if success:
