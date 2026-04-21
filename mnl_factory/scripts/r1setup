@@ -4192,6 +4192,18 @@ class ConfigurationManager:
             except ValueError:
                 self.app.print_colored("Please enter a number", 'red')
 
+        was_active = self.active_config.get('config_name') == selected_config
+
+        self.app.print_colored(
+            f"⚠️  Deleting '{selected_config}' removes its YAML, metadata, and (if active) clears the symlink.",
+            'yellow',
+        )
+        if was_active:
+            self.app.print_colored(
+                "This is the currently ACTIVE configuration. After deletion the main menu will gate "
+                "deployment/operations entries until you pick or create another one.",
+                'yellow',
+            )
         if self.app.get_input(f"Delete configuration '{selected_config}'? (y/n)", "n").lower() == 'y':
             config_path = self.app.configs_dir / f"{selected_config}.yml"
             metadata_path = self.app.configs_dir / f"{selected_config}.json"
@@ -4203,18 +4215,27 @@ class ConfigurationManager:
                 if metadata_path.exists():
                     metadata_path.unlink()
 
-                # If this was the active config, clear it
-                if self.active_config.get('config_name') == selected_config:
+                # If this was the active config, clear active state fully:
+                # in-memory active_config, fleet_state, on-disk active_config.json,
+                # and the hosts.yml symlink. Callers see a clean no-active state.
+                if was_active:
                     self.active_config = {
                         'config_name': None,
                         'environment': None,
                         'created_at': None,
                         'nodes_count': 0,
+                        'config_schema_version': CONFIG_SCHEMA_VERSION,
+                        'mode': DEFAULT_CONFIG_MODE,
                         'last_deployed_date': None,
                         'last_deployed_network': None,
                         'deployment_status': 'never_deployed',
-                        'last_deleted_date': None,
+                        'last_deleted_date': datetime.now().isoformat(),
+                        'last_written_cli_version': None,
+                        'last_written_collection_version': None,
+                        'last_written_at': None,
                     }
+                    self.fleet_state = self._default_fleet_state()
+                    self.app.inventory = {'all': {'children': {'gpu_nodes': {'hosts': {}}}}}
                     self._save_active_config()
 
                     # Remove symlink
@@ -4222,6 +4243,11 @@ class ConfigurationManager:
                         self.app.config_file.unlink()
 
                 self.app.print_colored(f"Configuration '{selected_config}' deleted successfully!", 'green')
+                if was_active:
+                    self.app.print_colored(
+                        "No configuration is active. Open Manage Configurations to pick or create one.",
+                        'cyan',
+                    )
             except Exception as e:
                 self.app.print_colored(f"Error deleting configuration: {e}", 'red')
 
