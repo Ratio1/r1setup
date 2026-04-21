@@ -10191,6 +10191,27 @@ class R1Setup:
         # forge a timestamp; leave the old value (or None) so the label
         # says "Deployed" without claiming a false deploy date.
         self.config_manager._save_active_config()
+
+        # Also persist to the per-config metadata file. Otherwise the next
+        # _save_config_with_metadata call reads the stale on-disk status
+        # (e.g. 'deleted' from a prior delete) and resurrects it into the
+        # in-memory active_config, silently regressing the reconciled state.
+        config_name = self.active_config.get('config_name')
+        if config_name:
+            metadata_path = self.configs_dir / f"{config_name}.json"
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path) as f:
+                        metadata = json.load(f)
+                    if metadata.get('deployment_status') != 'deployed':
+                        metadata['deployment_status'] = 'deployed'
+                        with open(metadata_path, 'w') as f:
+                            json.dump(metadata, f, indent=2)
+                except (OSError, ValueError) as exc:
+                    self.print_debug(
+                        f"Reconcile: could not sync metadata file {metadata_path}: {exc}"
+                    )
+
         self.print_debug(
             f"Reconciled deployment_status: {current!r} → 'deployed' based on live probes"
         )
