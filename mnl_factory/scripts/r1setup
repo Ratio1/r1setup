@@ -1536,7 +1536,7 @@ class ConfigurationManager:
                 'green',
             )
             self.app.print_colored("\nLet's add your first node now.", 'cyan')
-            self.app._add_nodes_loop()
+            self.app._add_nodes_loop(add_another_default='y')
             return
 
         # Advanced mode: run the full bulk machine-first flow.
@@ -12187,7 +12187,7 @@ PY"""
                 self.print_colored(f"Invalid option. Valid choices are {valid}.", 'red')
                 self.wait_for_enter()
 
-    def _add_nodes_loop(self) -> None:
+    def _add_nodes_loop(self, add_another_default: str = 'n') -> None:
         """Add one or more nodes in two phases.
 
         Phase 1 — collect: for each iteration prompt the node name + SSH
@@ -12199,6 +12199,12 @@ PY"""
         (if new), run a single batched discovery across all new machines,
         then either import an existing service or save as a fresh
         instance. All changes are persisted in one final save.
+
+        ``add_another_default`` controls the default at the "Add another?"
+        prompt. Pass ``'y'`` when the caller knows the user is mid-bulk
+        entry (e.g. right after creating a new config) so Enter keeps the
+        flow going; pass ``'n'`` (default) elsewhere so Enter exits
+        cleanly.
         """
         hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
         pending: List[Tuple[str, Dict[str, Any]]] = []
@@ -12234,7 +12240,7 @@ PY"""
             pending.append((name, new_host))
             self.print_colored(f"✓ '{name}' queued ({len(pending)} pending).", 'green')
 
-            if self.get_input(f"\nAdd another? (y/n)", "n").lower() != 'y':
+            if self.get_input(f"\nAdd another? (y/n)", add_another_default).lower() != 'y':
                 break
 
         if not pending:
