@@ -12071,7 +12071,7 @@ PY"""
                 machines = self.get_fleet_machines_as_hosts()
                 self.print_section(f"{len(machines)} registered machine(s), no node instances yet")
                 self.print_colored(
-                    "\U0001f4a1 Use 'Discover Services' (Main Menu \u2192 1 \u2192 7) to import existing services,\n"
+                    "\U0001f4a1 Use 'Discover Services' (Main Menu \u2192 1 \u2192 5) to import existing services,\n"
                     "   or 'Add New Node' (Main Menu \u2192 1 \u2192 1) to create new instances.",
                     'yellow',
                 )
@@ -12103,7 +12103,7 @@ PY"""
                 if has_machines:
                     self.print_colored(
                         "Machines registered but no node instances configured.\n"
-                        "Use 'Discover Services' (Main Menu \u2192 1 \u2192 7) to import existing services,\n"
+                        "Use 'Discover Services' (Main Menu \u2192 1 \u2192 5) to import existing services,\n"
                         "or 'Add New Node' (Main Menu \u2192 1 \u2192 1) to create new instances.",
                         'red',
                     )
@@ -12654,7 +12654,7 @@ PY"""
                 machines = self.get_fleet_machines_as_hosts()
                 self.print_section(f"{len(machines)} registered machine(s), no node instances yet")
                 self.print_colored(
-                    "\U0001f4a1 Use 'Discover Services' (Main Menu \u2192 1 \u2192 7) to import existing services,\n"
+                    "\U0001f4a1 Use 'Discover Services' (Main Menu \u2192 1 \u2192 5) to import existing services,\n"
                     "   or 'Add New Node' (Main Menu \u2192 1 \u2192 1) to create new instances.",
                     'yellow',
                 )
@@ -12693,7 +12693,7 @@ PY"""
                 if has_machines:
                     self.print_colored(
                         "Machines registered but no node instances configured.\n"
-                        "Use 'Discover Services' (Main Menu \u2192 1 \u2192 7) to import existing services first.",
+                        "Use 'Discover Services' (Main Menu \u2192 1 \u2192 5) to import existing services first.",
                         'red',
                     )
                 else:
