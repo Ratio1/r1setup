@@ -9,22 +9,26 @@
       # r1service in expert mode). If that is missing (setup role was
       # incomplete or this host was manually provisioned), fall back to
       # reading the same file the wrapper would have cat'd, directly via
-      # docker exec. The file path is extracted from the bundled copy of
-      # the edge_node script at ../remote_cmds/get_node_info so we have a
-      # single source of truth for the path and don't hardcode it in the
-      # playbook.
+      # docker exec. We embed the bundled edge_node script at
+      # ../remote_cmds/get_node_info into the shell task verbatim and
+      # extract the FILE=... line with grep — that way the playbook has a
+      # single source of truth for the path (the bundled script) without
+      # wrestling with YAML→Jinja regex escaping.
       vars:
         _node_info_cmd: "{{ r1setup_remote_get_node_info_command }}"
-        _bundled_script: "{{ lookup('file', playbook_dir + '/../remote_cmds/get_node_info') }}"
-        _container_file: "{{ _bundled_script | regex_search('FILE=([^\\s\\n]+)', '\\\\1') | first }}"
       ansible.builtin.shell: |
         set -o pipefail
         CMD={{ _node_info_cmd | quote }}
         FIRST_WORD="${CMD%% *}"
+        BUNDLED={{ lookup('file', playbook_dir + '/../remote_cmds/get_node_info') | quote }}
+        CONTAINER_FILE=$(printf '%s\n' "$BUNDLED" | grep -m1 -oE 'FILE=[^[:space:]]+' | cut -d= -f2-)
+
         if command -v "$FIRST_WORD" >/dev/null 2>&1; then
           eval "$CMD"
-        elif command -v docker >/dev/null 2>&1 && docker inspect {{ mnl_docker_container_name | quote }} >/dev/null 2>&1; then
-          docker exec -i {{ mnl_docker_container_name | quote }} bash -lc {{ ("cat " ~ _container_file) | quote }}
+        elif [ -n "$CONTAINER_FILE" ] \
+             && command -v docker >/dev/null 2>&1 \
+             && docker inspect {{ mnl_docker_container_name | quote }} >/dev/null 2>&1; then
+          docker exec -i {{ mnl_docker_container_name | quote }} bash -lc "cat ${CONTAINER_FILE}"
         else
           echo "neither '${FIRST_WORD}' wrapper nor container '{{ mnl_docker_container_name }}' is reachable on this host" >&2
           exit 1
