@@ -13235,6 +13235,18 @@ PY"""
             existing_instances = list(machine_record.get('instance_names') or [])
             topology_mode = str(machine_record.get('topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE)
 
+            # Single-machine discovery: if this is a fresh machine in this
+            # config and it already runs edge_node services, offer to import
+            # one of them as '{name}' instead of creating a fresh instance.
+            # Skip if machine is already tracked (existing_instances path
+            # below handles expert promotion).
+            if not existing_instances:
+                imported = self._offer_single_machine_discovery_import(bound_machine_id, name)
+                if imported:
+                    # Discovery imported a service under the requested name;
+                    # nothing left to do in this flow.
+                    return
+
             if existing_instances:
                 connection_display = self.config_manager._format_machine_connection_display(machine_record)
                 if topology_mode != 'expert':
@@ -13287,6 +13299,107 @@ PY"""
         self._save_configuration()
         self.print_colored(f"Node '{name}' added successfully!", 'green')
         self.print_colored("\n💡 Next: Deploy your updated configuration from Main Menu → Deployment Menu", 'cyan')
+
+    def _offer_single_machine_discovery_import(self, machine_id: str, desired_name: str) -> bool:
+        """Scan a single machine for running services and offer to import one.
+
+        Returns ``True`` if a service was imported under ``desired_name`` (in
+        which case ``_add_node`` should return without creating a fresh
+        instance). Returns ``False`` when no services are found, discovery
+        fails, the user declines, or the simple-mode one-per-machine rule
+        blocks a multi-service import.
+        """
+        mode = self.active_config.get('mode') or DEFAULT_CONFIG_MODE
+        config_env = self.active_config.get('environment') or self.get_mnl_app_env() or 'unknown'
+
+        self.print_colored(f"Scanning '{machine_id}' for existing edge_node services...", 'cyan')
+        scan = self.config_manager._batch_discover_machines([machine_id])
+        result = scan.get(machine_id) or {}
+        if result.get('status') != 'success':
+            # Discovery failed or machine unreachable — fall through silently
+            # so the caller can still create a fresh instance.
+            return False
+
+        candidates = result.get('candidates') or []
+        if not candidates:
+            self.print_colored("No existing services found on this machine.", 'cyan')
+            return False
+
+        # Filter by environment — only services matching the config env (or
+        # ambiguous env) are importable into this config.
+        matching = [
+            c for c in candidates
+            if c.get('environment') in (config_env, '', 'unknown')
+        ]
+        if not matching:
+            self.print_colored(
+                f"Found {len(candidates)} service(s), but none match the '{config_env}' environment. Creating a fresh instance instead.",
+                'yellow',
+            )
+            return False
+
+        if len(matching) > 1 and mode == CONFIG_MODE_SIMPLE:
+            self.print_colored(
+                f"This machine runs {len(matching)} services. Simple mode supports one node per machine.",
+                'yellow',
+            )
+            self.print_colored(
+                "Switch to Advanced Mode (Configuration Menu → 9) to import multiple services. "
+                "Creating a fresh instance for now.",
+                'yellow',
+            )
+            return False
+
+        # Show the matching services
+        self.print_section(f"Machine has {len(matching)} existing service(s)")
+        for i, c in enumerate(matching, 1):
+            self.print_colored(
+                f"  {i}) {c.get('service_name')} [{c.get('service_state', '?')}]",
+                'green',
+            )
+        print()
+
+        choice = self.get_input(
+            f"Import one of these services as '{desired_name}', or create a fresh instance? (i/f)",
+            "i",
+        ).lower()
+        if choice != 'i':
+            return False
+
+        # Pick which service to import (default = first)
+        if len(matching) == 1:
+            picked = matching[0]
+        else:
+            while True:
+                try:
+                    idx = int(self.get_input(f"Which service to import? (1-{len(matching)})", "1"))
+                    if 1 <= idx <= len(matching):
+                        picked = matching[idx - 1]
+                        break
+                except ValueError:
+                    pass
+                self.print_colored("Invalid selection.", 'red')
+
+        # Import it under the user-chosen name
+        import_result = self.import_discovery_candidates(
+            machine_id, [picked], {picked['service_name']: desired_name},
+        )
+        if import_result.get('status') == 'success':
+            self.print_colored(
+                f"✅ Imported service '{picked['service_name']}' as '{desired_name}'.",
+                'green',
+            )
+            self.print_colored(
+                "\n💡 Next: Deploy your updated configuration from Main Menu → Deployment Menu",
+                'cyan',
+            )
+            return True
+        else:
+            self.print_colored(
+                f"Import failed: {import_result.get('message', 'unknown error')}. Falling back to fresh instance.",
+                'red',
+            )
+            return False
 
     def _update_node(self) -> None:
         """Update an existing node"""
