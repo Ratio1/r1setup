@@ -11787,11 +11787,15 @@ PY"""
             }
 
         # Machines-only config: zero inventory hosts but machines registered
-        # in fleet state. Previously fell through to "✗ not deployed", which
-        # is misleading when the user has imported live edge_node runtimes
-        # via Register Machine. Surface the registered-machine count so the
-        # banner reflects reality.
-        if deployment_status == 'never_deployed':
+        # in fleet state. Surface the registered-machine count so the banner
+        # reflects reality for users who registered machines via the legacy
+        # Register Machine flow without ever creating node instances.
+        # When there ARE inventory hosts, the fleet machine count is noise —
+        # it's just a mirror of the per-host endpoints and confuses users
+        # who reasonably expect machine state to be implicit in the node list.
+        effective_inventory = inventory if inventory is not None else self.inventory
+        host_count = len(_get_gpu_hosts(effective_inventory))
+        if deployment_status == 'never_deployed' and host_count == 0:
             fleet_state = (
                 self.fleet_state
                 or (metadata.get('fleet_state') if metadata else None)
