@@ -4212,14 +4212,31 @@ class ConfigurationManager:
 
         new_config_name = new_name
 
-        try:
-            # Rename files
-            old_config_path = self.app.configs_dir / f"{old_config_name}.yml"
-            old_metadata_path = self.app.configs_dir / f"{old_config_name}.json"
-            new_config_path = self.app.configs_dir / f"{new_config_name}.yml"
-            new_metadata_path = self.app.configs_dir / f"{new_config_name}.json"
+        # References to a config name that need to stay in sync on rename
+        # (audit recorded in /home/vi/.../_todos/..._config_management_refactor.md):
+        #   * {name}.yml on disk                     — renamed below
+        #   * {name}.json on disk                    — renamed below
+        #   * metadata['config_name'] inside JSON    — updated below
+        #   * active_config['config_name'] in memory — updated below when active
+        #   * active_config.json on disk             — persisted via _save_active_config
+        #   * hosts.yml symlink                      — re-pointed via _update_hosts_symlink when active
+        # Backup snapshots in configs_dir/backups/ are historical and intentionally
+        # keep the original name. Fleet state is machine-keyed and independent of
+        # config_name. Host records carry no config_name field.
+        old_config_path = self.app.configs_dir / f"{old_config_name}.yml"
+        old_metadata_path = self.app.configs_dir / f"{old_config_name}.json"
+        new_config_path = self.app.configs_dir / f"{new_config_name}.yml"
+        new_metadata_path = self.app.configs_dir / f"{new_config_name}.json"
 
+        # Rename yml+json as a pair — if json rename fails, roll back yml.
+        try:
             old_config_path.rename(new_config_path)
+        except Exception as e:
+            self.app.print_colored(f"Error renaming configuration: {e}", 'red')
+            self.app.wait_for_enter()
+            return
+
+        try:
             if old_metadata_path.exists():
                 old_metadata_path.rename(new_metadata_path)
 
@@ -4239,6 +4256,11 @@ class ConfigurationManager:
 
             self.app.print_colored(f"Configuration renamed from '{old_config_name}' to '{new_config_name}'!", 'green')
         except Exception as e:
+            # Roll back the yml rename so state stays consistent
+            try:
+                new_config_path.rename(old_config_path)
+            except Exception:
+                pass
             self.app.print_colored(f"Error renaming configuration: {e}", 'red')
 
         self.app.wait_for_enter()
