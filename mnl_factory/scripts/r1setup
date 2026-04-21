@@ -12097,17 +12097,17 @@ PY"""
 
             self.print_colored("Configure Nodes Menu", 'cyan', bold=True)
             print()
-            # Option 1 (Add New Node) is always shown as long as the user has
+            # Option 1 (Add Node(s)) is always shown as long as the user has
             # an active config — including the empty zero-host shell that
-            # simple-mode creation produces on purpose. Edit/Remove are gated
-            # behind having at least one host.
-            self.print_colored("  1) Add New Node                   - Add node to existing config")
+            # simple-mode creation produces on purpose. After each node is
+            # added, the flow asks whether to add another, so there is no
+            # separate "Add Multiple Nodes" option. Edit/Remove are gated
+            # behind having at least one host. Create-new-config lives in
+            # Manage Configurations (Configuration Menu → 2 → n).
+            self.print_colored("  1) Add Node(s)                    - Add one or more nodes to this config")
             if hosts:
                 self.print_colored("  2) Edit Existing Node             - Modify node settings")
                 self.print_colored("  3) Remove Node                    - Delete node from config")
-            self.print_colored("  4) Create New Configuration       - Start fresh configuration")
-            if hosts and mode == CONFIG_MODE_ADVANCED:
-                self.print_colored("  5) Add Multiple Nodes             - Bulk-register N machines + nodes")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -12117,46 +12117,33 @@ PY"""
             if choice == '0':
                 break
             elif choice == '1':
-                self._add_node()
+                self._add_nodes_loop()
             elif choice == '2' and hosts:
                 self._update_node()
             elif choice == '3' and hosts:
                 self._delete_node()
-            elif choice == '4':
-                self._create_new_configuration()
-            elif choice == '5' and hosts and mode == CONFIG_MODE_ADVANCED:
-                self._add_multiple_nodes()
             else:
-                if hosts and mode == CONFIG_MODE_ADVANCED:
-                    valid = "0-5"
-                elif hosts:
-                    valid = "0-4"
-                else:
-                    valid = "1, 4, 0"
+                valid = "0-3" if hosts else "0, 1"
                 self.print_colored(f"Invalid option. Valid choices are {valid}.", 'red')
                 self.wait_for_enter()
 
-    def _add_multiple_nodes(self) -> None:
-        """Bulk-add nodes in advanced mode: prompt for a count, then loop Add Node.
+    def _add_nodes_loop(self) -> None:
+        """Add one or more nodes, prompting between each for another.
 
-        Reuses the same _add_node flow per iteration so discovery, binding,
-        and validation all behave identically to one-at-a-time adds. If any
-        iteration aborts (e.g. user cancels expert-mode promotion), the loop
-        stops cleanly without rolling back previously-added nodes.
+        Each iteration runs the full _add_node flow (name → SSH → bind →
+        per-machine service discovery → save), so any machine check that
+        would fail surfaces immediately rather than after a batch. If the
+        user wants to abort mid-sequence they just answer ``n`` at the
+        "Add another?" prompt.
         """
+        added = 0
         while True:
-            try:
-                count = int(self.get_input("How many nodes do you want to add? (1-20)", "2"))
-            except ValueError:
-                self.print_colored("Please enter a number.", 'red')
-                continue
-            if 1 <= count <= 20:
-                break
-            self.print_colored("Enter a number between 1 and 20.", 'red')
-
-        for i in range(count):
-            self.print_section(f"Adding node {i + 1} of {count}")
             self._add_node()
+            added += 1
+            if self.get_input(f"\nAdded {added} node(s). Add another? (y/n)", "y").lower() != 'y':
+                break
+        if added:
+            self.print_colored(f"✅ Finished. {added} node(s) added to the configuration.", 'green')
 
     def deployment_menu(self) -> None:
         """Show deployment submenu"""
