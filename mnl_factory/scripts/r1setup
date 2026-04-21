@@ -5680,12 +5680,22 @@ class DeploymentService:
         return max(int(base_timeout), int(minimum_timeout))
 
     def _machine_preparation_timeout(self) -> int:
-        """Timeout for fresh-machine preparation phases."""
-        return self._phase_timeout(self.app.connection_timeout, 600)
+        """Timeout for fresh-machine preparation phases.
+
+        Uses ``playbook_timeout`` (default 30 min) as the floor so things
+        like apt installs and Docker setup on a fresh box never hit a
+        short ceiling inherited from the probe-scoped ``connection_timeout``.
+        """
+        return self._phase_timeout(self.app.playbook_timeout, 600)
 
     def _instance_apply_timeout(self) -> int:
-        """Timeout for instance runtime apply/start phases."""
-        return self._phase_timeout(self.app.connection_timeout, 180)
+        """Timeout for instance runtime apply/start phases.
+
+        Uses ``playbook_timeout`` (default 30 min) as the floor — a first-
+        time ``docker pull`` of the edge_node image can easily take several
+        minutes on slow networks, which exceeded the previous 180 s floor.
+        """
+        return self._phase_timeout(self.app.playbook_timeout, 180)
 
     def _extract_successful_hosts_from_output(
         self,
