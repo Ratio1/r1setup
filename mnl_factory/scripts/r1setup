@@ -179,6 +179,24 @@ def _get_gpu_hosts(inventory: dict) -> dict:
     return inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
 
 
+def _format_env_badge(candidate: dict) -> str:
+    """Render the 'env=X (source)' badge for a discovered service candidate.
+
+    Shown inline at every import decision point so the operator can
+    confirm the service's network environment before answering (i/f).
+    """
+    env = candidate.get('environment') or 'unknown'
+    source = candidate.get('environment_source') or 'unknown'
+    short = {
+        'metadata': 'meta',
+        'service_environment': 'env',
+        'image_tag': 'image',
+        'unknown': '?',
+    }.get(source, source)
+    env_text = env if env != 'unknown' else '?'
+    return f"env={env_text} ({short})"
+
+
 def _parse_iso_to_datetime(value) -> Optional[datetime]:
     """Parse ISO datetime string to datetime object. Returns None on failure."""
     if not value:
@@ -1714,13 +1732,13 @@ class ConfigurationManager:
         self.app.print_section(f"Machine {machine_id}: {total_count} service(s) found")
         for c in matching:
             self.app.print_colored(
-                f"  {c['service_name']} [{c['service_state']}] {c.get('environment', '?')}"
+                f"  {c['service_name']} [{c['service_state']} · {_format_env_badge(c)}]"
                 f"  \u2190 matches this config",
                 'green',
             )
         for c in mismatched:
             self.app.print_colored(
-                f"  {c['service_name']} [{c['service_state']}] {c.get('environment', '?')}"
+                f"  {c['service_name']} [{c['service_state']} · {_format_env_badge(c)}]"
                 f"  \u2190 different environment",
                 'yellow',
             )
@@ -1730,10 +1748,29 @@ class ConfigurationManager:
             )
 
         if not matching:
-            self.app.print_colored(
-                f"\nNo {config_env} services on this machine. Skipping.", 'yellow',
-            )
-            return {'action': 'skipped', 'imported_count': 0, 'mode_switched_to': None}
+            # Offer a switch-env escape hatch when every candidate runs
+            # on the same alternate env — same prompt the single-machine
+            # import path uses, so the experience is consistent.
+            if mismatched:
+                action, new_env = self.app._prompt_env_mismatch_resolution(
+                    machine_id, config_env, mismatched,
+                )
+                if action == 'switch':
+                    self.app.set_mnl_app_env(new_env)
+                    self.app.print_colored(
+                        f"✓ Config env switched to {new_env}.", 'green',
+                    )
+                    config_env = new_env
+                    matching = [
+                        c for c in candidates
+                        if c.get('environment') in (config_env, '', 'unknown')
+                    ]
+                    mismatched = []
+            if not matching:
+                self.app.print_colored(
+                    f"\nNo {config_env} services on this machine. Skipping.", 'yellow',
+                )
+                return {'action': 'skipped', 'imported_count': 0, 'mode_switched_to': None}
 
         # 3. Multi-service topology rule: 2+ total services = expert
         needs_expert = total_count >= 2
@@ -12451,6 +12488,53 @@ PY"""
         )
         self.print_colored("💡 Next: Deploy from Main Menu → Deployment Menu", 'cyan')
 
+    def _prompt_env_mismatch_resolution(
+        self,
+        machine_id: str,
+        config_env: str,
+        mismatched: List[Dict[str, Any]],
+    ) -> Tuple[str, Optional[str]]:
+        """Ask the operator how to resolve a config-vs-service env mismatch.
+
+        Returns ``('abort', None)`` or ``('switch', new_env)``. Does not
+        mutate config env itself — the caller applies the switch so it
+        can decide when to re-evaluate candidates.
+        """
+        envs_seen = sorted({
+            c.get('environment') for c in mismatched if c.get('environment')
+        })
+        env_label = envs_seen[0] if len(envs_seen) == 1 else ', '.join(envs_seen)
+
+        self.print_colored(
+            f"⚠️  Machine '{machine_id}' runs service(s) on env={env_label}; "
+            f"this configuration is {config_env}.",
+            'yellow', bold=True,
+        )
+        self.print_colored(
+            "Importing or deploying without resolving this would stack "
+            "containers on different networks on the same host.",
+            'yellow',
+        )
+        print()
+        self.print_colored("  1) Abort - don't add this node (recommended)")
+        can_switch = (
+            len(envs_seen) == 1
+            and envs_seen[0] in DISCOVERY_KNOWN_ENVIRONMENTS
+        )
+        if can_switch:
+            self.print_colored(
+                f"  2) Switch this configuration to {envs_seen[0]} and import the existing service"
+            )
+            valid = ('1', '2')
+        else:
+            valid = ('1',)
+        choice = self.get_input("Select", "1")
+        if choice == '2' and can_switch:
+            return ('switch', envs_seen[0])
+        if choice not in valid:
+            self.print_colored("Invalid choice. Aborting.", 'red')
+        return ('abort', None)
+
     def _offer_import_from_candidates(
         self,
         machine_id: str,
@@ -12470,6 +12554,31 @@ PY"""
             c for c in candidates
             if c.get('environment') in (config_env, '', 'unknown')
         ]
+        mismatched = [c for c in candidates if c not in matching]
+
+        if not matching and mismatched:
+            # Every discovered service runs on a different env than the
+            # config. Silently falling through to fresh-instance creation
+            # would stack a second container on the host on the wrong
+            # network. Prompt instead.
+            action, new_env = self._prompt_env_mismatch_resolution(
+                machine_id, config_env, mismatched,
+            )
+            if action == 'abort':
+                self.print_colored(
+                    f"Skipping '{desired_name}'. No node was added.", 'yellow',
+                )
+                return False
+            # action == 'switch' — flip env and treat the previously
+            # mismatched candidates as the new matching set.
+            self.set_mnl_app_env(new_env)
+            self.print_colored(f"✓ Config env switched to {new_env}.", 'green')
+            config_env = new_env
+            matching = [
+                c for c in candidates
+                if c.get('environment') in (config_env, '', 'unknown')
+            ]
+
         if not matching:
             return False
 
@@ -12485,7 +12594,7 @@ PY"""
         self.print_section(f"Machine '{machine_id}' has {len(matching)} existing service(s)")
         for i, c in enumerate(matching, 1):
             self.print_colored(
-                f"  {i}) {c.get('service_name')} [{c.get('service_state', '?')}]",
+                f"  {i}) {c.get('service_name')} [{c.get('service_state', '?')} · {_format_env_badge(c)}]",
                 'green',
             )
         print()
@@ -13871,11 +13980,30 @@ PY"""
             c for c in candidates
             if c.get('environment') in (config_env, '', 'unknown')
         ]
-        if not matching:
-            self.print_colored(
-                f"Found {len(candidates)} service(s), but none match the '{config_env}' environment. Creating a fresh instance instead.",
-                'yellow',
+        mismatched = [c for c in candidates if c not in matching]
+
+        if not matching and mismatched:
+            # Every discovered service runs on a different env than the
+            # config. Falling through to fresh-instance creation would
+            # leave two containers on different networks on the same
+            # host. Give the operator a real choice.
+            action, new_env = self._prompt_env_mismatch_resolution(
+                machine_id, config_env, mismatched,
             )
+            if action == 'abort':
+                self.print_colored(
+                    f"Skipping '{desired_name}'. No node was added.", 'yellow',
+                )
+                return False
+            self.set_mnl_app_env(new_env)
+            self.print_colored(f"✓ Config env switched to {new_env}.", 'green')
+            config_env = new_env
+            matching = [
+                c for c in candidates
+                if c.get('environment') in (config_env, '', 'unknown')
+            ]
+
+        if not matching:
             return False
 
         if len(matching) > 1 and mode == CONFIG_MODE_SIMPLE:
@@ -13894,7 +14022,7 @@ PY"""
         self.print_section(f"Machine has {len(matching)} existing service(s)")
         for i, c in enumerate(matching, 1):
             self.print_colored(
-                f"  {i}) {c.get('service_name')} [{c.get('service_state', '?')}]",
+                f"  {i}) {c.get('service_name')} [{c.get('service_state', '?')} · {_format_env_badge(c)}]",
                 'green',
             )
         print()

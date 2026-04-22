@@ -2319,9 +2319,35 @@ class TestPhase3BatchDiscovery(unittest.TestCase):
         candidates = [
             {"service_name": "edge_node", "service_state": "active", "environment": "devnet"},
         ]
+        # Operator declines the switch-env offer -> abort -> skip.
+        cm.app._prompt_env_mismatch_resolution = MagicMock(return_value=('abort', None))
         result = cm._onboarding_review_machine_candidates("m-1", candidates, "testnet", "simple")
         self.assertEqual(result["action"], "skipped")
         self.assertEqual(result["imported_count"], 0)
+        cm.app._prompt_env_mismatch_resolution.assert_called_once()
+
+    def test_onboarding_review_switches_env_and_imports_on_mismatch(self):
+        cm = self._make_cm()
+        candidates = [
+            {"service_name": "edge_node", "service_state": "active", "environment": "devnet"},
+        ]
+        # Operator picks 'switch to devnet' -> candidates now match -> import proceeds.
+        cm.app._prompt_env_mismatch_resolution = MagicMock(return_value=('switch', 'devnet'))
+        cm.app.set_mnl_app_env = MagicMock()
+        cm.app._select_discovery_candidates = MagicMock(return_value=candidates)
+        cm.find_runtime_identity_claims = MagicMock(return_value=[])
+        cm.upsert_machine_record = MagicMock()
+        cm.app._prompt_discovery_import_name = MagicMock(return_value="edge_node")
+        cm.app.import_discovery_candidates = MagicMock(return_value={
+            "status": "success", "imported_names": ["edge_node"], "topology_mode": "standard",
+        })
+        cm.app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {}}}}}
+
+        result = cm._onboarding_review_machine_candidates("m-1", candidates, "testnet", "simple")
+
+        cm.app.set_mnl_app_env.assert_called_once_with('devnet')
+        self.assertEqual(result["action"], "imported")
+        self.assertEqual(result["imported_count"], 1)
 
     def test_onboarding_review_simple_mode_guardrail_skip(self):
         cm = self._make_cm()
