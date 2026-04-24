@@ -13338,6 +13338,9 @@ PY"""
             self.print_colored("\u2699\ufe0f  CUSTOMIZATION", 'cyan', bold=True)
             self.print_colored("  6) Customize Service     - Override service template variables")
             print()
+            self.print_colored("\U0001f4be DATA", 'cyan', bold=True)
+            self.print_colored("  7) Backup Node Data      - Download a tar.gz snapshot of a node's volume")
+            print()
             self.print_colored("  0) Back to Main Menu")
             print()
 
@@ -13350,8 +13353,8 @@ PY"""
                 self.print_colored("No nodes or machines configured. Please configure nodes first (Main Menu \u2192 1).", 'red')
                 self.wait_for_enter()
                 continue
-            # Service customization requires deployed node instances
-            elif choice == '6' and not has_config:
+            # Service customization and backup require deployed node instances
+            elif choice in ('6', '7') and not has_config:
                 if has_machines:
                     self.print_colored(
                         "Machines registered but no node instances configured.\n"
@@ -13374,8 +13377,10 @@ PY"""
                 self.ssh_key_management_menu()
             elif choice == '6':
                 self.customize_service()
+            elif choice == '7':
+                self.backup_node_data()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-6.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-7.", 'red')
                 self.wait_for_enter()
 
 
@@ -13531,8 +13536,233 @@ PY"""
             self.print_colored("  • Private keys have been saved locally", 'red')
             self.print_colored("  • Keep these files secure and delete when no longer needed", 'red')
             self.print_colored("  • These keys provide full access to node wallets", 'red')
-        
+
         self.wait_for_enter()
+
+    def backup_node_data(self) -> None:
+        """Download a tar.gz snapshot of a node's on-host data volume."""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured. Backup operates on deployed node instances.", 'red')
+            self.wait_for_enter()
+            return
+
+        self.print_header("Backup Node Data")
+        self.load_configuration()
+        hosts = _get_gpu_hosts(self.inventory)
+        if not hosts:
+            self.print_colored("No node instances found in inventory.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        host_names = list(hosts.keys())
+        if len(host_names) == 1:
+            selected = host_names[0]
+            self.print_colored(f"Only one instance configured: {selected}", 'cyan')
+        else:
+            self.print_colored("Available node instances:", 'cyan', bold=True)
+            for i, name in enumerate(host_names, 1):
+                cfg = hosts[name]
+                ip = cfg.get('ansible_host', '?')
+                user = cfg.get('ansible_user', '?')
+                self.print_colored(f"  {i}) {name}  —  {user}@{ip}")
+            print()
+            selected = None
+            while selected is None:
+                pick = self.get_input(f"Select instance (1-{len(host_names)}, 0=cancel)", "0")
+                if pick == '0':
+                    self.print_colored("Backup cancelled.", 'yellow')
+                    return
+                try:
+                    idx = int(pick) - 1
+                    if 0 <= idx < len(host_names):
+                        selected = host_names[idx]
+                        break
+                except ValueError:
+                    pass
+                self.print_colored("Invalid selection.", 'red')
+
+        host_config = hosts[selected]
+        volume_path = host_config.get('mnl_docker_volume_path') or DEFAULT_RUNTIME_VOLUME_PATH
+        self.print_colored(f"\nInstance:    {selected}", 'white')
+        self.print_colored(
+            f"Host:        {host_config.get('ansible_user', '?')}@{host_config.get('ansible_host', '?')}",
+            'white',
+        )
+        self.print_colored(f"Volume path: {volume_path}", 'white')
+
+        default_dest = str(Path.home() / 'r1setup-backups')
+        dest_input = self.get_input("\nLocal destination directory", default_dest)
+        dest_dir = Path(os.path.expanduser((dest_input or default_dest).strip()))
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.print_colored(f"❌ Cannot create destination directory {dest_dir}: {e}", 'red')
+            self.wait_for_enter()
+            return
+        if not os.access(dest_dir, os.W_OK):
+            self.print_colored(f"❌ Destination directory is not writable: {dest_dir}", 'red')
+            self.wait_for_enter()
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive_path = dest_dir / f"{selected}-{timestamp}.tar.gz"
+
+        stop_for_backup = self.get_input(
+            "\nStop node during backup for file-consistency safety? (Y/n)", "y"
+        ).strip().lower() != 'n'
+        if not stop_for_backup:
+            self.print_colored(
+                "⚠️  Live backup: SQLite/log files may be captured mid-write.",
+                'yellow',
+            )
+
+        self.print_colored("\n\U0001f50d Pre-flight checks...", 'cyan')
+        size_probe = self.migration_planner._probe_remote_path_size(host_config, volume_path)
+        if size_probe.get('status') != 'success':
+            self.print_colored(
+                f"❌ Could not probe source volume size: {size_probe.get('message', 'unknown error')}",
+                'red',
+            )
+            self.wait_for_enter()
+            return
+        source_bytes = int(size_probe.get('bytes', 0))
+        try:
+            local_free = shutil.disk_usage(dest_dir).free
+        except OSError as e:
+            self.print_colored(f"❌ Cannot probe local free space: {e}", 'red')
+            self.wait_for_enter()
+            return
+        needed = int(source_bytes * 1.1)
+        fmt = self.migration_planner._format_bytes
+        self.print_colored(f"   Source volume: {fmt(source_bytes)}", 'white')
+        self.print_colored(f"   Local free:    {fmt(local_free)} (need ~{fmt(needed)})", 'white')
+        if local_free < needed:
+            self.print_colored(
+                f"❌ Local destination does not have enough free space "
+                f"(need {fmt(needed)}, have {fmt(local_free)}).",
+                'red',
+            )
+            self.wait_for_enter()
+            return
+
+        self.print_colored(f"\n\U0001f4e6 Archive target: {archive_path}", 'cyan')
+        if self.get_input("Proceed with backup? (y/n)", "y").strip().lower() != 'y':
+            self.print_colored("Backup cancelled.", 'yellow')
+            return
+
+        stopped_by_us = False
+        if stop_for_backup:
+            self.print_colored("\n\U0001f6d1 Stopping node...", 'cyan')
+            if not self._run_instance_lifecycle_playbook(selected, 'service_stop.yml', 'backup_stop'):
+                self.print_colored("❌ Failed to stop node. Aborting backup.", 'red')
+                self.wait_for_enter()
+                return
+            stopped_by_us = True
+
+        try:
+            self.print_colored("\n\U0001f4e5 Streaming archive (this may take a while)...", 'cyan')
+            stream_result = self._stream_remote_archive_to_local(host_config, volume_path, archive_path)
+            if stream_result.get('status') != 'success':
+                self.print_colored(
+                    f"❌ Archive failed: {stream_result.get('message', 'unknown error')}",
+                    'red',
+                )
+                try:
+                    if archive_path.exists():
+                        archive_path.unlink()
+                        self.print_colored(f"   Removed partial archive: {archive_path}", 'yellow')
+                except OSError:
+                    pass
+                return
+
+            try:
+                written = archive_path.stat().st_size
+            except OSError:
+                written = 0
+            self.print_colored("\n✅ Backup complete.", 'green', bold=True)
+            self.print_colored(f"   Path:   {archive_path}", 'white')
+            self.print_colored(f"   Size:   {fmt(written)}", 'white')
+            try:
+                checksum = self.migration_planner._compute_local_checksum(archive_path)
+                self.print_colored(f"   SHA256: {checksum}", 'white')
+            except OSError as e:
+                self.print_colored(f"   (could not compute checksum: {e})", 'yellow')
+        finally:
+            if stopped_by_us:
+                self.print_colored("\n\U0001f680 Restarting node...", 'cyan')
+                if not self._run_instance_lifecycle_playbook(selected, 'service_start.yml', 'backup_start'):
+                    self.print_colored(
+                        f"⚠️  Failed to restart node '{selected}'. "
+                        "Start it manually from Operations Menu → Start Service.",
+                        'red',
+                    )
+
+        self.wait_for_enter()
+
+    def _run_instance_lifecycle_playbook(
+        self,
+        instance_name: str,
+        playbook_name: str,
+        action_label: str,
+    ) -> bool:
+        """Run a lifecycle playbook (start/stop) against a single instance."""
+        playbook_path = self.config_dir / 'playbooks' / playbook_name
+        if not playbook_path.exists():
+            self.print_colored(f"Playbook not found: {playbook_path}", 'red')
+            return False
+        success, _, _, _ = self.run_generated_playbook(
+            playbook_path,
+            [instance_name],
+            machine_scope=False,
+            last_applied_action=action_label,
+            show_output=False,
+            timeout=self.playbook_timeout,
+        )
+        return bool(success)
+
+    def _stream_remote_archive_to_local(
+        self,
+        host_config: Dict[str, Any],
+        remote_volume_path: str,
+        local_archive_path: Path,
+    ) -> Dict[str, Any]:
+        """Stream a tar.gz of the remote volume into a local file via SSH."""
+        if not remote_volume_path:
+            return {'status': 'error', 'message': 'Missing remote volume path'}
+        tar_cmd = f"tar -C {shlex.quote(remote_volume_path)} -czf - ."
+        remote_command = self.migration_planner._build_remote_root_shell_command(host_config, tar_cmd)
+        try:
+            ssh_cmd = self._build_machine_ssh_command(host_config, remote_command)
+        except ValueError as e:
+            return {'status': 'error', 'message': str(e)}
+
+        proc = None
+        err = b''
+        try:
+            with open(local_archive_path, 'wb') as out:
+                proc = subprocess.Popen(ssh_cmd, stdout=out, stderr=subprocess.PIPE)
+                try:
+                    _, err = proc.communicate()
+                except KeyboardInterrupt:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    return {'status': 'error', 'message': 'Interrupted by user'}
+        except FileNotFoundError as e:
+            return {'status': 'error', 'message': f'ssh executable not found: {e}'}
+        except OSError as e:
+            return {'status': 'error', 'message': f'Local write error: {e}'}
+
+        if proc is None or proc.returncode != 0:
+            err_text = (err or b'').decode('utf-8', errors='replace').strip() or 'Remote tar failed'
+            return {
+                'status': 'error',
+                'message': err_text,
+                'returncode': proc.returncode if proc else None,
+            }
+        return {'status': 'success'}
 
     def _select_network_environment(self) -> str:
         """Select network environment"""
