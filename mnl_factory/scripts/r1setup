@@ -65,10 +65,11 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.8.1"
+    CLI_VERSION = "1.9.0"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
+DEBUG_ANSIBLE = False  # Set via --debug-ansible; enables Ansible -vvv and debug stdout callback
 
 # Version information
 UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Ratio1/r1setup/refs/heads/main/mnl_factory/scripts/ver.py"
@@ -141,7 +142,10 @@ INSTALL_TRACKING_FIELDS = (
     INSTALL_ATTEMPTED_AT_FIELD,
     INSTALL_ATTEMPTED_RESULT_FIELD,
 )
-CONFIG_SCHEMA_VERSION = 1
+CONFIG_SCHEMA_VERSION = 2
+CONFIG_MODE_SIMPLE = 'simple'
+CONFIG_MODE_ADVANCED = 'advanced'
+DEFAULT_CONFIG_MODE = CONFIG_MODE_SIMPLE
 DEFAULT_MACHINE_TOPOLOGY_MODE = 'standard'
 DEFAULT_MACHINE_DEPLOYMENT_STATE = 'unknown'
 DEFAULT_RUNTIME_SERVICE_NAME = 'edge_node'
@@ -173,6 +177,24 @@ DISCOVERY_KNOWN_ENVIRONMENTS = ('mainnet', 'testnet', 'devnet')
 def _get_gpu_hosts(inventory: dict) -> dict:
     """Extract gpu_nodes hosts from an inventory dict."""
     return inventory.get('all', {}).get('children', {}).get('gpu_nodes', {}).get('hosts', {})
+
+
+def _format_env_badge(candidate: dict) -> str:
+    """Render the 'env=X (source)' badge for a discovered service candidate.
+
+    Shown inline at every import decision point so the operator can
+    confirm the service's network environment before answering (i/f).
+    """
+    env = candidate.get('environment') or 'unknown'
+    source = candidate.get('environment_source') or 'unknown'
+    short = {
+        'metadata': 'meta',
+        'service_environment': 'env',
+        'image_tag': 'image',
+        'unknown': '?',
+    }.get(source, source)
+    env_text = env if env != 'unknown' else '?'
+    return f"env={env_text} ({short})"
 
 
 def _parse_iso_to_datetime(value) -> Optional[datetime]:
@@ -1090,6 +1112,25 @@ class SettingsManager:
         """SSH ConnectTimeout derived from connection_timeout. Floor of 10s."""
         return max(10, self.connection_timeout // 3)
 
+    @property
+    def playbook_timeout(self) -> int:
+        """Wall-clock ceiling (seconds) for an Ansible playbook run.
+
+        Playbooks do full remote work (installs, deletions, migrations)
+        and routinely take many minutes — the per-probe
+        ``connection_timeout`` (30-600s) is not the right ceiling. Default
+        is 30 minutes; settable via the ``playbook_timeout`` preference
+        and clamped to [300, 7200] (5 min - 2 h).
+        """
+        val = self.get('playbook_timeout')
+        if val in (None, ''):
+            val = 1800
+        try:
+            val = int(val)
+        except (TypeError, ValueError):
+            val = 1800
+        return max(300, min(7200, val))
+
     def settings_menu(self):
         """Interactive toggle UI for user preferences."""
         while True:
@@ -1171,6 +1212,7 @@ class ConfigurationManager:
             'created_at': None,
             'nodes_count': 0,
             'config_schema_version': CONFIG_SCHEMA_VERSION,
+            'mode': DEFAULT_CONFIG_MODE,
             'last_deployed_date': None,
             'last_deployed_network': None,
             'deployment_status': 'never_deployed',
@@ -1179,6 +1221,21 @@ class ConfigurationManager:
             'last_written_collection_version': None,
             'last_written_at': None,
         }
+
+    @staticmethod
+    def _derive_legacy_mode(fleet_state: Optional[Dict[str, Any]]) -> str:
+        """Infer config mode for a legacy config missing the ``mode`` field.
+
+        If any machine in the fleet has ``topology_mode == 'expert'`` (i.e.
+        multi-instance), the config is treated as advanced. Otherwise simple.
+        """
+        if not isinstance(fleet_state, dict):
+            return DEFAULT_CONFIG_MODE
+        machines = (fleet_state.get('fleet') or {}).get('machines') or {}
+        for machine in machines.values():
+            if str((machine or {}).get('topology_mode') or '').strip() == 'expert':
+                return CONFIG_MODE_ADVANCED
+        return CONFIG_MODE_SIMPLE
 
     def _load_active_config(self) -> None:
         """Load the active configuration settings"""
@@ -1190,6 +1247,7 @@ class ConfigurationManager:
             'created_at': None,
             'nodes_count': 0,
             'config_schema_version': CONFIG_SCHEMA_VERSION,
+            'mode': DEFAULT_CONFIG_MODE,
             'last_deployed_date': None,
             'last_deployed_network': None,
             'deployment_status': 'never_deployed',
@@ -1204,8 +1262,27 @@ class ConfigurationManager:
                 with open(self.app.active_config_file) as f:
                     loaded_config = json.load(f)
                     self.app.print_debug(f"Loaded active config from file: {loaded_config}")
+
+                    # Warn once if the on-disk config declares a newer schema
+                    # than this CLI knows about. We still try to load it.
+                    loaded_version = int(loaded_config.get('config_schema_version') or 0)
+                    if loaded_version > CONFIG_SCHEMA_VERSION:
+                        self.app.print_colored(
+                            f"Warning: active config declares schema v{loaded_version}; this CLI supports v{CONFIG_SCHEMA_VERSION}. "
+                            "Some fields may be ignored. Consider upgrading r1setup.",
+                            'yellow',
+                        )
+
                     self.active_config.update(loaded_config)
                     self.fleet_state = self._normalize_fleet_state(loaded_config.get('fleet_state'))
+
+                    # Legacy derivation: configs written by older CLI versions
+                    # have no ``mode`` field. Infer it from per-machine topology
+                    # and fold it back into active_config so downstream code
+                    # sees a normalized value. The next save will persist it.
+                    if not loaded_config.get('mode'):
+                        self.active_config['mode'] = self._derive_legacy_mode(loaded_config.get('fleet_state'))
+
                     self.app.print_debug(f"Final active config after update: {self.active_config}")
 
                 # Ensure network environment is synchronized after loading active config
@@ -1237,15 +1314,23 @@ class ConfigurationManager:
     # -- Shared config-creation primitives (Phase 1) --
 
     def _prompt_new_config_name(self) -> str:
-        """Prompt the operator for a valid configuration base name."""
+        """Prompt the operator for a valid and unique configuration base name."""
         self.app.print_colored("\n📝 Configuration Naming", 'cyan', bold=True)
         self.app.print_colored("Give your configuration a meaningful name to identify it later.", 'yellow')
         self.app.print_colored("Examples: 'production-cluster', 'test-env', 'gpu-farm-1'", 'white')
         while True:
             custom_name = self.app.get_input("Enter configuration name (letters, numbers, -, _)", required=True)
-            if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
-                return custom_name
-            self.app.print_colored("Invalid name. Use only letters, numbers, hyphens (-), and underscores (_)", 'red')
+            if not re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
+                self.app.print_colored("Invalid name. Use only letters, numbers, hyphens (-), and underscores (_)", 'red')
+                continue
+            clash = self._is_config_name_taken(custom_name)
+            if clash:
+                self.app.print_colored(
+                    f"A configuration named '{custom_name}' already exists ({clash}). Choose a different name.",
+                    'red',
+                )
+                continue
+            return custom_name
 
     def _prompt_new_config_environment(self) -> str:
         """Prompt for network environment and persist the selection."""
@@ -1457,27 +1542,49 @@ class ConfigurationManager:
         return counts
 
     def _create_machine_first_configuration(self) -> None:
-        """Create a machine-first configuration: register machines, zero hosts."""
+        """Create a new configuration.
+
+        Simple mode produces an empty zero-host shell — the user adds nodes
+        one at a time via Configure Nodes → Add New Node. Advanced mode runs
+        the full bulk machine-first flow (register N machines up front, run
+        batch discovery, gap-fill fresh instances).
+        """
         self.app.print_section("Create New Configuration")
 
         custom_name = self._prompt_new_config_name()
         env = self._prompt_new_config_environment()
         config_mode = self._select_configuration_mode()
-        num_machines = self._prompt_machine_count()
-        config_name = self._generate_config_name(num_machines, custom_name, unit='m')
+        config_name = custom_name
 
         self._reset_inventory_for_new_config()
 
         # Save config shell first (required before upsert_machine_record)
-        self.ensure_configuration_shell(config_name, env)
+        self.ensure_configuration_shell(config_name, env, mode=config_mode)
+
+        # Simple mode: shell is ready — drop straight into the Add Node(s)
+        # loop so the user isn't bounced through a separate menu just to
+        # populate the config they just created. The loop itself asks
+        # "Add another?" after each node; answering n finishes and returns
+        # here. Adding nodes later is still available at any time from
+        # Configure Nodes → Add Node(s).
+        if config_mode == CONFIG_MODE_SIMPLE:
+            self.app.print_section("Configuration Summary")
+            self.app.print_colored(
+                f"Simple-mode configuration '{config_name}' created and activated.",
+                'green',
+            )
+            self.app.print_colored("\nLet's add your first node now.", 'cyan')
+            self.app._add_nodes_loop(add_another_default='y')
+            return
+
+        # Advanced mode: run the full bulk machine-first flow.
+        num_machines = self._prompt_machine_count()
 
         # Register machines
         registered_ids = self._collect_machine_registration_entries(num_machines)
 
         # Advanced mode: collect desired instance counts per machine
-        desired_counts: Dict[str, int] = {}
-        if config_mode == 'advanced':
-            desired_counts = self._collect_advanced_instance_counts(registered_ids)
+        desired_counts: Dict[str, int] = self._collect_advanced_instance_counts(registered_ids)
 
         # Offer batch discovery and import
         discovery_result = self._onboarding_batch_discovery_and_import(
@@ -1625,13 +1732,13 @@ class ConfigurationManager:
         self.app.print_section(f"Machine {machine_id}: {total_count} service(s) found")
         for c in matching:
             self.app.print_colored(
-                f"  {c['service_name']} [{c['service_state']}] {c.get('environment', '?')}"
+                f"  {c['service_name']} [{c['service_state']} · {_format_env_badge(c)}]"
                 f"  \u2190 matches this config",
                 'green',
             )
         for c in mismatched:
             self.app.print_colored(
-                f"  {c['service_name']} [{c['service_state']}] {c.get('environment', '?')}"
+                f"  {c['service_name']} [{c['service_state']} · {_format_env_badge(c)}]"
                 f"  \u2190 different environment",
                 'yellow',
             )
@@ -1641,10 +1748,29 @@ class ConfigurationManager:
             )
 
         if not matching:
-            self.app.print_colored(
-                f"\nNo {config_env} services on this machine. Skipping.", 'yellow',
-            )
-            return {'action': 'skipped', 'imported_count': 0, 'mode_switched_to': None}
+            # Offer a switch-env escape hatch when every candidate runs
+            # on the same alternate env — same prompt the single-machine
+            # import path uses, so the experience is consistent.
+            if mismatched:
+                action, new_env = self.app._prompt_env_mismatch_resolution(
+                    machine_id, config_env, mismatched,
+                )
+                if action == 'switch':
+                    self.app.set_mnl_app_env(new_env)
+                    self.app.print_colored(
+                        f"✓ Config env switched to {new_env}.", 'green',
+                    )
+                    config_env = new_env
+                    matching = [
+                        c for c in candidates
+                        if c.get('environment') in (config_env, '', 'unknown')
+                    ]
+                    mismatched = []
+            if not matching:
+                self.app.print_colored(
+                    f"\nNo {config_env} services on this machine. Skipping.", 'yellow',
+                )
+                return {'action': 'skipped', 'imported_count': 0, 'mode_switched_to': None}
 
         # 3. Multi-service topology rule: 2+ total services = expert
         needs_expert = total_count >= 2
@@ -1903,25 +2029,6 @@ class ConfigurationManager:
 
         return created_count
 
-    def _generate_config_name(self, nodes_count: int, custom_name: str = None, *, unit: str = 'n') -> str:
-        """Generate a configuration name with user input, timestamp and metadata.
-
-        The *unit* suffix defaults to ``'n'`` (node count) for existing callers.
-        Machine-first flows pass ``unit='m'`` so the resulting name reflects
-        machine count instead of the (initially zero) node count.
-        """
-        if not custom_name:
-            custom_name = self._prompt_new_config_name()
-
-        # Generate timestamp components
-        now = datetime.now()
-        date_str = now.strftime('%Y%m%d')  # YYYYMMDD
-        time_str = now.strftime('%H%M')    # HHMM
-
-        config_name = f"{custom_name}_{date_str}_{time_str}_{nodes_count}{unit}"
-
-        return config_name
-
     def _list_available_configs(self) -> List[Tuple[str, Dict]]:
         """List all available configurations with their metadata"""
         configs = []
@@ -1961,6 +2068,24 @@ class ConfigurationManager:
         # Sort by creation time, newest first
         configs.sort(key=lambda x: x[1]['created_at'], reverse=True)
         return configs
+
+    def _is_config_name_taken(self, base_name: str) -> Optional[str]:
+        """Check whether a configuration with this name already exists.
+
+        Returns the offending filename (e.g. ``"alpha.yml"``) when
+        ``{base_name}.yml`` is already present in ``configs_dir``, or
+        ``None`` when the name is free.
+
+        Legacy timestamped filenames are not back-parsed: a user typing
+        ``prod-cluster`` is allowed even if
+        ``prod-cluster_20260101_0900_2m.yml`` exists on disk, because
+        they are distinct filenames and the legacy file is displayed
+        as-is.
+        """
+        candidate = self.app.configs_dir / f"{base_name}.yml"
+        if candidate.exists():
+            return candidate.name
+        return None
 
     def find_runtime_identity_claims(
         self,
@@ -2457,10 +2582,10 @@ class ConfigurationManager:
         """Return a deep copy of the current fleet state."""
         return copy.deepcopy(self.fleet_state)
 
-    def ensure_configuration_shell(self, config_name: str, environment: str) -> None:
+    def ensure_configuration_shell(self, config_name: str, environment: str, mode: Optional[str] = None) -> None:
         """Persist the current empty-or-existing inventory as an active configuration shell."""
         hosts = _get_gpu_hosts(self.app.inventory)
-        self._save_config_with_metadata(config_name, environment, len(hosts), update_symlink=True)
+        self._save_config_with_metadata(config_name, environment, len(hosts), update_symlink=True, mode=mode)
 
     def upsert_machine_record(self, machine_id: str, machine_data: Dict[str, Any]) -> None:
         """Persist or update a machine record in the current fleet state."""
@@ -2689,8 +2814,14 @@ class ConfigurationManager:
         """Return the metadata path for a named configuration."""
         return configs_dir / f"{config_name}.json"
 
-    def _save_config_with_metadata(self, config_name: str, environment: str, nodes_count: int, update_symlink: bool = True) -> None:
-        """Save configuration with metadata"""
+    def _save_config_with_metadata(self, config_name: str, environment: str, nodes_count: int, update_symlink: bool = True, mode: Optional[str] = None) -> None:
+        """Save configuration with metadata.
+
+        ``mode`` sets the config-level UI mode (``'simple'`` or ``'advanced'``).
+        When ``None``, the existing mode is preserved from disk metadata; if
+        the on-disk metadata also lacks it (legacy), it is derived from the
+        fleet's per-machine topology.
+        """
         config_path = self.app.configs_dir / f"{config_name}.yml"
         metadata_path = self._metadata_path_for_config(self.app.configs_dir, config_name)
 
@@ -2748,6 +2879,12 @@ class ConfigurationManager:
         metadata['environment'] = environment
         metadata['nodes_count'] = nodes_count
         metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
+        # Config mode: explicit parameter wins; otherwise preserve existing;
+        # otherwise fall back to legacy derivation.
+        if mode is not None:
+            metadata['mode'] = mode
+        elif not metadata.get('mode'):
+            metadata['mode'] = self._derive_legacy_mode(metadata.get('fleet_state') or self.fleet_state)
         # Version stamping: record the CLI + collection versions that wrote
         # this config, plus the write timestamp, so post-mortems can reason
         # about what tooling produced it. Added in 1.8.0; older configs gain
@@ -3107,9 +3244,10 @@ class ConfigurationManager:
         hosts = _get_gpu_hosts(self.app.inventory)
         nodes_count = len(hosts)
 
-        # Generate config name if not set
+        # Prompt for a name if not set (covers legacy / edge cases only — normal
+        # creation flows always set a name before we reach this save path).
         if not self.active_config.get('config_name'):
-            config_name = self._generate_config_name(nodes_count)
+            config_name = self._prompt_new_config_name()
             self._save_config_with_metadata(config_name, env, nodes_count, update_symlink=True)
         else:
             # Update existing config - no need to update symlink since we're not switching configs
@@ -3948,133 +4086,271 @@ class ConfigurationManager:
         }
 
     def manage_configurations_menu(self) -> None:
-        """Show configuration management submenu"""
+        """Show configuration management top-level menu.
+
+        The list of configs lives behind option 1 (Change/manage a
+        configuration), not inline, so the top-level menu stays short
+        regardless of how many configs are on disk. Picking option 1
+        opens the list-then-action picker.
+        """
         while True:
             self.app.print_header("Configuration Management")
 
-            # List available configurations
             configs = self._list_available_configs()
+            active_config_name = self.active_config.get('config_name') or 'none'
+            self.app.print_colored(f"Active: {active_config_name}", 'cyan')
+            self.app.print_colored(f"Saved configurations: {len(configs)}", 'white')
+            print()
+
+            action_labels: List[str] = []
+            action_handlers: List[Any] = []
+
+            if configs:
+                action_labels.append("Change / manage a configuration")
+                action_handlers.append(
+                    lambda cfgs=configs: self._change_configuration_picker(cfgs)
+                )
+
+            action_labels.append("Create new configuration")
+            action_handlers.append(self._create_machine_first_configuration)
+
+            action_labels.append("Import configuration from .r1config file")
+            action_handlers.append(self._import_configuration)
+
+            action_labels.append("Restore configuration from backup")
+            action_handlers.append(self._restore_configuration)
+
+            if self.active_config.get('config_name'):
+                action_labels.append("Quick-export current active configuration")
+                action_handlers.append(self._quick_export_current)
+
+            for i, label in enumerate(action_labels, 1):
+                self.app.print_colored(f"  {i}) {label}")
+            self.app.print_colored("  0) Back to Configuration Menu")
+            print()
+
+            try:
+                choice = int(self.app.get_input("Select option", "0"))
+            except ValueError:
+                self.app.print_colored("Please enter a number.", 'red')
+                self.app.wait_for_enter()
+                continue
+
+            if choice == 0:
+                break
+
+            idx = choice - 1
+            if 0 <= idx < len(action_handlers):
+                action_handlers[idx]()
+                continue
+
+            self.app.print_colored(
+                f"Invalid option. Valid choices are 0-{len(action_handlers)}.",
+                'red',
+            )
+            self.app.wait_for_enter()
+
+    def _change_configuration_picker(
+        self,
+        configs: List[Tuple[str, Dict]],
+    ) -> None:
+        """Show the list of configs and let the user pick one to manage.
+
+        Picking a config drops into the per-config action submenu
+        (Use / Rename / Backup / Export / Delete).
+        """
+        if not configs:
+            self.app.print_colored("No saved configurations.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        while True:
+            self.app.print_header("Change / Manage Configuration")
             active_config_name = self.active_config.get('config_name')
 
-            if configs:
-                self.app.print_section(f"Available Configurations ({len(configs)})")
-                for i, (config_name, metadata) in enumerate(configs, 1):
-                    # Remove .yml extension and format display
-                    display_name = config_name.replace('.yml', '')
-                    env = metadata.get('environment', 'unknown')
-                    nodes = metadata.get('nodes_count', 0)
-                    created = metadata.get('created_at', '')
-                    description = metadata.get('description', '')
-
-                    # Extract custom name from the config name (everything before the first timestamp)
-                    # Format: customname_YYYYMMDD_HHMM_Nnodes_environment
-                    custom_name = display_name
-                    if '_' in display_name:
-                        parts = display_name.split('_')
-                        if len(parts) >= 2:
-                            # Find where the timestamp starts (8 digits)
-                            for idx, part in enumerate(parts):
-                                if len(part) == 8 and part.isdigit():
-                                    custom_name = '_'.join(parts[:idx])
-                                    break
-
-                    # Format creation date
-                    created_str = _parse_iso_datetime(created) or "Unknown"
-
-                    # Mark active configuration
-                    active_marker = " ← ACTIVE" if display_name == active_config_name else ""
-
-                    self.app.print_colored(f"  {i}. {custom_name}", 'cyan' if active_marker else 'white', bold=bool(active_marker))
-                    info_line = f"     {env} | {nodes} node(s) | {created_str}{active_marker}"
-                    if description:
-                        info_line = f"     {description} | {created_str}{active_marker}"
-
-                    # Add deployment status info
-                    deployment_status = metadata.get('deployment_status', 'never_deployed')
-                    last_deployed_date = metadata.get('last_deployed_date')
-                    last_deployed_network = metadata.get('last_deployed_network')
-                    last_deleted_date = metadata.get('last_deleted_date')
-                    # Per-host variant rollup replaces the retired
-                    # fleet-level last_deployment_type field.
-                    variant_summary = self.install_variant_summary(
-                        metadata.get('inventory') or self.app.inventory
-                    )
-
-                    if deployment_status == 'deployed' and last_deployed_date:
-                        deployed_str = _parse_iso_datetime(last_deployed_date)
-                        if deployed_str:
-                            deployment_info = f"🚀 Last deployed: {deployed_str}"
-                            if last_deployed_network:
-                                deployment_info += f" ({last_deployed_network}"
-                            if variant_summary and variant_summary != 'no installs yet':
-                                deployment_info += f", {variant_summary})"
-                            elif last_deployed_network:
-                                deployment_info += ")"
-                        else:
-                            deployment_info = "🚀 Deployed"
-                    elif deployment_status == 'deleted' and last_deleted_date:
-                        deleted_str = _parse_iso_datetime(last_deleted_date)
-                        if deleted_str:
-                            deployment_info = f"🗑️ Last deleted: {deleted_str}"
-                        else:
-                            deployment_info = "🗑️ Deleted"
-                    else:
-                        deployment_info = "📋 Never deployed"
-
-                    self.app.print_colored(info_line, 'green' if active_marker else 'white')
-                    deployment_color = 'cyan' if deployment_status == 'deployed' else 'red' if deployment_status == 'deleted' else 'yellow'
-                    self.app.print_colored(f"     {deployment_info}", deployment_color)
-                print()
-
-            self.app.print_colored("Manage Configurations Menu", 'cyan', bold=True)
+            self.app.print_section(f"Available Configurations ({len(configs)})")
+            for i, (config_name, metadata) in enumerate(configs, 1):
+                self._render_config_list_entry(i, config_name, metadata, active_config_name)
             print()
-            self.app.print_colored("  1) Create New Configuration       - Set up new configuration")
-            if configs:
-                self.app.print_colored("  2) Switch Configuration          - Activate different configuration")
-                self.app.print_colored("  3) Delete Configuration          - Remove saved configuration")
-                self.app.print_colored("  4) Rename Configuration          - Change configuration name")
-                self.app.print_colored("")
-                self.app.print_colored("  5) Backup Configuration          - Save configuration backup")
-                self.app.print_colored("  6) Restore Configuration         - Restore from backup")
-                self.app.print_colored("  7) Export Configuration          - Create portable config file")
-                self.app.print_colored("  8) Quick Export Current Config   - Export active config")
+            self.app.print_colored("  0) Back", 'white')
+            print()
+
+            try:
+                choice = int(self.app.get_input("Pick a configuration number", "0"))
+            except ValueError:
+                self.app.print_colored("Please enter a number.", 'red')
+                self.app.wait_for_enter()
+                continue
+
+            if choice == 0:
+                return
+            if 1 <= choice <= len(configs):
+                self._config_action_submenu(configs[choice - 1], configs)
+                # Refresh the list since the submenu may have renamed/deleted
+                configs = self._list_available_configs()
+                if not configs:
+                    return
+                continue
+
+            self.app.print_colored(
+                f"Invalid number. Pick 1-{len(configs)} or 0 to go back.",
+                'red',
+            )
+            self.app.wait_for_enter()
+
+    def _render_config_list_entry(
+        self,
+        index: int,
+        config_filename: str,
+        metadata: Dict,
+        active_config_name: Optional[str],
+    ) -> None:
+        """Render one row of the manage-configurations picker list."""
+        display_name = config_filename.replace('.yml', '')
+        env = metadata.get('environment', 'unknown')
+        nodes = metadata.get('nodes_count', 0)
+        mode = metadata.get('mode') or DEFAULT_CONFIG_MODE
+        created = metadata.get('created_at', '')
+        description = metadata.get('description', '')
+
+        created_str = _parse_iso_datetime(created) or "Unknown"
+        active_marker = " ← ACTIVE" if display_name == active_config_name else ""
+
+        self.app.print_colored(
+            f"  {index}. {display_name}",
+            'cyan' if active_marker else 'white',
+            bold=bool(active_marker),
+        )
+        info_line = f"     {env} | {mode} | {nodes} node(s) | {created_str}{active_marker}"
+        if description:
+            info_line = f"     {description} | {mode} | {created_str}{active_marker}"
+
+        deployment_status = metadata.get('deployment_status', 'never_deployed')
+        last_deployed_date = metadata.get('last_deployed_date')
+        last_deployed_network = metadata.get('last_deployed_network')
+        last_deleted_date = metadata.get('last_deleted_date')
+        variant_summary = self.install_variant_summary(
+            metadata.get('inventory') or self.app.inventory
+        )
+
+        if deployment_status == 'deployed' and last_deployed_date:
+            deployed_str = _parse_iso_datetime(last_deployed_date)
+            if deployed_str:
+                deployment_info = f"🚀 Last deployed: {deployed_str}"
+                if last_deployed_network:
+                    deployment_info += f" ({last_deployed_network}"
+                if variant_summary and variant_summary != 'no installs yet':
+                    deployment_info += f", {variant_summary})"
+                elif last_deployed_network:
+                    deployment_info += ")"
             else:
-                self.app.print_colored("  7) Export Configuration          - Create portable config file (no configs)")
-                self.app.print_colored("  8) Quick Export Current          - Export active config")
-            self.app.print_colored("  9) Import Configuration          - Import from portable file")
+                deployment_info = "🚀 Deployed"
+        elif deployment_status == 'deleted' and last_deleted_date:
+            deleted_str = _parse_iso_datetime(last_deleted_date)
+            deployment_info = f"🗑️ Last deleted: {deleted_str}" if deleted_str else "🗑️ Deleted"
+        else:
+            deployment_info = "📋 Never deployed"
+
+        self.app.print_colored(info_line, 'green' if active_marker else 'white')
+        deployment_color = (
+            'cyan' if deployment_status == 'deployed'
+            else 'red' if deployment_status == 'deleted'
+            else 'yellow'
+        )
+        self.app.print_colored(f"     {deployment_info}", deployment_color)
+
+    def _config_action_submenu(
+        self,
+        selected: Tuple[str, Dict],
+        configs: List[Tuple[str, Dict]],
+    ) -> None:
+        """Per-config action submenu: Use / Rename / Backup / Export / Delete."""
+        config_name = selected[0].replace('.yml', '')
+
+        while True:
+            self.app.print_section(f"Actions for '{config_name}'")
+            is_active = self.active_config.get('config_name') == config_name
+            active_note = " (currently active)" if is_active else ""
+            self.app.print_colored(f"  1) Use this config{active_note}   - Switch to it and open node management")
+            self.app.print_colored("  2) Rename")
+            self.app.print_colored("  3) Backup")
+            self.app.print_colored("  4) Export")
+            self.app.print_colored("  5) Delete")
             print()
-            self.app.print_colored("  0) Back to Main Menu")
+            self.app.print_colored("  0) Back")
             print()
 
-            choice = self.app.get_input("Select option", "0")
+            choice = self.app.get_input("Select", "0")
 
             if choice == '0':
-                break
-            elif choice == '1':
-                self._create_machine_first_configuration()
-            elif choice == '2' and configs:
-                self._switch_configuration(configs)
-            elif choice == '3' and configs:
-                self._delete_configuration(configs)
-            elif choice == '4' and configs:
-                self._rename_configuration(configs)
-            elif choice == '5' and configs:
-                self._backup_configuration(configs)
-            elif choice == '6' and configs:
-                self._restore_configuration()
-            elif choice == '7':
-                if configs:
-                    self._export_configuration(configs)
-                else:
-                    self.app.print_colored("No configurations available to export.", 'yellow')
-                    self.app.wait_for_enter()
-            elif choice == '8':
-                self._quick_export_current()
-            elif choice == '9':
-                self._import_configuration()
-            else:
-                self.app.print_colored("Invalid option. Valid choices are 0-9.", 'red')
-                self.app.wait_for_enter()
+                return
+            if choice == '1':
+                self._use_config(config_name)
+                return
+            if choice == '2':
+                self._rename_configuration([selected])
+                return
+            if choice == '3':
+                self._backup_configuration([selected])
+                return
+            if choice == '4':
+                self._export_configuration([selected])
+                return
+            if choice == '5':
+                self._delete_configuration([selected])
+                return
+            self.app.print_colored("Invalid option. Valid choices are 0-5.", 'red')
+            self.app.wait_for_enter()
+
+    def _use_config(self, config_name: str) -> None:
+        """Switch to ``config_name`` and open Configure Nodes.
+
+        Snapshot+rollback: on any failure during the switch, restore the
+        prior active-config state (in-memory + symlink) so the CLI never
+        ends up half-switched.
+        """
+        if self.active_config.get('config_name') == config_name:
+            # Already active — skip the switch, just open node management.
+            self.app.configure_nodes_menu()
+            return
+
+        # Snapshot for rollback
+        snapshot = {
+            'active_config': copy.deepcopy(self.active_config),
+            'fleet_state': copy.deepcopy(self.fleet_state),
+            'inventory': copy.deepcopy(self.app.inventory),
+            'symlink_target': None,
+        }
+        try:
+            if self.app.config_file.is_symlink():
+                snapshot['symlink_target'] = os.readlink(str(self.app.config_file))
+        except OSError:
+            pass
+
+        try:
+            if not self._load_config_by_name(config_name):
+                raise RuntimeError(f"_load_config_by_name returned False for '{config_name}'")
+        except Exception as e:
+            # Restore from snapshot
+            self.active_config = snapshot['active_config']
+            self.fleet_state = snapshot['fleet_state']
+            self.app.inventory = snapshot['inventory']
+            try:
+                if self.app.config_file.is_symlink():
+                    self.app.config_file.unlink()
+                if snapshot['symlink_target']:
+                    self.app.config_file.symlink_to(snapshot['symlink_target'])
+            except OSError:
+                pass
+            self.app.print_colored(
+                f"❌ Failed to switch to '{config_name}': {e}. Previous active config restored.",
+                'red',
+            )
+            self.app.wait_for_enter()
+            return
+
+        self.app.print_colored(f"→ Switched active configuration to '{config_name}'.", 'green')
+        self.app.configure_nodes_menu()
 
     def _switch_configuration(self, configs: List[Tuple[str, Dict]]) -> None:
         """Switch to a different configuration"""
@@ -4123,6 +4399,18 @@ class ConfigurationManager:
             except ValueError:
                 self.app.print_colored("Please enter a number", 'red')
 
+        was_active = self.active_config.get('config_name') == selected_config
+
+        self.app.print_colored(
+            f"⚠️  Deleting '{selected_config}' removes its YAML, metadata, and (if active) clears the symlink.",
+            'yellow',
+        )
+        if was_active:
+            self.app.print_colored(
+                "This is the currently ACTIVE configuration. After deletion the main menu will gate "
+                "deployment/operations entries until you pick or create another one.",
+                'yellow',
+            )
         if self.app.get_input(f"Delete configuration '{selected_config}'? (y/n)", "n").lower() == 'y':
             config_path = self.app.configs_dir / f"{selected_config}.yml"
             metadata_path = self.app.configs_dir / f"{selected_config}.json"
@@ -4134,18 +4422,27 @@ class ConfigurationManager:
                 if metadata_path.exists():
                     metadata_path.unlink()
 
-                # If this was the active config, clear it
-                if self.active_config.get('config_name') == selected_config:
+                # If this was the active config, clear active state fully:
+                # in-memory active_config, fleet_state, on-disk active_config.json,
+                # and the hosts.yml symlink. Callers see a clean no-active state.
+                if was_active:
                     self.active_config = {
                         'config_name': None,
                         'environment': None,
                         'created_at': None,
                         'nodes_count': 0,
+                        'config_schema_version': CONFIG_SCHEMA_VERSION,
+                        'mode': DEFAULT_CONFIG_MODE,
                         'last_deployed_date': None,
                         'last_deployed_network': None,
                         'deployment_status': 'never_deployed',
-                        'last_deleted_date': None,
+                        'last_deleted_date': datetime.now().isoformat(),
+                        'last_written_cli_version': None,
+                        'last_written_collection_version': None,
+                        'last_written_at': None,
                     }
+                    self.fleet_state = self._default_fleet_state()
+                    self.app.inventory = {'all': {'children': {'gpu_nodes': {'hosts': {}}}}}
                     self._save_active_config()
 
                     # Remove symlink
@@ -4153,6 +4450,11 @@ class ConfigurationManager:
                         self.app.config_file.unlink()
 
                 self.app.print_colored(f"Configuration '{selected_config}' deleted successfully!", 'green')
+                if was_active:
+                    self.app.print_colored(
+                        "No configuration is active. Open Manage Configurations to pick or create one.",
+                        'cyan',
+                    )
             except Exception as e:
                 self.app.print_colored(f"Error deleting configuration: {e}", 'red')
 
@@ -4186,37 +4488,49 @@ class ConfigurationManager:
             self.app.wait_for_enter()
             return
 
-        # Generate new config name with timestamp and metadata (like the original creation)
-        # Extract environment and node count from existing metadata
+        # Self-rename is a silent no-op (not an error).
+        if new_name == old_config_name:
+            self.app.print_colored("New name is the same as current name — no change.", 'yellow')
+            self.app.wait_for_enter()
+            return
+
+        # Uniqueness check (exempt self-match by filename)
+        clash = self._is_config_name_taken(new_name)
+        if clash and clash != f"{old_config_name}.yml":
+            self.app.print_colored(
+                f"A configuration named '{new_name}' already exists ({clash}). Choose a different name.",
+                'red',
+            )
+            self.app.wait_for_enter()
+            return
+
+        new_config_name = new_name
+
+        # References to a config name that need to stay in sync on rename
+        # (audit recorded in /home/vi/.../_todos/..._config_management_refactor.md):
+        #   * {name}.yml on disk                     — renamed below
+        #   * {name}.json on disk                    — renamed below
+        #   * metadata['config_name'] inside JSON    — updated below
+        #   * active_config['config_name'] in memory — updated below when active
+        #   * active_config.json on disk             — persisted via _save_active_config
+        #   * hosts.yml symlink                      — re-pointed via _update_hosts_symlink when active
+        # Backup snapshots in configs_dir/backups/ are historical and intentionally
+        # keep the original name. Fleet state is machine-keyed and independent of
+        # config_name. Host records carry no config_name field.
+        old_config_path = self.app.configs_dir / f"{old_config_name}.yml"
         old_metadata_path = self.app.configs_dir / f"{old_config_name}.json"
-        nodes_count = 1
-        environment = 'mainnet'
+        new_config_path = self.app.configs_dir / f"{new_config_name}.yml"
+        new_metadata_path = self.app.configs_dir / f"{new_config_name}.json"
 
-        if old_metadata_path.exists():
-            try:
-                with open(old_metadata_path) as f:
-                    metadata = json.load(f)
-                nodes_count = metadata.get('nodes_count', 1)
-                environment = metadata.get('environment', 'mainnet')
-            except Exception:
-                pass
-
-        new_config_name = self._generate_config_name(nodes_count, new_name)
-
-        # Check if new name already exists
-        if (self.app.configs_dir / f"{new_config_name}.yml").exists():
-            self.app.print_colored("A configuration with this name already exists!", 'red')
+        # Rename yml+json as a pair — if json rename fails, roll back yml.
+        try:
+            old_config_path.rename(new_config_path)
+        except Exception as e:
+            self.app.print_colored(f"Error renaming configuration: {e}", 'red')
             self.app.wait_for_enter()
             return
 
         try:
-            # Rename files
-            old_config_path = self.app.configs_dir / f"{old_config_name}.yml"
-            old_metadata_path = self.app.configs_dir / f"{old_config_name}.json"
-            new_config_path = self.app.configs_dir / f"{new_config_name}.yml"
-            new_metadata_path = self.app.configs_dir / f"{new_config_name}.json"
-
-            old_config_path.rename(new_config_path)
             if old_metadata_path.exists():
                 old_metadata_path.rename(new_metadata_path)
 
@@ -4236,6 +4550,11 @@ class ConfigurationManager:
 
             self.app.print_colored(f"Configuration renamed from '{old_config_name}' to '{new_config_name}'!", 'green')
         except Exception as e:
+            # Roll back the yml rename so state stays consistent
+            try:
+                new_config_path.rename(old_config_path)
+            except Exception:
+                pass
             self.app.print_colored(f"Error renaming configuration: {e}", 'red')
 
         self.app.wait_for_enter()
@@ -4375,12 +4694,16 @@ class ConfigurationManager:
                 except Exception:
                     pass
 
-            # Generate proper configuration name
-            restored_config_name = self._generate_config_name(nodes_count, new_name)
+            # Use the user-provided name directly
+            restored_config_name = new_name
 
             # Check if restored name already exists
-            if (self.app.configs_dir / f"{restored_config_name}.yml").exists():
-                self.app.print_colored("A configuration with this name already exists!", 'red')
+            clash = self._is_config_name_taken(restored_config_name)
+            if clash:
+                self.app.print_colored(
+                    f"A configuration named '{restored_config_name}' already exists ({clash}).",
+                    'red',
+                )
                 self.app.wait_for_enter()
                 return
 
@@ -4402,6 +4725,10 @@ class ConfigurationManager:
                 metadata['config_name'] = restored_config_name
                 metadata['restored_from'] = backup_name
                 metadata['restored_at'] = datetime.now().isoformat()
+                # Legacy backups may predate the mode field — derive if missing.
+                if not metadata.get('mode'):
+                    metadata['mode'] = self._derive_legacy_mode(metadata.get('fleet_state'))
+                metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
 
                 with open(restored_metadata_path, 'w') as f:
                     json.dump(metadata, f, indent=2)
@@ -4590,12 +4917,10 @@ class ConfigurationManager:
 
             # Get new configuration name
             suggested_name = self.app.get_input(f"Configuration name [{original_name}]", original_name)
+            final_config_name = suggested_name
 
-            # Generate proper config filename
-            final_config_name = self._generate_config_name(nodes_count, suggested_name)
-
-            # Check if config already exists
-            if (self.app.configs_dir / f"{final_config_name}.yml").exists():
+            # Check if config already exists (prompt for overwrite)
+            if self._is_config_name_taken(final_config_name):
                 if self.app.get_input(f"Configuration '{final_config_name}' already exists. Overwrite? (y/n)", "n").lower() != 'y':
                     self.app.print_colored("Import cancelled.", 'yellow')
                     self.app.wait_for_enter()
@@ -4611,6 +4936,11 @@ class ConfigurationManager:
             updated_metadata['imported_at'] = datetime.now().isoformat()
             updated_metadata['imported_from'] = str(import_path)
             updated_metadata['original_name'] = original_name
+            # Ensure mode is populated. If the imported metadata was written
+            # by a pre-v2 CLI it may lack the field — derive from fleet state.
+            if not updated_metadata.get('mode'):
+                updated_metadata['mode'] = self._derive_legacy_mode(updated_metadata.get('fleet_state'))
+            updated_metadata['config_schema_version'] = CONFIG_SCHEMA_VERSION
 
             # Save configuration files
             with open(config_path, 'w') as f:
@@ -5152,10 +5482,12 @@ class NodeStatusTracker:
             self.app.wait_for_enter()
             return
 
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+        debug_env = "ANSIBLE_STDOUT_CALLBACK=debug " if DEBUG_ANSIBLE else ""
+        verbosity = " -vvv" if DEBUG_ANSIBLE else ""
+        cmd = (f"{debug_env}ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
                f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.app.config_file} {playbook_path}")
+               f"ansible-playbook{verbosity} -i {self.app.config_file} {playbook_path}")
 
         self.app.print_colored("\n🔍 Checking actual service status on all nodes...", 'cyan')
         self.app.print_debug(f"Running ansible command: {cmd}")
@@ -5385,12 +5717,22 @@ class DeploymentService:
         return max(int(base_timeout), int(minimum_timeout))
 
     def _machine_preparation_timeout(self) -> int:
-        """Timeout for fresh-machine preparation phases."""
-        return self._phase_timeout(self.app.connection_timeout, 600)
+        """Timeout for fresh-machine preparation phases.
+
+        Uses ``playbook_timeout`` (default 30 min) as the floor so things
+        like apt installs and Docker setup on a fresh box never hit a
+        short ceiling inherited from the probe-scoped ``connection_timeout``.
+        """
+        return self._phase_timeout(self.app.playbook_timeout, 600)
 
     def _instance_apply_timeout(self) -> int:
-        """Timeout for instance runtime apply/start phases."""
-        return self._phase_timeout(self.app.connection_timeout, 180)
+        """Timeout for instance runtime apply/start phases.
+
+        Uses ``playbook_timeout`` (default 30 min) as the floor — a first-
+        time ``docker pull`` of the edge_node image can easily take several
+        minutes on slow networks, which exceeded the previous 180 s floor.
+        """
+        return self._phase_timeout(self.app.playbook_timeout, 180)
 
     def _extract_successful_hosts_from_output(
         self,
@@ -5876,7 +6218,7 @@ class DeploymentService:
             machine_scope=False,
             last_applied_action='delete_edge_node',
             show_output=True,
-            timeout=self.app.connection_timeout,
+            timeout=self.app.playbook_timeout,
         )
 
         if success:
@@ -8736,10 +9078,12 @@ class SSHKeyManager:
         host_limit = ','.join(selected_hosts)
         extra_vars_path = None
         try:
-            cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+            debug_env = "ANSIBLE_STDOUT_CALLBACK=debug " if DEBUG_ANSIBLE else ""
+            verbosity = " -vvv" if DEBUG_ANSIBLE else ""
+            cmd = (f"{debug_env}ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
                    f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
                    f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-                   f"ansible-playbook -i {self.app.config_file} --limit {host_limit} {playbook_path}")
+                   f"ansible-playbook{verbosity} -i {self.app.config_file} --limit {host_limit} {playbook_path}")
 
             if extra_vars:
                 with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tmp:
@@ -9712,14 +10056,11 @@ class R1Setup:
     def _create_machine_first_configuration(self):
         return self.config_manager._create_machine_first_configuration()
 
-    def _generate_config_name(self, nodes_count, custom_name=None, *, unit='n'):
-        return self.config_manager._generate_config_name(nodes_count, custom_name, unit=unit)
-
     def _list_available_configs(self):
         return self.config_manager._list_available_configs()
 
-    def _save_config_with_metadata(self, config_name, environment, nodes_count, update_symlink=True):
-        return self.config_manager._save_config_with_metadata(config_name, environment, nodes_count, update_symlink)
+    def _save_config_with_metadata(self, config_name, environment, nodes_count, update_symlink=True, mode=None):
+        return self.config_manager._save_config_with_metadata(config_name, environment, nodes_count, update_symlink, mode=mode)
 
     def _update_hosts_symlink(self, config_path):
         return self.config_manager._update_hosts_symlink(config_path)
@@ -9780,8 +10121,8 @@ class R1Setup:
     def get_fleet_state_copy(self):
         return self.config_manager.get_fleet_state_copy()
 
-    def ensure_configuration_shell(self, config_name, environment):
-        return self.config_manager.ensure_configuration_shell(config_name, environment)
+    def ensure_configuration_shell(self, config_name, environment, mode=None):
+        return self.config_manager.ensure_configuration_shell(config_name, environment, mode=mode)
 
     def upsert_machine_record(self, machine_id, machine_data):
         return self.config_manager.upsert_machine_record(machine_id, machine_data)
@@ -9853,6 +10194,64 @@ class R1Setup:
 
     def _get_real_time_node_status(self):
         return self.status_tracker._get_real_time_node_status()
+
+    def _reconcile_deployment_status_from_probes(
+        self,
+        node_status_data: Dict[str, Dict[str, Any]],
+    ) -> None:
+        """Reconcile config-level ``deployment_status`` with probe results.
+
+        Called right after Node Status & Info collects fresh node probes.
+        Rule: if any node is observed running, flip the config-level
+        deployment_status to ``'deployed'`` (overriding a stale
+        ``'deleted'`` or ``'never_deployed'`` left over from past actions).
+        Non-running probe results do NOT downgrade a ``'deployed'`` config
+        to ``'deleted'`` — unreachable or stopped could be transient, and
+        only an explicit Delete operation should mark the config as
+        deleted.
+        """
+        if not node_status_data:
+            return
+        any_running = any(
+            (data or {}).get('status') == 'running'
+            for data in node_status_data.values()
+        )
+        if not any_running:
+            return
+
+        current = self.active_config.get('deployment_status')
+        if current == 'deployed':
+            return  # already correct
+
+        self.active_config['deployment_status'] = 'deployed'
+        # last_deployed_date is "when a deploy was last written." Don't
+        # forge a timestamp; leave the old value (or None) so the label
+        # says "Deployed" without claiming a false deploy date.
+        self.config_manager._save_active_config()
+
+        # Also persist to the per-config metadata file. Otherwise the next
+        # _save_config_with_metadata call reads the stale on-disk status
+        # (e.g. 'deleted' from a prior delete) and resurrects it into the
+        # in-memory active_config, silently regressing the reconciled state.
+        config_name = self.active_config.get('config_name')
+        if config_name:
+            metadata_path = self.configs_dir / f"{config_name}.json"
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path) as f:
+                        metadata = json.load(f)
+                    if metadata.get('deployment_status') != 'deployed':
+                        metadata['deployment_status'] = 'deployed'
+                        with open(metadata_path, 'w') as f:
+                            json.dump(metadata, f, indent=2)
+                except (OSError, ValueError) as exc:
+                    self.print_debug(
+                        f"Reconcile: could not sync metadata file {metadata_path}: {exc}"
+                    )
+
+        self.print_debug(
+            f"Reconciled deployment_status: {current!r} → 'deployed' based on live probes"
+        )
 
     # -- SSHKeyManager delegation stubs --
     def migrate_legacy_ssh_metadata(self):
@@ -9936,6 +10335,10 @@ class R1Setup:
     @property
     def ssh_connect_timeout(self) -> int:
         return self.settings_manager.ssh_connect_timeout
+
+    @property
+    def playbook_timeout(self) -> int:
+        return self.settings_manager.playbook_timeout
 
     # -- Service override helpers --
 
@@ -10204,12 +10607,7 @@ class R1Setup:
         )
         execution_host_names = self._get_execution_inventory_host_names(execution_inventory)
 
-        cmd = (
-            f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-            f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-            f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-            f"ansible-playbook -i {shlex.quote(str(inventory_path))} {shlex.quote(str(playbook_path))}"
-        )
+        cmd = self._build_ansible_playbook_command(inventory_path, playbook_path)
 
         if machine_scope:
             payload = self.build_machine_extra_vars(extra_vars)
@@ -10231,6 +10629,32 @@ class R1Setup:
 
         return success, output, execution_host_names, execution_inventory
 
+    def _build_ansible_playbook_command(
+        self,
+        inventory_path: Path,
+        playbook_path: Path,
+    ) -> str:
+        """Build the base `ansible-playbook` shell command.
+
+        When DEBUG_ANSIBLE is active, injects ``ANSIBLE_STDOUT_CALLBACK=debug``
+        and the ``-vvv`` verbosity flag so users see the full task-level
+        output and per-module details.
+        """
+        env_prefix = (
+            f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+            f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
+            f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
+        )
+        if DEBUG_ANSIBLE:
+            env_prefix += "ANSIBLE_STDOUT_CALLBACK=debug "
+
+        verbosity = " -vvv" if DEBUG_ANSIBLE else ""
+        return (
+            f"{env_prefix}"
+            f"ansible-playbook{verbosity} "
+            f"-i {shlex.quote(str(inventory_path))} {shlex.quote(str(playbook_path))}"
+        )
+
     def run_custom_inventory_playbook(
         self,
         playbook_path: Path,
@@ -10246,12 +10670,7 @@ class R1Setup:
         inventory_path, execution_inventory = self._write_provided_execution_inventory(execution_inventory)
         execution_host_names = self._get_execution_inventory_host_names(execution_inventory)
 
-        cmd = (
-            f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
-            f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
-            f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-            f"ansible-playbook -i {shlex.quote(str(inventory_path))} {shlex.quote(str(playbook_path))}"
-        )
+        cmd = self._build_ansible_playbook_command(inventory_path, playbook_path)
         if machine_scope:
             payload = self.build_machine_extra_vars(extra_vars)
         else:
@@ -10520,9 +10939,14 @@ class R1Setup:
         probe_path.mkdir(parents=True, exist_ok=True)
         return shutil.disk_usage(probe_path).free
 
-    @staticmethod
-    def _build_machine_ssh_command(machine_config: Dict[str, Any], remote_command: str) -> List[str]:
-        """Build an SSH command list for a machine-scoped remote command."""
+    def _build_machine_ssh_command(self, machine_config: Dict[str, Any], remote_command: str) -> List[str]:
+        """Build an SSH command list for a machine-scoped remote command.
+
+        Matches the SSH hardening of sibling probes (``_probe_machine_specs``
+        etc.): disables interactive host-key verification and host-key
+        persistence so a fresh machine or a changed remote identity doesn't
+        block a non-mutating probe with a ``yes/no/[fingerprint]`` prompt.
+        """
         host = machine_config.get('ansible_host', '')
         user = machine_config.get('ansible_user', '')
         if not host or not user:
@@ -10539,7 +10963,14 @@ class R1Setup:
                 key_file = os.path.expanduser(key_file)
             ssh_cmd.extend(['-i', str(key_file)])
 
-        ssh_cmd.extend([f"{user}@{host}", remote_command])
+        ssh_cmd.extend([
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=/dev/null',
+            '-o', 'BatchMode=yes',
+            '-o', f'ConnectTimeout={getattr(self, "ssh_connect_timeout", 10)}',
+            f"{user}@{host}",
+            remote_command,
+        ])
         if 'ansible_ssh_pass' in machine_config:
             return ['sshpass', '-p', machine_config['ansible_ssh_pass']] + ssh_cmd
         return ssh_cmd
@@ -11392,16 +11823,10 @@ PY"""
         self.print_colored("This can be an empty fleet configuration with no deployed nodes yet.", 'white')
         print()
 
-        while True:
-            custom_name = self.get_input("Enter configuration name (letters, numbers, -, _)", required=True)
-            if re.match(r'^[a-zA-Z0-9_-]+$', custom_name):
-                break
-            self.print_colored("Invalid name. Use only letters, numbers, hyphens (-), and underscores (_)", 'red')
-
+        config_name = self.config_manager._prompt_new_config_name()
         env = self._select_network_environment()
         self.set_mnl_app_env(env)
-        config_name = self._generate_config_name(0, custom_name)
-        self.ensure_configuration_shell(config_name, env)
+        self.ensure_configuration_shell(config_name, env, mode=DEFAULT_CONFIG_MODE)
         self.print_colored(f"Configuration '{config_name}' created and activated.", 'green')
         return True
 
@@ -11555,11 +11980,15 @@ PY"""
             }
 
         # Machines-only config: zero inventory hosts but machines registered
-        # in fleet state. Previously fell through to "✗ not deployed", which
-        # is misleading when the user has imported live edge_node runtimes
-        # via Register Machine. Surface the registered-machine count so the
-        # banner reflects reality.
-        if deployment_status == 'never_deployed':
+        # in fleet state. Surface the registered-machine count so the banner
+        # reflects reality for users who registered machines via the legacy
+        # Register Machine flow without ever creating node instances.
+        # When there ARE inventory hosts, the fleet machine count is noise —
+        # it's just a mirror of the per-host endpoints and confuses users
+        # who reasonably expect machine state to be implicit in the node list.
+        effective_inventory = inventory if inventory is not None else self.inventory
+        host_count = len(_get_gpu_hosts(effective_inventory))
+        if deployment_status == 'never_deployed' and host_count == 0:
             fleet_state = (
                 self.fleet_state
                 or (metadata.get('fleet_state') if metadata else None)
@@ -11677,27 +12106,39 @@ PY"""
                     'cyan'
                 )
 
+        has_active = active_config_name != 'None'
+        gated_suffix = "" if has_active else "  (disabled — no active config)"
+        gated_color = 'white' if has_active else 'yellow'
+
         self.print_section("R1Setup Main Menu")
         print()
         self.print_colored("\U0001f4cb CONFIGURATION", 'cyan', bold=True)
         self.print_colored("  1) Configuration Menu      - Node setup, environments, and management")
         print()
         self.print_colored("\U0001f680 DEPLOYMENT", 'cyan', bold=True)
-        self.print_colored("  2) Deployment Menu         - Deploy, delete, and manage deployments")
+        self.print_colored(f"  2) Deployment Menu         - Deploy, delete, and manage deployments{gated_suffix}", gated_color)
         print()
         self.print_colored("\U0001f527 OPERATIONS", 'cyan', bold=True)
-        self.print_colored("  3) Operations Menu         - Start, stop, restart service and test connectivity")
+        self.print_colored(f"  3) Operations Menu         - Start, stop, restart service and test connectivity{gated_suffix}", gated_color)
         print()
         self.print_colored("\U0001f4ca MONITORING & INFO", 'cyan', bold=True)
-        self.print_colored("  4) Node Status & Info      - Get latest info and show detailed status")
-        self.print_colored("  5) Node Addresses & Export - Display addresses and export to CSV")
+        self.print_colored(f"  4) Node Status & Info      - Get latest info and show detailed status{gated_suffix}", gated_color)
+        self.print_colored(f"  5) Node Addresses & Export - Display addresses and export to CSV{gated_suffix}", gated_color)
         print()
         self.print_colored("\u2699\ufe0f  SETTINGS & TOOLS", 'cyan', bold=True)
         self.print_colored("  6) Settings                - Toggle live status display and preferences")
-        self.print_colored("  7) Advanced Menu           - SSH, logs, and security tools")
+        self.print_colored(f"  7) Advanced Menu           - SSH, logs, and security tools{gated_suffix}", gated_color)
         print()
         self.print_colored("  0) Exit")
         print()
+
+        if not has_active:
+            self.print_colored(
+                "\U0001f4a1 No active configuration. Use 1) Configuration Menu → Manage Configurations "
+                "to pick or create one before using other menus.",
+                'yellow',
+            )
+            print()
 
         # Show contextual suggestion
         _, hint = self._get_suggested_action()
@@ -11706,7 +12147,15 @@ PY"""
             print()
 
     def configuration_menu(self) -> None:
-        """Show configuration submenu"""
+        """Show configuration submenu.
+
+        Layout is mode-driven. Simple mode shows only the core options
+        (shared slots 1-5) and an upgrade-to-advanced toggle at slot 9.
+        Advanced mode adds Register Machine (6) and Fleet Summary (7).
+        The 'Machines: N registered' counter is intentionally hidden —
+        machine membership is implicit in the node list (simple) or
+        visible via Fleet Summary (advanced).
+        """
         while True:
             self.print_header("Configuration Menu")
 
@@ -11715,6 +12164,7 @@ PY"""
             has_shell = self.has_active_config_shell()
             current_env = self.get_mnl_app_env()
             active_config_name = self.active_config.get('config_name', 'None')
+            mode = self.active_config.get('mode') or DEFAULT_CONFIG_MODE
 
             self.print_section("Current Status")
             self.print_colored(f"Active Config: {active_config_name if active_config_name != 'None' else '✗ No active config'}",
@@ -11724,27 +12174,36 @@ PY"""
                                'green' if is_configured else 'red')
             self.print_colored(f"Network: {current_env if current_env else '✗ Not set'}",
                                'green' if current_env else 'red')
+            self.print_colored(f"Mode: {mode}",
+                               'cyan' if mode == CONFIG_MODE_ADVANCED else 'white')
 
-            # Show node/machine counts
+            # Show node count for the active config. Machine count is
+            # intentionally hidden: in simple mode it is redundant with the
+            # node list; in advanced mode it is reachable via Fleet Summary.
             if has_config or has_shell:
                 self.load_configuration()
                 hosts = _get_gpu_hosts(self.inventory)
                 if hosts:
                     self.print_colored(f"Nodes: {len(hosts)} configured", 'cyan')
-                fleet_state = self.get_fleet_state_copy()
-                machines = fleet_state.get('fleet', {}).get('machines', {})
-                if machines:
-                    self.print_colored(f"Machines: {len(machines)} registered", 'cyan')
 
-            self.print_colored("Configuration Menu", 'cyan', bold=True)
             print()
-            self.print_colored("  1) Configure Nodes        - Instance and node management")
-            self.print_colored("  2) Manage Configurations  - Switch, backup, restore configurations")
-            self.print_colored("  3) View Configuration     - Display current configuration")
-            self.print_colored("  4) Switch Environment     - Change network environment (mainnet/testnet/devnet)")
-            self.print_colored("  5) Register Machine       - Add a fleet machine without deploying a node")
-            self.print_colored("  6) Fleet Summary          - Show machines and current assignments")
-            self.print_colored("  7) Discover Services      - Scan a machine and import selected existing services")
+            self.print_colored("\U0001f4cb CONFIGURATION", 'cyan', bold=True)
+            self.print_colored("  1) Configure Nodes         - Instance and node management")
+            self.print_colored("  2) Manage Configurations   - Switch, backup, restore configurations")
+            self.print_colored("  3) View Configuration      - Display current configuration")
+            print()
+            self.print_colored("\U0001f310 ENVIRONMENT & DISCOVERY", 'cyan', bold=True)
+            self.print_colored("  4) Switch Environment      - Change network environment (mainnet/testnet/devnet)")
+            self.print_colored("  5) Discover Services       - Scan a machine and import selected existing services")
+            if mode == CONFIG_MODE_ADVANCED:
+                print()
+                self.print_colored("\U0001f680 FLEET", 'cyan', bold=True)
+                self.print_colored("  6) Register Machine        - Add a fleet machine without deploying a node")
+                self.print_colored("  7) Fleet Summary           - Show machines and current assignments")
+            else:
+                print()
+                self.print_colored("\U0001f513 MODE", 'cyan', bold=True)
+                self.print_colored("  9) Switch to Advanced Mode - Unlock machine-level controls (one-way)")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -11762,35 +12221,87 @@ PY"""
             elif choice == '4':
                 self.switch_environment()
             elif choice == '5':
-                self.register_machine_without_deployment()
-            elif choice == '6':
-                self.fleet_summary()
-            elif choice == '7':
                 self.discover_and_import_existing_services()
+            elif choice == '6' and mode == CONFIG_MODE_ADVANCED:
+                self.register_machine_without_deployment()
+            elif choice == '7' and mode == CONFIG_MODE_ADVANCED:
+                self.fleet_summary()
+            elif choice == '9' and mode == CONFIG_MODE_SIMPLE:
+                self._switch_to_advanced_mode()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-7.", 'red')
+                valid = "0-5, 9" if mode == CONFIG_MODE_SIMPLE else "0-5, 6-7"
+                self.print_colored(f"Invalid option. Valid choices are {valid}.", 'red')
                 self.wait_for_enter()
 
+    def _switch_to_advanced_mode(self) -> None:
+        """Flip the active config's mode from simple to advanced.
+
+        One-way by design — once advanced, a config cannot be downgraded to
+        simple because advanced-mode state (multi-instance machines) has no
+        representation in simple mode. Users who want a "clean" simple
+        config should create a new one.
+        """
+        current_mode = self.active_config.get('mode') or DEFAULT_CONFIG_MODE
+        if current_mode == CONFIG_MODE_ADVANCED:
+            self.print_colored("Already in advanced mode.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        self.print_section("Switch to Advanced Mode")
+        self.print_colored(
+            "Advanced mode exposes machine-level controls (Register Machine, Fleet Summary)\n"
+            "and allows multiple node instances per machine.",
+            'white',
+        )
+        self.print_colored(
+            "This change is ONE-WAY — once advanced, you cannot return to simple mode.\n"
+            "To get back to a simple-mode config you would have to create a new one.",
+            'yellow',
+        )
+        if self.get_input("Continue? (y/n)", "n").lower() != 'y':
+            self.print_colored("Mode switch cancelled.", 'cyan')
+            self.wait_for_enter()
+            return
+
+        self.active_config['mode'] = CONFIG_MODE_ADVANCED
+        config_name = self.active_config.get('config_name')
+        env = self.get_mnl_app_env() or self.active_config.get('environment') or 'mainnet'
+        hosts = _get_gpu_hosts(self.inventory)
+        if config_name:
+            self.config_manager._save_config_with_metadata(
+                config_name, env, len(hosts), update_symlink=False, mode=CONFIG_MODE_ADVANCED,
+            )
+        else:
+            self.config_manager._save_active_config()
+
+        self.print_colored("✅ Switched to advanced mode.", 'green')
+        self.wait_for_enter()
+
     def configure_nodes_menu(self) -> None:
-        """Show node configuration submenu"""
+        """Show node configuration submenu.
+
+        Shared options 1-4 keep the same positions in both modes. Advanced
+        mode adds option 5) Add Multiple Nodes for bulk registration.
+        """
         while True:
             self.print_header("Node Configuration")
 
             # Load current configuration
             self.load_configuration()
             hosts = _get_gpu_hosts(self.inventory)
+            mode = self.active_config.get('mode') or DEFAULT_CONFIG_MODE
 
             if hosts:
                 self.print_section(f"Current Nodes ({len(hosts)})")
                 for i, (name, config) in enumerate(hosts.items(), 1):
                     ip = config.get('ansible_host', 'Unknown')
                     user = config.get('ansible_user', 'Unknown')
-                    
+
                     # Get status information
                     status_info = self._get_node_status_info(name)
                     status = status_info['status']
                     status_emoji, status_color, status_desc = self._get_status_display_info(status)
-                    
+
                     last_update = status_info.get('last_update', '')
                     age_str = self._format_timestamp_ago(last_update) if last_update else "Never"
 
@@ -11801,13 +12312,17 @@ PY"""
 
             self.print_colored("Configure Nodes Menu", 'cyan', bold=True)
             print()
-            if not hosts:
-                self.print_colored("  1) Create New Configuration        - Register machines and set up instances")
-            else:
-                self.print_colored("  1) Add New Node                   - Add node to existing config")
+            # Option 1 (Add Node(s)) is always shown as long as the user has
+            # an active config — including the empty zero-host shell that
+            # simple-mode creation produces on purpose. After each node is
+            # added, the flow asks whether to add another, so there is no
+            # separate "Add Multiple Nodes" option. Edit/Remove are gated
+            # behind having at least one host. Create-new-config lives in
+            # Manage Configurations (Configuration Menu → 2 → n).
+            self.print_colored("  1) Add Node(s)                    - Add one or more nodes to this config")
+            if hosts:
                 self.print_colored("  2) Edit Existing Node             - Modify node settings")
                 self.print_colored("  3) Remove Node                    - Delete node from config")
-                self.print_colored("  4) Create New Configuration       - Start fresh configuration")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -11817,19 +12332,307 @@ PY"""
             if choice == '0':
                 break
             elif choice == '1':
-                if not hosts:
-                    self._create_machine_first_configuration()
-                else:
-                    self._add_node()
+                self._add_nodes_loop()
             elif choice == '2' and hosts:
                 self._update_node()
             elif choice == '3' and hosts:
                 self._delete_node()
-            elif choice == '4' and hosts:
-                self._create_new_configuration()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-4.", 'red')
+                valid = "0-3" if hosts else "0, 1"
+                self.print_colored(f"Invalid option. Valid choices are {valid}.", 'red')
                 self.wait_for_enter()
+
+    def _add_nodes_loop(self, add_another_default: str = 'n') -> None:
+        """Add one or more nodes in two phases.
+
+        Phase 1 — collect: for each iteration prompt the node name + SSH
+        config. Confirm each entry. After the user answers ``n`` at the
+        "Add another?" prompt, move to phase 2. No machine registration,
+        no discovery, no save happens in this phase.
+
+        Phase 2 — process: for every queued entry register the machine
+        (if new), run a single batched discovery across all new machines,
+        then either import an existing service or save as a fresh
+        instance. All changes are persisted in one final save.
+
+        ``add_another_default`` controls the default at the "Add another?"
+        prompt. Pass ``'y'`` when the caller knows the user is mid-bulk
+        entry (e.g. right after creating a new config) so Enter keeps the
+        flow going; pass ``'n'`` (default) elsewhere so Enter exits
+        cleanly.
+        """
+        hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
+        pending: List[Tuple[str, Dict[str, Any]]] = []
+
+        while True:
+            self.print_section(f"Add Node #{len(pending) + 1}")
+
+            while True:
+                name = self._get_valid_hostname("Enter name for the new node", "")
+                if name in hosts:
+                    self.print_colored(
+                        f"You already have a node named '{name}' in this config. Choose another.",
+                        'red',
+                    )
+                    continue
+                if any(n == name for n, _ in pending):
+                    self.print_colored(
+                        f"'{name}' is already queued in this batch. Choose another.",
+                        'red',
+                    )
+                    continue
+                break
+
+            # Seed defaults from the last queued or last saved host.
+            if pending:
+                previous_config = pending[-1][1]
+            elif hosts:
+                previous_config = hosts[list(hosts.keys())[-1]]
+            else:
+                previous_config = None
+
+            new_host = self._configure_single_node(previous_config=previous_config)
+            pending.append((name, new_host))
+            self.print_colored(f"✓ '{name}' queued ({len(pending)} pending).", 'green')
+
+            if self.get_input(f"\nAdd another? (y/n)", add_another_default).lower() != 'y':
+                break
+
+        if not pending:
+            return
+
+        self._process_pending_nodes(pending)
+
+    def _process_pending_nodes(
+        self,
+        pending: List[Tuple[str, Dict[str, Any]]],
+    ) -> None:
+        """Phase 2 of the Add Node(s) loop: register, scan, import-or-fresh, save."""
+        self.print_section(f"Processing {len(pending)} queued node(s)")
+
+        # Step 1: resolve/register each pending node's machine. After this
+        # step every entry has a machine_id and we know whether the machine
+        # already had instances tracked in this config.
+        enriched: List[Tuple[str, Dict[str, Any], str, bool]] = []
+        for name, new_host in pending:
+            new_host = self.config_manager.bind_host_to_existing_machine(name, new_host)
+            bound_id = str(new_host.get('r1setup_machine_id') or '').strip()
+            had_existing = False
+
+            if bound_id:
+                fleet = self.config_manager._normalize_fleet_state(self.config_manager.get_fleet_state_copy())
+                machine_rec = fleet.get('fleet', {}).get('machines', {}).get(bound_id, {})
+                had_existing = bool(machine_rec.get('instance_names'))
+            else:
+                derived = self.config_manager._derive_machine_id(name, new_host)
+                access = self._extract_machine_access_config(new_host)
+                self.config_manager.upsert_machine_record(derived, {
+                    'topology_mode': DEFAULT_MACHINE_TOPOLOGY_MODE,
+                    'deployment_state': DEFAULT_MACHINE_DEPLOYMENT_STATE,
+                    'instance_names': [],
+                    **access,
+                })
+                new_host['r1setup_machine_id'] = derived
+                bound_id = derived
+
+            enriched.append((name, new_host, bound_id, had_existing))
+
+        # Step 2: scan unique machines that don't already have tracked
+        # instances. Machines with existing instances are expert-mode
+        # territory and skip discovery here (the expert path handles them).
+        scannable = sorted({mid for _, _, mid, had in enriched if not had})
+        scan_results: Dict[str, Dict[str, Any]] = {}
+        if scannable:
+            scan_results = self.config_manager._batch_discover_machines(scannable)
+
+        # Step 3: for each queued entry, offer import when candidates exist,
+        # else add as a fresh instance.
+        hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
+        imported_count = 0
+        fresh_count = 0
+        for name, new_host, machine_id, had_existing in enriched:
+            if had_existing:
+                self.print_colored(
+                    f"'{name}' binds to '{machine_id}' which already has instances. "
+                    "Saving as fresh; use Edit Existing Node to review expert-mode topology.",
+                    'yellow',
+                )
+                self.config_manager.apply_runtime_snapshot_to_host_config(name, new_host)
+                hosts[name] = new_host
+                fresh_count += 1
+                continue
+
+            scan = scan_results.get(machine_id, {})
+            candidates = scan.get('candidates') if scan.get('status') == 'success' else None
+            imported = False
+            if candidates:
+                imported = self._offer_import_from_candidates(machine_id, name, candidates)
+
+            if imported:
+                imported_count += 1
+            else:
+                self.config_manager.apply_runtime_snapshot_to_host_config(name, new_host)
+                hosts[name] = new_host
+                fresh_count += 1
+
+        self._save_configuration()
+
+        summary_bits = []
+        if imported_count:
+            summary_bits.append(f"{imported_count} imported")
+        if fresh_count:
+            summary_bits.append(f"{fresh_count} fresh")
+        self.print_colored(
+            f"✅ Finished — {len(enriched)} node(s) processed ({', '.join(summary_bits)}).",
+            'green',
+        )
+        self.print_colored("💡 Next: Deploy from Main Menu → Deployment Menu", 'cyan')
+
+    def _prompt_env_mismatch_resolution(
+        self,
+        machine_id: str,
+        config_env: str,
+        mismatched: List[Dict[str, Any]],
+    ) -> Tuple[str, Optional[str]]:
+        """Ask the operator how to resolve a config-vs-service env mismatch.
+
+        Returns ``('abort', None)`` or ``('switch', new_env)``. Does not
+        mutate config env itself — the caller applies the switch so it
+        can decide when to re-evaluate candidates.
+        """
+        envs_seen = sorted({
+            c.get('environment') for c in mismatched if c.get('environment')
+        })
+        env_label = envs_seen[0] if len(envs_seen) == 1 else ', '.join(envs_seen)
+
+        self.print_colored(
+            f"⚠️  Machine '{machine_id}' runs service(s) on env={env_label}; "
+            f"this configuration is {config_env}.",
+            'yellow', bold=True,
+        )
+        self.print_colored(
+            "Importing or deploying without resolving this would stack "
+            "containers on different networks on the same host.",
+            'yellow',
+        )
+        print()
+        self.print_colored("  1) Abort - don't add this node (recommended)")
+        can_switch = (
+            len(envs_seen) == 1
+            and envs_seen[0] in DISCOVERY_KNOWN_ENVIRONMENTS
+        )
+        if can_switch:
+            self.print_colored(
+                f"  2) Switch this configuration to {envs_seen[0]} and import the existing service"
+            )
+            valid = ('1', '2')
+        else:
+            valid = ('1',)
+        choice = self.get_input("Select", "1")
+        if choice == '2' and can_switch:
+            return ('switch', envs_seen[0])
+        if choice not in valid:
+            self.print_colored("Invalid choice. Aborting.", 'red')
+        return ('abort', None)
+
+    def _offer_import_from_candidates(
+        self,
+        machine_id: str,
+        desired_name: str,
+        candidates: List[Dict[str, Any]],
+    ) -> bool:
+        """Offer to import one of ``candidates`` under ``desired_name``.
+
+        Returns ``True`` when an import succeeded, ``False`` otherwise
+        (user declined, simple-mode multi-service block, or import error).
+        Does NOT run discovery itself — the caller passes scan results.
+        """
+        mode = self.active_config.get('mode') or DEFAULT_CONFIG_MODE
+        config_env = self.active_config.get('environment') or self.get_mnl_app_env() or 'unknown'
+
+        matching = [
+            c for c in candidates
+            if c.get('environment') in (config_env, '', 'unknown')
+        ]
+        mismatched = [c for c in candidates if c not in matching]
+
+        if not matching and mismatched:
+            # Every discovered service runs on a different env than the
+            # config. Silently falling through to fresh-instance creation
+            # would stack a second container on the host on the wrong
+            # network. Prompt instead.
+            action, new_env = self._prompt_env_mismatch_resolution(
+                machine_id, config_env, mismatched,
+            )
+            if action == 'abort':
+                self.print_colored(
+                    f"Skipping '{desired_name}'. No node was added.", 'yellow',
+                )
+                return False
+            # action == 'switch' — flip env and treat the previously
+            # mismatched candidates as the new matching set.
+            self.set_mnl_app_env(new_env)
+            self.print_colored(f"✓ Config env switched to {new_env}.", 'green')
+            config_env = new_env
+            matching = [
+                c for c in candidates
+                if c.get('environment') in (config_env, '', 'unknown')
+            ]
+
+        if not matching:
+            return False
+
+        if len(matching) > 1 and mode == CONFIG_MODE_SIMPLE:
+            self.print_colored(
+                f"Machine '{machine_id}' runs {len(matching)} services. "
+                "Simple mode supports one node per machine — switch to Advanced Mode to import multiple. "
+                f"Keeping '{desired_name}' as a fresh instance.",
+                'yellow',
+            )
+            return False
+
+        self.print_section(f"Machine '{machine_id}' has {len(matching)} existing service(s)")
+        for i, c in enumerate(matching, 1):
+            self.print_colored(
+                f"  {i}) {c.get('service_name')} [{c.get('service_state', '?')} · {_format_env_badge(c)}]",
+                'green',
+            )
+        print()
+
+        choice = self.get_input(
+            f"Import one of these services as '{desired_name}', or create a fresh instance? (i/f)",
+            "i",
+        ).lower()
+        if choice != 'i':
+            return False
+
+        if len(matching) == 1:
+            picked = matching[0]
+        else:
+            while True:
+                try:
+                    idx = int(self.get_input(f"Which service to import? (1-{len(matching)})", "1"))
+                    if 1 <= idx <= len(matching):
+                        picked = matching[idx - 1]
+                        break
+                except ValueError:
+                    pass
+                self.print_colored("Invalid selection.", 'red')
+
+        result = self.import_discovery_candidates(
+            machine_id, [picked], {picked['service_name']: desired_name},
+        )
+        if result.get('status') == 'success':
+            self.print_colored(
+                f"✅ Imported service '{picked['service_name']}' as '{desired_name}'.",
+                'green',
+            )
+            return True
+        self.print_colored(
+            f"Import failed: {result.get('message', 'unknown error')}. Falling back to fresh instance.",
+            'red',
+        )
+        return False
 
     def deployment_menu(self) -> None:
         """Show deployment submenu"""
@@ -11862,18 +12665,26 @@ PY"""
                     'cyan',
                 )
 
-            self.print_colored("Deployment Menu", 'cyan', bold=True)
             print()
-            self.print_colored("  1) Install GPU Nodes      - Deploy Edge Node with GPU image (ratio1/edge_node_gpu)")
-            self.print_colored("  2) Install CPU Nodes      - Deploy Edge Node with CPU image (ratio1/edge_node)")
-            self.print_colored("  3) Prepare Machines       - Prepare registered machines without deploying nodes")
-            self.print_colored("  4) Plan Migration        - Build and save a migration plan without executing it")
-            self.print_colored("  5) Execute Migration    - Run the saved migration plan")
-            self.print_colored("  6) Rollback Migration   - Recover a failed or interrupted migration")
-            self.print_colored("  7) Finalize Migration   - Clean up source artifacts after verified migration")
-            self.print_colored("  8) Delete Deployment      - Remove deployed Edge Node")
-            self.print_colored("  9) Deployment Status      - Check detailed deployment status")
-            self.print_colored("  m) Migrate Install State  - Back-populate 1.8.0 tracking from running hosts")
+            self.print_colored("\U0001f680 INSTALL", 'cyan', bold=True)
+            self.print_colored("  1) Install GPU Nodes       - Deploy Edge Node with GPU image (ratio1/edge_node_gpu)")
+            self.print_colored("  2) Install CPU Nodes       - Deploy Edge Node with CPU image (ratio1/edge_node)")
+            self.print_colored("  3) Prepare Machines        - Prepare registered machines without deploying nodes")
+            print()
+            self.print_colored("\U0001f9ed MIGRATION", 'cyan', bold=True)
+            self.print_colored("  4) Plan Migration          - Build and save a migration plan without executing it")
+            self.print_colored("  5) Execute Migration       - Run the saved migration plan")
+            self.print_colored("  6) Rollback Migration      - Recover a failed or interrupted migration")
+            self.print_colored("  7) Finalize Migration      - Clean up source artifacts after verified migration")
+            print()
+            self.print_colored("\U0001f4ca STATUS", 'cyan', bold=True)
+            self.print_colored("  9) Deployment Status       - Check detailed deployment status")
+            print()
+            self.print_colored("\U0001f9f9 MAINTENANCE", 'cyan', bold=True)
+            self.print_colored("  m) Migrate Install State   - Back-populate 1.8.0 tracking from running hosts")
+            print()
+            self.print_colored("⚠️  DESTRUCTIVE", 'red', bold=True)
+            self.print_colored("  8) Delete Deployment       - Remove deployed Edge Node")
             print()
             self.print_colored("  0) Back to Main Menu")
             print()
@@ -11924,7 +12735,7 @@ PY"""
                 machines = self.get_fleet_machines_as_hosts()
                 self.print_section(f"{len(machines)} registered machine(s), no node instances yet")
                 self.print_colored(
-                    "\U0001f4a1 Use 'Discover Services' (Main Menu \u2192 1 \u2192 7) to import existing services,\n"
+                    "\U0001f4a1 Use 'Discover Services' (Main Menu \u2192 1 \u2192 5) to import existing services,\n"
                     "   or 'Add New Node' (Main Menu \u2192 1 \u2192 1) to create new instances.",
                     'yellow',
                 )
@@ -11932,7 +12743,6 @@ PY"""
                 self.print_section("No nodes configured")
                 self.print_colored("\u26a0\ufe0f  Configure nodes first to use operations tools", 'yellow')
 
-            self.print_colored("Operations Menu", 'cyan', bold=True)
             print()
             self.print_colored("\U0001f527 SERVICE MANAGEMENT", 'cyan', bold=True)
             self.print_colored("  1) Start Service          - Start the Edge Node service")
@@ -11956,7 +12766,7 @@ PY"""
                 if has_machines:
                     self.print_colored(
                         "Machines registered but no node instances configured.\n"
-                        "Use 'Discover Services' (Main Menu \u2192 1 \u2192 7) to import existing services,\n"
+                        "Use 'Discover Services' (Main Menu \u2192 1 \u2192 5) to import existing services,\n"
                         "or 'Add New Node' (Main Menu \u2192 1 \u2192 1) to create new instances.",
                         'red',
                     )
@@ -12151,7 +12961,7 @@ PY"""
             extra_vars=overrides,
             last_applied_action=last_applied_action,
             show_output=True,
-            timeout=self.connection_timeout,
+            timeout=self.playbook_timeout,
         )
 
         if success:
@@ -12507,7 +13317,7 @@ PY"""
                 machines = self.get_fleet_machines_as_hosts()
                 self.print_section(f"{len(machines)} registered machine(s), no node instances yet")
                 self.print_colored(
-                    "\U0001f4a1 Use 'Discover Services' (Main Menu \u2192 1 \u2192 7) to import existing services,\n"
+                    "\U0001f4a1 Use 'Discover Services' (Main Menu \u2192 1 \u2192 5) to import existing services,\n"
                     "   or 'Add New Node' (Main Menu \u2192 1 \u2192 1) to create new instances.",
                     'yellow',
                 )
@@ -12515,7 +13325,6 @@ PY"""
                 self.print_section("No nodes configured")
                 self.print_colored("\u26a0\ufe0f  Configure nodes first to use advanced tools", 'yellow')
 
-            self.print_colored("Advanced Menu", 'cyan', bold=True)
             print()
             self.print_colored("\U0001f527 OPERATIONAL TOOLS", 'cyan', bold=True)
             self.print_colored("  1) SSH to Machine        - Connect to machine via SSH")
@@ -12529,6 +13338,9 @@ PY"""
             self.print_colored("\u2699\ufe0f  CUSTOMIZATION", 'cyan', bold=True)
             self.print_colored("  6) Customize Service     - Override service template variables")
             print()
+            self.print_colored("\U0001f4be DATA", 'cyan', bold=True)
+            self.print_colored("  7) Backup Node Data      - Download a tar.gz snapshot of a node's volume")
+            print()
             self.print_colored("  0) Back to Main Menu")
             print()
 
@@ -12541,12 +13353,12 @@ PY"""
                 self.print_colored("No nodes or machines configured. Please configure nodes first (Main Menu \u2192 1).", 'red')
                 self.wait_for_enter()
                 continue
-            # Service customization requires deployed node instances
-            elif choice == '6' and not has_config:
+            # Service customization and backup require deployed node instances
+            elif choice in ('6', '7') and not has_config:
                 if has_machines:
                     self.print_colored(
                         "Machines registered but no node instances configured.\n"
-                        "Use 'Discover Services' (Main Menu \u2192 1 \u2192 7) to import existing services first.",
+                        "Use 'Discover Services' (Main Menu \u2192 1 \u2192 5) to import existing services first.",
                         'red',
                     )
                 else:
@@ -12565,8 +13377,10 @@ PY"""
                 self.ssh_key_management_menu()
             elif choice == '6':
                 self.customize_service()
+            elif choice == '7':
+                self.backup_node_data()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-6.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-7.", 'red')
                 self.wait_for_enter()
 
 
@@ -12722,8 +13536,233 @@ PY"""
             self.print_colored("  • Private keys have been saved locally", 'red')
             self.print_colored("  • Keep these files secure and delete when no longer needed", 'red')
             self.print_colored("  • These keys provide full access to node wallets", 'red')
-        
+
         self.wait_for_enter()
+
+    def backup_node_data(self) -> None:
+        """Download a tar.gz snapshot of a node's on-host data volume."""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured. Backup operates on deployed node instances.", 'red')
+            self.wait_for_enter()
+            return
+
+        self.print_header("Backup Node Data")
+        self.load_configuration()
+        hosts = _get_gpu_hosts(self.inventory)
+        if not hosts:
+            self.print_colored("No node instances found in inventory.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        host_names = list(hosts.keys())
+        if len(host_names) == 1:
+            selected = host_names[0]
+            self.print_colored(f"Only one instance configured: {selected}", 'cyan')
+        else:
+            self.print_colored("Available node instances:", 'cyan', bold=True)
+            for i, name in enumerate(host_names, 1):
+                cfg = hosts[name]
+                ip = cfg.get('ansible_host', '?')
+                user = cfg.get('ansible_user', '?')
+                self.print_colored(f"  {i}) {name}  —  {user}@{ip}")
+            print()
+            selected = None
+            while selected is None:
+                pick = self.get_input(f"Select instance (1-{len(host_names)}, 0=cancel)", "0")
+                if pick == '0':
+                    self.print_colored("Backup cancelled.", 'yellow')
+                    return
+                try:
+                    idx = int(pick) - 1
+                    if 0 <= idx < len(host_names):
+                        selected = host_names[idx]
+                        break
+                except ValueError:
+                    pass
+                self.print_colored("Invalid selection.", 'red')
+
+        host_config = hosts[selected]
+        volume_path = host_config.get('mnl_docker_volume_path') or DEFAULT_RUNTIME_VOLUME_PATH
+        self.print_colored(f"\nInstance:    {selected}", 'white')
+        self.print_colored(
+            f"Host:        {host_config.get('ansible_user', '?')}@{host_config.get('ansible_host', '?')}",
+            'white',
+        )
+        self.print_colored(f"Volume path: {volume_path}", 'white')
+
+        default_dest = str(Path.home() / 'r1setup-backups')
+        dest_input = self.get_input("\nLocal destination directory", default_dest)
+        dest_dir = Path(os.path.expanduser((dest_input or default_dest).strip()))
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.print_colored(f"❌ Cannot create destination directory {dest_dir}: {e}", 'red')
+            self.wait_for_enter()
+            return
+        if not os.access(dest_dir, os.W_OK):
+            self.print_colored(f"❌ Destination directory is not writable: {dest_dir}", 'red')
+            self.wait_for_enter()
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive_path = dest_dir / f"{selected}-{timestamp}.tar.gz"
+
+        stop_for_backup = self.get_input(
+            "\nStop node during backup for file-consistency safety? (Y/n)", "y"
+        ).strip().lower() != 'n'
+        if not stop_for_backup:
+            self.print_colored(
+                "⚠️  Live backup: SQLite/log files may be captured mid-write.",
+                'yellow',
+            )
+
+        self.print_colored("\n\U0001f50d Pre-flight checks...", 'cyan')
+        size_probe = self.migration_planner._probe_remote_path_size(host_config, volume_path)
+        if size_probe.get('status') != 'success':
+            self.print_colored(
+                f"❌ Could not probe source volume size: {size_probe.get('message', 'unknown error')}",
+                'red',
+            )
+            self.wait_for_enter()
+            return
+        source_bytes = int(size_probe.get('bytes', 0))
+        try:
+            local_free = shutil.disk_usage(dest_dir).free
+        except OSError as e:
+            self.print_colored(f"❌ Cannot probe local free space: {e}", 'red')
+            self.wait_for_enter()
+            return
+        needed = int(source_bytes * 1.1)
+        fmt = self.migration_planner._format_bytes
+        self.print_colored(f"   Source volume: {fmt(source_bytes)}", 'white')
+        self.print_colored(f"   Local free:    {fmt(local_free)} (need ~{fmt(needed)})", 'white')
+        if local_free < needed:
+            self.print_colored(
+                f"❌ Local destination does not have enough free space "
+                f"(need {fmt(needed)}, have {fmt(local_free)}).",
+                'red',
+            )
+            self.wait_for_enter()
+            return
+
+        self.print_colored(f"\n\U0001f4e6 Archive target: {archive_path}", 'cyan')
+        if self.get_input("Proceed with backup? (y/n)", "y").strip().lower() != 'y':
+            self.print_colored("Backup cancelled.", 'yellow')
+            return
+
+        stopped_by_us = False
+        if stop_for_backup:
+            self.print_colored("\n\U0001f6d1 Stopping node...", 'cyan')
+            if not self._run_instance_lifecycle_playbook(selected, 'service_stop.yml', 'backup_stop'):
+                self.print_colored("❌ Failed to stop node. Aborting backup.", 'red')
+                self.wait_for_enter()
+                return
+            stopped_by_us = True
+
+        try:
+            self.print_colored("\n\U0001f4e5 Streaming archive (this may take a while)...", 'cyan')
+            stream_result = self._stream_remote_archive_to_local(host_config, volume_path, archive_path)
+            if stream_result.get('status') != 'success':
+                self.print_colored(
+                    f"❌ Archive failed: {stream_result.get('message', 'unknown error')}",
+                    'red',
+                )
+                try:
+                    if archive_path.exists():
+                        archive_path.unlink()
+                        self.print_colored(f"   Removed partial archive: {archive_path}", 'yellow')
+                except OSError:
+                    pass
+                return
+
+            try:
+                written = archive_path.stat().st_size
+            except OSError:
+                written = 0
+            self.print_colored("\n✅ Backup complete.", 'green', bold=True)
+            self.print_colored(f"   Path:   {archive_path}", 'white')
+            self.print_colored(f"   Size:   {fmt(written)}", 'white')
+            try:
+                checksum = self.migration_planner._compute_local_checksum(archive_path)
+                self.print_colored(f"   SHA256: {checksum}", 'white')
+            except OSError as e:
+                self.print_colored(f"   (could not compute checksum: {e})", 'yellow')
+        finally:
+            if stopped_by_us:
+                self.print_colored("\n\U0001f680 Restarting node...", 'cyan')
+                if not self._run_instance_lifecycle_playbook(selected, 'service_start.yml', 'backup_start'):
+                    self.print_colored(
+                        f"⚠️  Failed to restart node '{selected}'. "
+                        "Start it manually from Operations Menu → Start Service.",
+                        'red',
+                    )
+
+        self.wait_for_enter()
+
+    def _run_instance_lifecycle_playbook(
+        self,
+        instance_name: str,
+        playbook_name: str,
+        action_label: str,
+    ) -> bool:
+        """Run a lifecycle playbook (start/stop) against a single instance."""
+        playbook_path = self.config_dir / 'playbooks' / playbook_name
+        if not playbook_path.exists():
+            self.print_colored(f"Playbook not found: {playbook_path}", 'red')
+            return False
+        success, _, _, _ = self.run_generated_playbook(
+            playbook_path,
+            [instance_name],
+            machine_scope=False,
+            last_applied_action=action_label,
+            show_output=False,
+            timeout=self.playbook_timeout,
+        )
+        return bool(success)
+
+    def _stream_remote_archive_to_local(
+        self,
+        host_config: Dict[str, Any],
+        remote_volume_path: str,
+        local_archive_path: Path,
+    ) -> Dict[str, Any]:
+        """Stream a tar.gz of the remote volume into a local file via SSH."""
+        if not remote_volume_path:
+            return {'status': 'error', 'message': 'Missing remote volume path'}
+        tar_cmd = f"tar -C {shlex.quote(remote_volume_path)} -czf - ."
+        remote_command = self.migration_planner._build_remote_root_shell_command(host_config, tar_cmd)
+        try:
+            ssh_cmd = self._build_machine_ssh_command(host_config, remote_command)
+        except ValueError as e:
+            return {'status': 'error', 'message': str(e)}
+
+        proc = None
+        err = b''
+        try:
+            with open(local_archive_path, 'wb') as out:
+                proc = subprocess.Popen(ssh_cmd, stdout=out, stderr=subprocess.PIPE)
+                try:
+                    _, err = proc.communicate()
+                except KeyboardInterrupt:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    return {'status': 'error', 'message': 'Interrupted by user'}
+        except FileNotFoundError as e:
+            return {'status': 'error', 'message': f'ssh executable not found: {e}'}
+        except OSError as e:
+            return {'status': 'error', 'message': f'Local write error: {e}'}
+
+        if proc is None or proc.returncode != 0:
+            err_text = (err or b'').decode('utf-8', errors='replace').strip() or 'Remote tar failed'
+            return {
+                'status': 'error',
+                'message': err_text,
+                'returncode': proc.returncode if proc else None,
+            }
+        return {'status': 'success'}
 
     def _select_network_environment(self) -> str:
         """Select network environment"""
@@ -12759,12 +13798,14 @@ PY"""
                 self.print_colored(f"\nPrevious node: {prev_user}, {prev_auth} auth", 'cyan')
                 use_same = self.get_input("Reuse these credentials for this node? (y/n)", "y")
                 if use_same.lower() == 'y':
-                    # Ask for IP and username (with previous as default)
+                    # Only the host differs — reuse everything else including
+                    # the username. If the user needs a different account on
+                    # the new host, answering 'n' drops them into the full
+                    # flow with previous values pre-filled as defaults.
                     host_address = self.get_input("Enter host (IP address or URL)", "", required=True)
-                    username = self.get_input("Enter SSH username", prev_user)
                     # Copy credentials from previous config
                     host['ansible_host'] = host_address
-                    host['ansible_user'] = username or prev_user
+                    host['ansible_user'] = prev_user
                     host['ansible_ssh_common_args'] = previous_config.get('ansible_ssh_common_args', '-o StrictHostKeyChecking=no')
                     for key in ('ansible_ssh_pass', 'ansible_become_password', 'ansible_ssh_private_key_file'):
                         if key in previous_config:
@@ -13049,12 +14090,41 @@ PY"""
         new_host = self.config_manager.bind_host_to_existing_machine(name, new_host)
 
         bound_machine_id = str(new_host.get('r1setup_machine_id') or '').strip()
+
+        # If the bind did not match any existing fleet machine (the normal
+        # first-node-on-a-brand-new-machine case), register this machine in
+        # fleet state now. Without this step the single-machine discovery
+        # below would not fire because bound_machine_id stays empty.
+        if not bound_machine_id:
+            derived_id = self.config_manager._derive_machine_id(name, new_host)
+            machine_access = self._extract_machine_access_config(new_host)
+            self.config_manager.upsert_machine_record(derived_id, {
+                'topology_mode': DEFAULT_MACHINE_TOPOLOGY_MODE,
+                'deployment_state': DEFAULT_MACHINE_DEPLOYMENT_STATE,
+                'instance_names': [],
+                **machine_access,
+            })
+            new_host['r1setup_machine_id'] = derived_id
+            bound_machine_id = derived_id
+
         if bound_machine_id:
             fleet_state = self.config_manager.get_fleet_state_copy()
             normalized_fleet = self.config_manager._normalize_fleet_state(fleet_state)
             machine_record = dict(normalized_fleet.get('fleet', {}).get('machines', {}).get(bound_machine_id, {}))
             existing_instances = list(machine_record.get('instance_names') or [])
             topology_mode = str(machine_record.get('topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE)
+
+            # Single-machine discovery: if this is a fresh machine in this
+            # config and it already runs edge_node services, offer to import
+            # one of them as '{name}' instead of creating a fresh instance.
+            # Skip if machine is already tracked (existing_instances path
+            # below handles expert promotion).
+            if not existing_instances:
+                imported = self._offer_single_machine_discovery_import(bound_machine_id, name)
+                if imported:
+                    # Discovery imported a service under the requested name;
+                    # nothing left to do in this flow.
+                    return
 
             if existing_instances:
                 connection_display = self.config_manager._format_machine_connection_display(machine_record)
@@ -13108,6 +14178,126 @@ PY"""
         self._save_configuration()
         self.print_colored(f"Node '{name}' added successfully!", 'green')
         self.print_colored("\n💡 Next: Deploy your updated configuration from Main Menu → Deployment Menu", 'cyan')
+
+    def _offer_single_machine_discovery_import(self, machine_id: str, desired_name: str) -> bool:
+        """Scan a single machine for running services and offer to import one.
+
+        Returns ``True`` if a service was imported under ``desired_name`` (in
+        which case ``_add_node`` should return without creating a fresh
+        instance). Returns ``False`` when no services are found, discovery
+        fails, the user declines, or the simple-mode one-per-machine rule
+        blocks a multi-service import.
+        """
+        mode = self.active_config.get('mode') or DEFAULT_CONFIG_MODE
+        config_env = self.active_config.get('environment') or self.get_mnl_app_env() or 'unknown'
+
+        self.print_colored(f"Scanning '{machine_id}' for existing edge_node services...", 'cyan')
+        scan = self.config_manager._batch_discover_machines([machine_id])
+        result = scan.get(machine_id) or {}
+        if result.get('status') != 'success':
+            # Discovery failed or machine unreachable — fall through silently
+            # so the caller can still create a fresh instance.
+            return False
+
+        candidates = result.get('candidates') or []
+        if not candidates:
+            self.print_colored("No existing services found on this machine.", 'cyan')
+            return False
+
+        # Filter by environment — only services matching the config env (or
+        # ambiguous env) are importable into this config.
+        matching = [
+            c for c in candidates
+            if c.get('environment') in (config_env, '', 'unknown')
+        ]
+        mismatched = [c for c in candidates if c not in matching]
+
+        if not matching and mismatched:
+            # Every discovered service runs on a different env than the
+            # config. Falling through to fresh-instance creation would
+            # leave two containers on different networks on the same
+            # host. Give the operator a real choice.
+            action, new_env = self._prompt_env_mismatch_resolution(
+                machine_id, config_env, mismatched,
+            )
+            if action == 'abort':
+                self.print_colored(
+                    f"Skipping '{desired_name}'. No node was added.", 'yellow',
+                )
+                return False
+            self.set_mnl_app_env(new_env)
+            self.print_colored(f"✓ Config env switched to {new_env}.", 'green')
+            config_env = new_env
+            matching = [
+                c for c in candidates
+                if c.get('environment') in (config_env, '', 'unknown')
+            ]
+
+        if not matching:
+            return False
+
+        if len(matching) > 1 and mode == CONFIG_MODE_SIMPLE:
+            self.print_colored(
+                f"This machine runs {len(matching)} services. Simple mode supports one node per machine.",
+                'yellow',
+            )
+            self.print_colored(
+                "Switch to Advanced Mode (Configuration Menu → 9) to import multiple services. "
+                "Creating a fresh instance for now.",
+                'yellow',
+            )
+            return False
+
+        # Show the matching services
+        self.print_section(f"Machine has {len(matching)} existing service(s)")
+        for i, c in enumerate(matching, 1):
+            self.print_colored(
+                f"  {i}) {c.get('service_name')} [{c.get('service_state', '?')} · {_format_env_badge(c)}]",
+                'green',
+            )
+        print()
+
+        choice = self.get_input(
+            f"Import one of these services as '{desired_name}', or create a fresh instance? (i/f)",
+            "i",
+        ).lower()
+        if choice != 'i':
+            return False
+
+        # Pick which service to import (default = first)
+        if len(matching) == 1:
+            picked = matching[0]
+        else:
+            while True:
+                try:
+                    idx = int(self.get_input(f"Which service to import? (1-{len(matching)})", "1"))
+                    if 1 <= idx <= len(matching):
+                        picked = matching[idx - 1]
+                        break
+                except ValueError:
+                    pass
+                self.print_colored("Invalid selection.", 'red')
+
+        # Import it under the user-chosen name
+        import_result = self.import_discovery_candidates(
+            machine_id, [picked], {picked['service_name']: desired_name},
+        )
+        if import_result.get('status') == 'success':
+            self.print_colored(
+                f"✅ Imported service '{picked['service_name']}' as '{desired_name}'.",
+                'green',
+            )
+            self.print_colored(
+                "\n💡 Next: Deploy your updated configuration from Main Menu → Deployment Menu",
+                'cyan',
+            )
+            return True
+        else:
+            self.print_colored(
+                f"Import failed: {import_result.get('message', 'unknown error')}. Falling back to fresh instance.",
+                'red',
+            )
+            return False
 
     def _update_node(self) -> None:
         """Update an existing node"""
@@ -13349,10 +14539,12 @@ PY"""
             self.wait_for_enter()
             return
 
-        cmd = (f"ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
+        debug_env = "ANSIBLE_STDOUT_CALLBACK=debug " if DEBUG_ANSIBLE else ""
+        verbosity = " -vvv" if DEBUG_ANSIBLE else ""
+        cmd = (f"{debug_env}ANSIBLE_CONFIG={os.environ['ANSIBLE_CONFIG']} "
                f"ANSIBLE_COLLECTIONS_PATH={os.environ['ANSIBLE_COLLECTIONS_PATH']} "
                f"ANSIBLE_HOME={os.environ['ANSIBLE_HOME']} "
-               f"ansible-playbook -i {self.config_file} {playbook_path}")
+               f"ansible-playbook{verbosity} -i {self.config_file} {playbook_path}")
 
         self.print_colored(f"\n🔍 Running connectivity test...", 'yellow')
         success, output = self.run_command(cmd, show_output=False, timeout=self.connection_timeout)
@@ -13426,12 +14618,15 @@ PY"""
 
         self.print_colored(progress_message, 'yellow')
         target_hosts = host_names or list(_get_gpu_hosts(self.inventory).keys())
+        # Stream the playbook output live when debug-ansible is on so the user
+        # can see exactly what get_node_info returned on each host. Otherwise
+        # capture silently and only surface the raw output on a parse miss.
         success, output, _, _ = self.run_generated_playbook(
             playbook_path,
             target_hosts,
             machine_scope=False,
             last_applied_action='get_node_info',
-            show_output=False,
+            show_output=bool(DEBUG_ANSIBLE),
             timeout=self.connection_timeout * 2,
         )
 
@@ -13443,7 +14638,37 @@ PY"""
         node_results = self._parse_node_info_output(output)
         if not node_results:
             self.print_colored("No node information could be parsed from the playbook output.", 'yellow')
-            self.print_colored("This might be because the nodes are not running or not accessible.", 'yellow')
+            # Distinguish the obvious failure modes instead of lumping them
+            # under the generic "nodes not running / not accessible" line.
+            hints: List[str] = []
+            if 'command not found' in output.lower() or 'no such file' in output.lower():
+                hints.append(
+                    "  • 'get_node_info' wrapper is missing at /usr/local/bin on the host — "
+                    "re-run Install for this node or check the setup role."
+                )
+            if 'permission denied' in output.lower() and 'docker' in output.lower():
+                hints.append(
+                    "  • ssh user lacks docker group access — the install adds them, but "
+                    "existing sessions may be stale; open a new SSH session or reboot."
+                )
+            if 'UNREACHABLE' in output:
+                hints.append(
+                    "  • one or more nodes were unreachable via SSH during the probe."
+                )
+            if not hints:
+                hints.append(
+                    "  • the container may still be initializing — wait ~30s after install "
+                    "and retry, or run with --debug-ansible to see the raw playbook output."
+                )
+            for hint in hints:
+                self.print_colored(hint, 'yellow')
+            # Print the last ~40 lines of the raw playbook output so the user
+            # has something concrete to paste into a bug report.
+            tail = (output or '').splitlines()[-40:]
+            if tail:
+                self.print_colored("Last playbook lines:", 'cyan')
+                for line in tail:
+                    self.print_colored(f"    {line}", 'white')
             return None
 
         return node_results
@@ -14230,17 +15455,6 @@ PY"""
                 config_name, metadata = configs[0]
                 display_name = config_name.replace('.yml', '')
 
-                # Extract custom name for display
-                custom_name = display_name
-                if '_' in display_name:
-                    parts = display_name.split('_')
-                    if len(parts) >= 2:
-                        # Find where the timestamp starts (8 digits)
-                        for idx, part in enumerate(parts):
-                            if len(part) == 8 and part.isdigit():
-                                custom_name = '_'.join(parts[:idx])
-                                break
-
                 env = metadata.get('environment', 'unknown')
                 nodes = metadata.get('nodes_count', 0)
                 machines = metadata.get('machines_count', 0)
@@ -14249,16 +15463,16 @@ PY"""
                 else:
                     count_label = f"{nodes} node(s)"
 
-                self.print_colored(f"\n📁 Found 1 saved configuration: {custom_name} ({env}, {count_label})", 'cyan')
+                self.print_colored(f"\n📁 Found 1 saved configuration: {display_name} ({env}, {count_label})", 'cyan')
                 self.print_colored("Automatically activating the only available configuration...", 'yellow')
 
                 if self._load_config_by_name(display_name):
-                    self.print_colored(f"✅ Successfully activated configuration: {custom_name}", 'green')
+                    self.print_colored(f"✅ Successfully activated configuration: {display_name}", 'green')
                     self.print_colored("Proceeding to main menu...", 'green')
                     self.wait_for_enter()
                     return True
                 else:
-                    self.print_colored(f"❌ Failed to activate configuration: {custom_name}", 'red')
+                    self.print_colored(f"❌ Failed to activate configuration: {display_name}", 'red')
                     self.print_colored("The configuration file may be corrupted. Please create a new one.", 'red')
                     self._create_machine_first_configuration()
                     return True
@@ -14277,17 +15491,6 @@ PY"""
                 created_at = metadata.get('created_at')
                 last_deployed_date = metadata.get('last_deployed_date')
                 deployment_status = metadata.get('deployment_status', 'never_deployed')
-
-                # Extract custom name from the config name
-                custom_name = display_name
-                if '_' in display_name:
-                    parts = display_name.split('_')
-                    if len(parts) >= 2:
-                        # Find where the timestamp starts (8 digits)
-                        for idx, part in enumerate(parts):
-                            if len(part) == 8 and part.isdigit():
-                                custom_name = '_'.join(parts[:idx])
-                                break
 
                 # Format creation date
                 created_str = _parse_iso_datetime(created_at) or "Unknown"
@@ -14309,7 +15512,7 @@ PY"""
                     count_label = f"{machines} machine(s), 0 instances"
                 else:
                     count_label = f"{nodes} node(s)"
-                self.print_colored(f"  {i}. {custom_name}", 'cyan', bold=True)
+                self.print_colored(f"  {i}. {display_name}", 'cyan', bold=True)
                 self.print_colored(f"     {env} | {count_label} | Created: {created_str}{deployment_str}", 'white')
 
             while True:
@@ -14405,14 +15608,20 @@ PY"""
     def run(self) -> None:
         """Main program loop"""
         # Handle command line arguments
-        global DEBUG
-        if len(sys.argv) > 1:
-            if sys.argv[1] == '--version':
+        global DEBUG, DEBUG_ANSIBLE
+        for arg in sys.argv[1:]:
+            if arg == '--version':
                 print(f"r1setup version {CLI_VERSION}")
                 sys.exit(0)
-            elif sys.argv[1] == '--debug':
+            elif arg == '--debug':
                 DEBUG = True
                 self.print_colored("Debug mode enabled", 'yellow')
+            elif arg == '--debug-ansible':
+                DEBUG_ANSIBLE = True
+                self.print_colored(
+                    "Ansible debug mode enabled (ansible-playbook -vvv, ANSIBLE_STDOUT_CALLBACK=debug)",
+                    'yellow',
+                )
 
         # Check prerequisites
         if not self.check_ansible_installation():
@@ -14445,6 +15654,20 @@ PY"""
             try:
                 self.show_main_menu()
                 choice = self.get_input("Select option (0-7)", "0")
+
+                # Gate entries 2-5 and 7 when no active config.
+                # Entry 1 (Configuration Menu) and 6 (Settings) and 0 (Exit)
+                # remain always available. The user must pick or create a
+                # config from Configuration Menu → Manage Configurations
+                # before the deployment/operations/monitoring paths reopen.
+                has_active = bool(self.active_config.get('config_name'))
+                if not has_active and choice in ('2', '3', '4', '5', '7'):
+                    self.print_colored(
+                        "No active configuration. Open 1) Configuration Menu → 2) Manage Configurations to pick or create one.",
+                        'yellow',
+                    )
+                    self.wait_for_enter()
+                    continue
 
                 if choice == '0':
                     self.print_colored("Thank you for using Ratio1 Multi-Node Launcher Setup!", 'green')
@@ -15229,10 +16452,17 @@ PY"""
             self._update_node_status(node_name, status_data['status'])
         self.settings_manager.mark_status_refreshed()
 
+        # Reconcile the config-level deployment_status with what the probe
+        # just observed. A stale "deleted" label from a prior teardown
+        # shouldn't persist once we've confirmed nodes are actually running
+        # again — that was the footgun where the banner kept saying
+        # "🗑️ deleted" while the per-node line showed "🟢 running".
+        self._reconcile_deployment_status_from_probes(node_status_data)
+
         # Clear and display beautiful status
         self.clear_screen()
         self.print_header("Container Status")
-        
+
         # Show deployment status overview (like deployment menu does)
         self._load_active_config()
         deployment_display = self._get_deployment_display_state(
@@ -15251,6 +16481,16 @@ PY"""
         print()
         target_service_version = self.get_mnl_service_version()
         machine_views = self.build_machine_group_views(node_status_data=node_status_data)
+
+        # Restrict the view to machines that carry at least one instance in
+        # this config's inventory. Fleet-state may contain empty registered
+        # machines (legacy Register-Machine flow, leftovers from other
+        # configs, etc.) — those belong in Fleet Summary, not in the
+        # "status of my nodes" view. Without this filter a config with 1
+        # node can render 7 noisy "📭 No Instances" entries for machines
+        # that are not what the user is asking about. The dict key on the
+        # view is 'instances' (see build_machine_group_views).
+        machine_views = [v for v in machine_views if v.get('instances')]
 
         # Count status
         running = sum(1 for data in node_status_data.values() if data['status'] == 'running')
@@ -15535,7 +16775,7 @@ PY"""
             machine_scope=False,
             last_applied_action=playbook_name.replace('.yml', ''),
             show_output=True,
-            timeout=self.connection_timeout,
+            timeout=self.playbook_timeout,
         )
 
         if success:

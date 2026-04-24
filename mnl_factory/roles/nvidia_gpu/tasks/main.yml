@@ -98,7 +98,7 @@
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
     - nvidia_smi_check1.rc != 0
-    - ansible_os_family == "Debian"
+    - ansible_facts['os_family'] == "Debian"
   register: nvidia_cleanup
   ignore_errors: true
 
@@ -142,7 +142,7 @@
   when: 
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
-    - ansible_os_family == "Debian"
+    - ansible_facts['os_family'] == "Debian"
   register: apt_update
   retries: 5
   delay: 10
@@ -198,7 +198,7 @@
   when: 
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
-    - ansible_os_family == "Debian"
+    - ansible_facts['os_family'] == "Debian"
   register: apt_extra_update
   retries: 5
   delay: 10
@@ -209,7 +209,7 @@
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
     - nvidia_smi_check1.rc != 0 
-    - ansible_os_family == "Debian"
+    - ansible_facts['os_family'] == "Debian"
   shell: "apt-cache show {{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version) }} > /dev/null 2>&1"
   register: driver_availability_check
   ignore_errors: true
@@ -221,7 +221,7 @@
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
     - nvidia_smi_check1.rc != 0 
-    - ansible_os_family == "Debian"
+    - ansible_facts['os_family'] == "Debian"
     - driver_availability_check.rc != 0
   shell: "apt-cache search nvidia-driver- | grep '^nvidia-driver-[0-9]' | sed 's/ .*//' | sort -V | tail -1"
   register: best_available_driver
@@ -233,7 +233,7 @@
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
     - nvidia_smi_check1.rc != 0 
-    - ansible_os_family == "Debian"
+    - ansible_facts['os_family'] == "Debian"
   set_fact:
     final_driver_package: "{{ nvidia_driver | default('nvidia-driver-' + nvidia_driver_version) if driver_availability_check.rc == 0 else (best_available_driver.stdout if best_available_driver.stdout is defined and best_available_driver.stdout | length > 0 else nvidia_driver | default('nvidia-driver-' + nvidia_driver_version)) }}"
   # Set the final driver package name to use for installation
@@ -252,7 +252,7 @@
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
     - nvidia_smi_check1.rc != 0 
-    - ansible_os_family == "Debian"
+    - ansible_facts['os_family'] == "Debian"
     - final_driver_package is defined
   apt:
     update_cache: yes
@@ -283,7 +283,7 @@
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
     - nvidia_smi_check1.rc != 0 
-    - ansible_os_family == "Debian"
+    - ansible_facts['os_family'] == "Debian"
     - final_driver_package is defined
   ansible.builtin.dpkg_selections:
     name:  "{{ final_driver_package }}"
@@ -346,7 +346,7 @@
   when: 
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
-    - ansible_os_family == "Debian"
+    - ansible_facts['os_family'] == "Debian"
     - final_driver_package is defined
 
 - name: "Show held {{ final_driver_package }}"
@@ -355,7 +355,7 @@
   when: 
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
-    - ansible_os_family == "Debian"
+    - ansible_facts['os_family'] == "Debian"
     - final_driver_package is defined
   # Outputs the result of the check for the held NVIDIA driver package.
 
@@ -391,7 +391,7 @@
   when:
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
-    - ansible_os_family == "Debian"
+    - ansible_facts['os_family'] == "Debian"
 
 - name: Setup NVIDIA Container Toolkit repository if not available
   block:
@@ -421,7 +421,7 @@
   when:
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
-    - ansible_os_family == "Debian"
+    - ansible_facts['os_family'] == "Debian"
     - nvidia_toolkit_available.rc != 0
 
 - name: Install NVIDIA Container Toolkit
@@ -433,7 +433,7 @@
   when:
     - (skip_gpu is not defined or not skip_gpu)
     - nvidia_gpu_check.rc == 0
-    - ansible_os_family == "Debian"
+    - ansible_facts['os_family'] == "Debian"
   register: nvidia_toolkit_install
   retries: 3
   delay: 5

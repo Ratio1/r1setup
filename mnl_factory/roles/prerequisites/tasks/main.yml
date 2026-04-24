@@ -2,7 +2,7 @@
 # First ensure no other apt processes are running
 - name: Wait for apt locks
   shell: while fuser /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do sleep 1; done
-  when: ansible_os_family == "Debian"
+  when: ansible_facts['os_family'] == "Debian"
 
 - name: Clean up existing Docker repository configurations
   file:
@@ -13,31 +13,31 @@
     - /etc/apt/keyrings/docker.asc
     - /etc/apt/trusted.gpg.d/docker.gpg
     - /etc/apt/sources.list.d/download_docker_com_linux_ubuntu.list
-  when: ansible_os_family == "Debian"
+  when: ansible_facts['os_family'] == "Debian"
 
 - name: Fix broken packages (Debian/Ubuntu)
   apt:
     autoclean: yes
     autoremove: yes
-  when: ansible_os_family == "Debian"
+  when: ansible_facts['os_family'] == "Debian"
   ignore_errors: true
 
 - name: Check for held packages (Debian/Ubuntu)
   shell: apt-mark showhold
   register: held_packages
-  when: ansible_os_family == "Debian"
+  when: ansible_facts['os_family'] == "Debian"
   changed_when: false
 
 - name: Display held packages
   debug:
     msg: "Held packages: {{ held_packages.stdout_lines }}"
-  when: ansible_os_family == "Debian" and held_packages.stdout_lines | length > 0
+  when: ansible_facts['os_family'] == "Debian" and held_packages.stdout_lines | length > 0
 
 - name: Update package cache (Debian/Ubuntu)
   apt:
     update_cache: yes
     cache_valid_time: 3600
-  when: ansible_os_family == "Debian"
+  when: ansible_facts['os_family'] == "Debian"
   register: apt_update
   retries: 5
   delay: 10
@@ -46,7 +46,7 @@
 - name: Update package cache (RHEL)
   dnf:
     update_cache: yes
-  when: ansible_os_family == "RedHat"
+  when: ansible_facts['os_family'] == "RedHat"
 
 - name: Install basic packages first (Debian/Ubuntu)
   apt:
@@ -67,7 +67,7 @@
     state: present
     autoremove: yes
     autoclean: yes
-  when: ansible_os_family == "Debian"
+  when: ansible_facts['os_family'] == "Debian"
   register: basic_packages_install
   retries: 5
   delay: 10
@@ -76,35 +76,35 @@
 - name: Check current python3 version (Debian/Ubuntu)
   shell: dpkg-query -W -f='${Version}' python3
   register: python3_version
-  when: ansible_os_family == "Debian"
+  when: ansible_facts['os_family'] == "Debian"
   changed_when: false
 
 - name: Display python3 version
   debug:
     msg: "Current python3 version: {{ python3_version.stdout }}"
-  when: ansible_os_family == "Debian"
+  when: ansible_facts['os_family'] == "Debian"
 
 - name: Check available python3-dev versions (Debian/Ubuntu)
   shell: apt-cache policy python3-dev
   register: python3_dev_versions
-  when: ansible_os_family == "Debian"
+  when: ansible_facts['os_family'] == "Debian"
   changed_when: false
 
 - name: Display available python3-dev versions
   debug:
     msg: "Available python3-dev versions: {{ python3_dev_versions.stdout_lines }}"
-  when: ansible_os_family == "Debian"
+  when: ansible_facts['os_family'] == "Debian"
 
 - name: Get available python3-dev package versions (Debian/Ubuntu)
   shell: apt-cache madison python3-dev
   register: python3_dev_available_versions
-  when: ansible_os_family == "Debian"
+  when: ansible_facts['os_family'] == "Debian"
   changed_when: false
 
 - name: Display available python3-dev package versions
   debug:
     msg: "Available python3-dev package versions: {{ python3_dev_available_versions.stdout_lines }}"
-  when: ansible_os_family == "Debian"
+  when: ansible_facts['os_family'] == "Debian"
 
 - name: Install python3-dev with specific version if needed (Debian/Ubuntu)
   apt:
@@ -112,7 +112,7 @@
     state: present
     autoremove: yes
     autoclean: yes
-  when: ansible_os_family == "Debian"
+  when: ansible_facts['os_family'] == "Debian"
   register: python3_dev_install
   retries: 2
   delay: 3
@@ -124,7 +124,7 @@
     state: present
     autoremove: yes
     autoclean: yes
-  when: ansible_os_family == "Debian" and python3_dev_install is failed
+  when: ansible_facts['os_family'] == "Debian" and python3_dev_install is failed
   register: python3_dev_install_generic
   retries: 3
   delay: 5
@@ -134,7 +134,7 @@
   shell: |
     apt-get update
     apt-get install -y python3-dev
-  when: ansible_os_family == "Debian" and python3_dev_install is failed and python3_dev_install_generic is failed
+  when: ansible_facts['os_family'] == "Debian" and python3_dev_install is failed and python3_dev_install_generic is failed
   register: python3_dev_install_shell
   retries: 3
   delay: 5
@@ -144,7 +144,7 @@
   shell: |
     apt-get update
     apt-get install -y python3-dev --fix-broken --allow-downgrades --force-yes
-  when: ansible_os_family == "Debian" and python3_dev_install is failed and python3_dev_install_generic is failed and python3_dev_install_shell is failed
+  when: ansible_facts['os_family'] == "Debian" and python3_dev_install is failed and python3_dev_install_generic is failed and python3_dev_install_shell is failed
   register: force_python3_dev_install
   retries: 3
   delay: 5
@@ -169,7 +169,7 @@
       - make
       - git
     state: present
-  when: ansible_os_family == "RedHat"
+  when: ansible_facts['os_family'] == "RedHat"
 
 # Python packages for Ansible Docker modules are now installed via system package manager above
 # This avoids PEP 668 "externally-managed-environment" issues on newer Python versions
@@ -178,7 +178,7 @@
 #  apt:
 #    upgrade: full
 #    update_cache: yes
-#  when: ansible_os_family == "Debian"
+#  when: ansible_facts['os_family'] == "Debian"
 #  register: apt_upgrade
 #  retries: 5
 #  delay: 10
@@ -188,4 +188,4 @@
 #  dnf:
 #    name: "*"
 #    state: latest
-#  when: ansible_os_family == "RedHat"
+#  when: ansible_facts['os_family'] == "RedHat"

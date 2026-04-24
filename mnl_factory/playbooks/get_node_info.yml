@@ -4,8 +4,37 @@
   become: false
   gather_facts: true
   tasks:
-    - name: Run get_node_info command
-      ansible.builtin.shell: "{{ r1setup_remote_get_node_info_command }}"
+    - name: Run get_node_info command (host wrapper first, docker exec fallback)
+      # Try the host wrapper (/usr/local/bin/get_node_info in standard mode,
+      # r1service in expert mode). If that is missing (setup role was
+      # incomplete or this host was manually provisioned), fall back to
+      # reading the same file the wrapper would have cat'd, directly via
+      # docker exec. We embed the bundled edge_node script at
+      # ../remote_cmds/get_node_info into the shell task verbatim and
+      # extract the FILE=... line with grep — that way the playbook has a
+      # single source of truth for the path (the bundled script) without
+      # wrestling with YAML→Jinja regex escaping.
+      vars:
+        _node_info_cmd: "{{ r1setup_remote_get_node_info_command }}"
+      ansible.builtin.shell: |
+        set -o pipefail
+        CMD={{ _node_info_cmd | quote }}
+        FIRST_WORD="${CMD%% *}"
+        BUNDLED={{ lookup('file', playbook_dir + '/../remote_cmds/get_node_info') | quote }}
+        CONTAINER_FILE=$(printf '%s\n' "$BUNDLED" | grep -m1 -oE 'FILE=[^[:space:]]+' | cut -d= -f2-)
+
+        if command -v "$FIRST_WORD" >/dev/null 2>&1; then
+          eval "$CMD"
+        elif [ -n "$CONTAINER_FILE" ] \
+             && command -v docker >/dev/null 2>&1 \
+             && docker inspect {{ mnl_docker_container_name | quote }} >/dev/null 2>&1; then
+          docker exec -i {{ mnl_docker_container_name | quote }} bash -lc "cat ${CONTAINER_FILE}"
+        else
+          echo "neither '${FIRST_WORD}' wrapper nor container '{{ mnl_docker_container_name }}' is reachable on this host" >&2
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
       register: node_info
       ignore_errors: true
 
@@ -17,4 +46,5 @@
     - name: Display error if command failed
       debug:
         var: node_info.stderr_lines
-      when: node_info.stderr_lines is defined and node_info.stderr_lines | length > 0 
+      when: node_info.stderr_lines is defined and node_info.stderr_lines | length > 0
+
