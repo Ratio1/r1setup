@@ -5,6 +5,26 @@ Ansible collection are recorded here. The CLI version (`scripts/ver.py`)
 and the collection version (`mnl_factory/galaxy.yml`) track separate
 lineages and may bump independently.
 
+## Collection 1.5.1 — 2026-05-21
+
+Patch release covering a deployment-blocker on fresh installs.
+
+### Fixed
+
+- **Declare collection dependencies in `galaxy.yml`.** Previously the
+  collection's runtime deps (`community.docker`, `community.general`,
+  `ansible.posix`) were only listed in `mnl_factory/requirements.yml`,
+  which Galaxy does not consume. Fresh installs via the CLI updater
+  (`_update_ansible_collection`) or the bootstrap script
+  (`2_ansible_setup.sh`) ran `ansible-galaxy collection install
+  ratio1.multi_node_launcher` without `-r requirements.yml` and ended
+  up with no `community/` subtree on disk. The first playbook task that
+  hit `docker_login` then failed with `couldn't resolve module/action
+  'docker_login'` and the instance status flipped to Error. The deps
+  are now declared in `galaxy.yml`, so any `ansible-galaxy collection
+  install ratio1.multi_node_launcher` pulls them transitively. No CLI
+  code change required.
+
 ## CLI 1.9.0 / Collection 1.5.0 — 2026-04-24
 
 Minor release covering five themes from the `refactor/config-management`
