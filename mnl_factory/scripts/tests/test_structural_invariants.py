@@ -136,18 +136,18 @@ class TestStructuralInvariants(unittest.TestCase):
         )
         self.assertRegex(
             group_vars_source,
-            r"(?m)^mnl_service_start_limit_burst:\s*20$",
-            "mnl.yml must default to 20 failed starts before reboot action",
+            r"(?m)^mnl_service_start_limit_burst:\s*30$",
+            "mnl.yml must default to 30 failed starts before reboot action",
         )
         self.assertRegex(
             group_vars_source,
-            r"(?m)^mnl_service_start_limit_interval_sec:\s*600$",
-            "mnl.yml must keep the restart-loop watchdog window at 10 minutes",
+            r"(?m)^mnl_service_start_limit_interval_sec:\s*1800$",
+            "mnl.yml must keep the restart-loop watchdog window at 30 minutes",
         )
         self.assertRegex(
             group_vars_source,
-            r"(?m)^mnl_service_restart_sec:\s*30$",
-            "mnl.yml must space fast crash-loop retries across roughly 10 minutes",
+            r"(?m)^mnl_service_restart_sec:\s*60$",
+            "mnl.yml must space fast crash-loop retries across roughly 30 minutes",
         )
 
         self.assertIn(
@@ -156,17 +156,17 @@ class TestStructuralInvariants(unittest.TestCase):
             "edge_node.service.j2 must embed mnl_service_version for deployed service tracking",
         )
         self.assertIn(
-            "StartLimitBurst={{ mnl_service_start_limit_burst | default(20) }}",
+            "StartLimitBurst={{ mnl_service_start_limit_burst | default(30) }}",
             template_source,
             "edge_node.service.j2 fallback must match the group_vars restart limit",
         )
         self.assertIn(
-            "StartLimitIntervalSec={{ mnl_service_start_limit_interval_sec | default(600) }}",
+            "StartLimitIntervalSec={{ mnl_service_start_limit_interval_sec | default(1800) }}",
             template_source,
             "edge_node.service.j2 fallback must match the group_vars restart window",
         )
         self.assertIn(
-            "RestartSec={{ mnl_service_restart_sec | default(30) }}",
+            "RestartSec={{ mnl_service_restart_sec | default(60) }}",
             template_source,
             "edge_node.service.j2 fallback must match the group_vars restart back-off",
         )

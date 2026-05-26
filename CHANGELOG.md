@@ -5,6 +5,19 @@ Ansible collection are recorded here. The CLI version (`scripts/ver.py`)
 and the collection version (`mnl_factory/galaxy.yml`) track separate
 lineages and may bump independently.
 
+## Collection 1.5.3 — 2026-05-26
+
+Extend the restart-loop intervention window before host reboot.
+
+### Changed
+
+- **Longer `edge_node.service` restart-loop window.** The restart watchdog
+  now uses `StartLimitBurst=30`, `StartLimitIntervalSec=1800`, and
+  `RestartSec=60`, giving operators roughly 30 minutes to intervene in a
+  fast crash loop before `StartLimitAction=reboot` fires. The service
+  template marker remains `v2` because the earlier `v2` watchdog template
+  has not been propagated as a canonical release.
+
 ## Collection 1.5.2 — 2026-05-21
 
 Reboot the host when the edge_node service is stuck in a restart loop.

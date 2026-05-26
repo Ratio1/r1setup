@@ -9,12 +9,12 @@ mnl_dev_mode: false
 
 # Restart-loop watchdog: if the edge_node service hits `mnl_service_start_limit_burst`
 # start attempts inside `mnl_service_start_limit_interval_sec` seconds, systemd
-# reboots the host instead of continuing to flap. The default 30s back-off lets
-# a fast crash loop consume roughly the full 10-minute window before rebooting.
+# reboots the host instead of continuing to flap. The default 60s back-off lets
+# a fast crash loop consume roughly the full 30-minute window before rebooting.
 # Tune per fleet if needed.
-mnl_service_start_limit_burst: 20
-mnl_service_start_limit_interval_sec: 600
-mnl_service_restart_sec: 30
+mnl_service_start_limit_burst: 30
+mnl_service_start_limit_interval_sec: 1800
+mnl_service_restart_sec: 60
 
 # Service configuration
 edge_node_service_name: "edge_node"
