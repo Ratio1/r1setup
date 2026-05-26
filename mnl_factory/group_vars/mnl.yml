@@ -4,8 +4,17 @@ mnl_app_name: "edge_node"
 mnl_app_version: "1.0.0"
 # Version marker embedded in edge_node.service for tracking service-unit changes.
 # Bump this when the systemd template/behavior changes and redeploy the service.
-mnl_service_version: "v1"
+mnl_service_version: "v2"
 mnl_dev_mode: false
+
+# Restart-loop watchdog: if the edge_node service hits `mnl_service_start_limit_burst`
+# start attempts inside `mnl_service_start_limit_interval_sec` seconds, systemd
+# reboots the host instead of continuing to flap. The default 30s back-off lets
+# a fast crash loop consume roughly the full 10-minute window before rebooting.
+# Tune per fleet if needed.
+mnl_service_start_limit_burst: 20
+mnl_service_start_limit_interval_sec: 600
+mnl_service_restart_sec: 30
 
 # Service configuration
 edge_node_service_name: "edge_node"

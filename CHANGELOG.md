@@ -5,6 +5,27 @@ Ansible collection are recorded here. The CLI version (`scripts/ver.py`)
 and the collection version (`mnl_factory/galaxy.yml`) track separate
 lineages and may bump independently.
 
+## Collection 1.5.2 — 2026-05-21
+
+Reboot the host when the edge_node service is stuck in a restart loop.
+
+### Changed
+
+- **`edge_node.service` restart-loop watchdog.** The unit previously had
+  `StartLimitBurst=0` (limit disabled) plus `Restart=always`, so a node
+  that kept crashing would just flap forever — the operator only noticed
+  via dashboards. The unit now sets `StartLimitBurst=20`,
+  `StartLimitIntervalSec=600` and `StartLimitAction=reboot` on `[Unit]`:
+  if the service fails 20 times within 10 minutes systemd reboots the
+  host instead of continuing the loop. A `RestartSec=30` back-off is also
+  added so a fast crash loop gives the operator roughly the full
+  10-minute window before rebooting. The reboot threshold and back-off
+  are tunable via three new group_vars
+  (`mnl_service_start_limit_burst`, `mnl_service_start_limit_interval_sec`,
+  `mnl_service_restart_sec`). Operators can dial them per fleet without
+  re-publishing the collection. `mnl_service_version` bumps `v1` → `v2`
+  so existing hosts re-render the unit on the next apply.
+
 ## Collection 1.5.1 — 2026-05-21
 
 Patch release covering a deployment-blocker on fresh installs.

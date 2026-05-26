@@ -131,14 +131,44 @@ class TestStructuralInvariants(unittest.TestCase):
         self.assertIsNotNone(service_version_match, "mnl_service_version must be defined in group_vars/mnl.yml")
         self.assertEqual(
             service_version_match.group(1),
-            "v1",
+            "v2",
             "mnl_service_version should default to a visible service-template revision",
+        )
+        self.assertRegex(
+            group_vars_source,
+            r"(?m)^mnl_service_start_limit_burst:\s*20$",
+            "mnl.yml must default to 20 failed starts before reboot action",
+        )
+        self.assertRegex(
+            group_vars_source,
+            r"(?m)^mnl_service_start_limit_interval_sec:\s*600$",
+            "mnl.yml must keep the restart-loop watchdog window at 10 minutes",
+        )
+        self.assertRegex(
+            group_vars_source,
+            r"(?m)^mnl_service_restart_sec:\s*30$",
+            "mnl.yml must space fast crash-loop retries across roughly 10 minutes",
         )
 
         self.assertIn(
             "{{ mnl_service_version }}",
             template_source,
             "edge_node.service.j2 must embed mnl_service_version for deployed service tracking",
+        )
+        self.assertIn(
+            "StartLimitBurst={{ mnl_service_start_limit_burst | default(20) }}",
+            template_source,
+            "edge_node.service.j2 fallback must match the group_vars restart limit",
+        )
+        self.assertIn(
+            "StartLimitIntervalSec={{ mnl_service_start_limit_interval_sec | default(600) }}",
+            template_source,
+            "edge_node.service.j2 fallback must match the group_vars restart window",
+        )
+        self.assertIn(
+            "RestartSec={{ mnl_service_restart_sec | default(30) }}",
+            template_source,
+            "edge_node.service.j2 fallback must match the group_vars restart back-off",
         )
         self.assertIn(
             "R1SETUP_SERVICE_FILE_VERSION",

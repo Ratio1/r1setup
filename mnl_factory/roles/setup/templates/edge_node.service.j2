@@ -4,11 +4,14 @@
 Description=MultiNodeLauncher Execution Engine
 After=docker.service
 Requires=docker.service
+StartLimitBurst={{ mnl_service_start_limit_burst | default(20) }}
+StartLimitIntervalSec={{ mnl_service_start_limit_interval_sec | default(600) }}
+StartLimitAction=reboot
 
 [Service]
-StartLimitBurst=0
 TimeoutStartSec=0
 Restart=always
+RestartSec={{ mnl_service_restart_sec | default(30) }}
 Environment="R1SETUP_SERVICE_FILE_VERSION={{ mnl_service_version }}"
 
 # Stop the container if it exists
