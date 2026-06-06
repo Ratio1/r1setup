@@ -5,6 +5,17 @@ Ansible collection are recorded here. The CLI version (`scripts/ver.py`)
 and the collection version (`mnl_factory/galaxy.yml`) track separate
 lineages and may bump independently.
 
+## Collection 1.5.4 - 2026-06-06
+
+Patch release for edge-node host preparation.
+
+### Added
+
+- **Install `htop` during machine preparation.** The prerequisites role
+  now installs `htop` on Debian/Ubuntu and RHEL hosts before Docker and
+  edge-node runtime setup, making the process monitor available on newly
+  prepared nodes.
+
 ## Collection 1.5.3 — 2026-05-26
 
 Extend the restart-loop intervention window before host reboot.

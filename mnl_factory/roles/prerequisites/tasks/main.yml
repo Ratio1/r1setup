@@ -64,6 +64,7 @@
       - python3-urllib3
       - build-essential
       - git
+      - htop
     state: present
     autoremove: yes
     autoclean: yes
@@ -168,6 +169,7 @@
       - gcc-c++
       - make
       - git
+      - htop
     state: present
   when: ansible_facts['os_family'] == "RedHat"
 
