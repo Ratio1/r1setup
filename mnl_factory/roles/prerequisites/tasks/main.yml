@@ -65,6 +65,7 @@
       - build-essential
       - git
       - htop
+      - nano
     state: present
     autoremove: yes
     autoclean: yes
@@ -170,6 +171,7 @@
       - make
       - git
       - htop
+      - nano
     state: present
   when: ansible_facts['os_family'] == "RedHat"
 
