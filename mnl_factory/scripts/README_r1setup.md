@@ -76,6 +76,7 @@ Notes:
 - `Fleet Summary` and `Node Status & Info` now group instances by physical machine, so expert-mode multi-instance hosts and empty registered machines are shown explicitly while standard one-machine-one-node setups remain concise
 - Discovery scans can now keep showing services found on a machine even when you choose not to import them into the current config
 - Display/export node addresses
+- Remote host data collection guidance lives in [`../../docs/20260609_141041_remote_host_data_collection.md`](../../docs/20260609_141041_remote_host_data_collection.md)
 
 ### Settings
 - Change network environment (mainnet/testnet/devnet)

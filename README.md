@@ -72,6 +72,8 @@ python3 test_r1setup.py
   - optional SSH password-auth disable after successful verification
 
 See [mnl_factory/scripts/README_r1setup.md](mnl_factory/scripts/README_r1setup.md) for CLI-specific operator guidance.
+For read-only remote host data collection patterns, see
+[docs/20260609_141041_remote_host_data_collection.md](docs/20260609_141041_remote_host_data_collection.md).
 
 ### Configuration
 
