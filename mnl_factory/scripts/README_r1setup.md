@@ -81,11 +81,37 @@ Notes:
 ### Settings
 - Change network environment (mainnet/testnet/devnet)
 
+## Help & FAQ
+Open `Main Menu -> Help & FAQ` for read-only operator guidance inside the CLI. The menu is also
+available from the first-run configuration-required prompts, so users can read the concepts before
+creating or importing a config.
+
+Current topics:
+
+- Core concepts
+- First-time setup
+- Register Machine vs Add Node
+- Discovery and import
+- Deployment and Prepare Machines
+- Migration workflow
+- Rollback vs Finalize Migration
+- Service file updates
+- SSH/auth troubleshooting
+- Common mistakes
+
+The migration help explicitly covers the standard target rule: register the destination machine,
+do not add it as a node first, then use `Execute Migration` to move the existing node assignment in
+the same config.
+
 ## Discovery And Import
 Discovery and import are integrated into the first-run onboarding flow. They are also available standalone under `Configuration Menu`:
 
 - `Register Machine`: add a fleet machine without deploying a node (delegates to the same shared registration helper used by onboarding)
 - `Discover Services`: scan a registered machine for existing remote `edge_node` services and import only the ones you choose
+
+If `Register Machine` is not visible in an existing config, switch the config to Advanced Mode first.
+That switch is one-way because advanced configs can represent machine-level state that simple mode
+does not expose.
 
 Discovery/import rules:
 
@@ -150,10 +176,12 @@ Current migration support lives under `Deployment Menu`:
 Target machine rule:
 
 - Register the destination with `Register Machine` before planning the migration.
+- If `Register Machine` is not visible, use `Configuration Menu -> Switch to Advanced Mode` first.
 - Do not use `Add Node` on the destination first. In standard mode, an added node creates an assigned
   instance placeholder and the target is no longer empty.
 - `Execute Migration` moves the selected existing node onto the registered target machine and updates
   its assignment in the same config; the user does not add that node to the config again afterward.
+- For the in-app explanation, open `Main Menu -> Help & FAQ -> Migration workflow`.
 
 Execution currently follows:
 

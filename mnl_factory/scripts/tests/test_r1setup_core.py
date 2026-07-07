@@ -1695,7 +1695,7 @@ class TestTrackedLiveNodeMessaging(unittest.TestCase):
         self.assertIn("actively tracking live runtimes", display["status_note"])
         self.assertIn("imported from discovery or moved via migration", display["status_note"])
 
-    def test_combined_status_and_info_describes_tracked_live_nodes(self):
+    def test_combined_status_and_info_shows_deployed_machine_group_for_live_nodes(self):
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)
         app.check_hosts_config = MagicMock(return_value=True)
         app.load_configuration = MagicMock()
@@ -1737,9 +1737,9 @@ class TestTrackedLiveNodeMessaging(unittest.TestCase):
         app.combined_node_status_and_info()
 
         rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
-        self.assertIn("Deployment: 📡 Tracking 1 live node(s)", rendered_text)
-        self.assertIn("actively tracking live runtimes", rendered_text)
-        self.assertIn("imported from discovery or moved via migration", rendered_text)
+        self.assertIn("Deployment: 🚀 Deployed", rendered_text)
+        self.assertIn("Machine Groups (1 machines / 1 instances)", rendered_text)
+        self.assertIn("node-1 [RUNNING]", rendered_text)
 
 
 class TestCancellationGuidance(unittest.TestCase):
@@ -1994,6 +1994,7 @@ class TestSharedConfigCreationPrimitives(unittest.TestCase):
         cm.app = MagicMock()
         cm.active_config = {}
         cm.fleet_state = None
+        cm._is_config_name_taken = MagicMock(return_value=None)
         return cm
 
     def test_prompt_new_config_name_returns_valid_name(self):
@@ -2024,23 +2025,6 @@ class TestSharedConfigCreationPrimitives(unittest.TestCase):
         hosts = cm.app.inventory['all']['children']['gpu_nodes']['hosts']
         self.assertEqual(hosts, {})
 
-    def test_generate_config_name_delegates_to_prompt_when_no_name(self):
-        cm = self._make_config_manager()
-        cm._prompt_new_config_name = MagicMock(return_value="auto-name")
-        result = cm._generate_config_name(3)
-        cm._prompt_new_config_name.assert_called_once()
-        self.assertIn("auto-name", result)
-        self.assertTrue(result.endswith("3n"))
-
-    def test_generate_config_name_skips_prompt_when_name_given(self):
-        cm = self._make_config_manager()
-        cm._prompt_new_config_name = MagicMock()
-        result = cm._generate_config_name(2, "explicit")
-        cm._prompt_new_config_name.assert_not_called()
-        self.assertIn("explicit", result)
-        self.assertTrue(result.endswith("2n"))
-
-
 class TestConfigCreationPathMigration(unittest.TestCase):
     """Tests that all config-creation entry points delegate to the machine-first flow."""
 
@@ -2054,7 +2038,6 @@ class TestConfigCreationPathMigration(unittest.TestCase):
         cm._prompt_new_config_name = MagicMock(return_value="test")
         cm._prompt_new_config_environment = MagicMock(return_value="devnet")
         cm._prompt_machine_count = MagicMock(return_value=1)
-        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1m")
         cm._reset_inventory_for_new_config = MagicMock()
         cm.ensure_configuration_shell = MagicMock()
         cm._collect_machine_registration_entries = MagicMock(return_value=["machine-1"])
@@ -2082,13 +2065,14 @@ class TestConfigCreationPathMigration(unittest.TestCase):
 
         cm._prompt_new_config_name = MagicMock(return_value="test")
         cm._prompt_new_config_environment = MagicMock(return_value="mainnet")
+        cm._select_configuration_mode = MagicMock(return_value=r1setup.CONFIG_MODE_ADVANCED)
         cm._prompt_machine_count = MagicMock(return_value=1)
-        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1m")
         cm._reset_inventory_for_new_config = MagicMock()
         cm.ensure_configuration_shell = MagicMock(side_effect=lambda *a, **kw: call_order.append('shell'))
         cm._collect_machine_registration_entries = MagicMock(
             side_effect=lambda *a, **kw: (call_order.append('register'), ["machine-1"])[1],
         )
+        cm._collect_advanced_instance_counts = MagicMock(return_value={"machine-1": 1})
         cm._onboarding_batch_discovery_and_import = MagicMock(return_value={
             'scanned': False, 'imported_total': 0, 'session_mode': 'simple', 'clean_machine_ids': [],
         })
@@ -2119,19 +2103,6 @@ class TestConfigCreationPathMigration(unittest.TestCase):
 
 class TestPhase2MachineFirstConfig(unittest.TestCase):
     """Tests for Phase 2 machine-first configuration flow."""
-
-    def test_generate_config_name_with_unit_m(self):
-        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
-        cm.app = MagicMock()
-        result = cm._generate_config_name(3, "fleet", unit='m')
-        self.assertIn("fleet", result)
-        self.assertTrue(result.endswith("3m"))
-
-    def test_generate_config_name_default_unit_n(self):
-        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
-        cm.app = MagicMock()
-        result = cm._generate_config_name(2, "test")
-        self.assertTrue(result.endswith("2n"))
 
     def test_prompt_machine_count_returns_positive(self):
         cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
@@ -2207,18 +2178,28 @@ class TestPhase2MachineFirstConfig(unittest.TestCase):
 
         cm._prompt_new_config_name = MagicMock(return_value="prod")
         cm._prompt_new_config_environment = MagicMock(return_value="mainnet")
+        cm._select_configuration_mode = MagicMock(return_value=r1setup.CONFIG_MODE_ADVANCED)
         cm._prompt_machine_count = MagicMock(return_value=2)
-        cm._generate_config_name = MagicMock(return_value="prod_20260329_1200_2m")
         cm._reset_inventory_for_new_config = MagicMock()
         cm.ensure_configuration_shell = MagicMock()
         cm._collect_machine_registration_entries = MagicMock(return_value=["m-1", "m-2"])
+        cm._collect_advanced_instance_counts = MagicMock(return_value={"m-1": 1, "m-2": 1})
+        cm._onboarding_batch_discovery_and_import = MagicMock(return_value={
+            'scanned': False, 'imported_total': 0, 'session_mode': r1setup.CONFIG_MODE_ADVANCED, 'clean_machine_ids': [],
+        })
+        cm._onboarding_gap_fill_clean_machines = MagicMock(return_value=0)
+        cm.app.print_section = MagicMock()
+        cm.app.print_colored = MagicMock()
 
         cm._create_machine_first_configuration()
 
-        cm._generate_config_name.assert_called_once_with(2, "prod", unit='m')
         cm._reset_inventory_for_new_config.assert_called_once()
-        cm.ensure_configuration_shell.assert_called_once_with("prod_20260329_1200_2m", "mainnet")
+        cm.ensure_configuration_shell.assert_called_once_with("prod", "mainnet", mode=r1setup.CONFIG_MODE_ADVANCED)
         cm._collect_machine_registration_entries.assert_called_once_with(2)
+        cm._collect_advanced_instance_counts.assert_called_once_with(["m-1", "m-2"])
+        cm._onboarding_batch_discovery_and_import.assert_called_once_with(
+            ["m-1", "m-2"], "mainnet", session_mode=r1setup.CONFIG_MODE_ADVANCED,
+        )
         # Verify summary output mentions machines
         printed = [call[0][0] for call in cm.app.print_colored.call_args_list]
         self.assertTrue(any("2 machine(s) registered" in p for p in printed))
@@ -2395,14 +2376,19 @@ class TestPhase3BatchDiscovery(unittest.TestCase):
         cm = self._make_cm()
         cm._prompt_new_config_name = MagicMock(return_value="test")
         cm._prompt_new_config_environment = MagicMock(return_value="testnet")
-        cm._select_configuration_mode = MagicMock(return_value="simple")
+        cm._select_configuration_mode = MagicMock(return_value=r1setup.CONFIG_MODE_ADVANCED)
         cm._prompt_machine_count = MagicMock(return_value=1)
-        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1m")
         cm._reset_inventory_for_new_config = MagicMock()
         cm.ensure_configuration_shell = MagicMock()
         cm._collect_machine_registration_entries = MagicMock(return_value=["m-1"])
+        cm._collect_advanced_instance_counts = MagicMock(return_value={"m-1": 1})
         cm._onboarding_batch_discovery_and_import = MagicMock(
-            return_value={"scanned": True, "imported_total": 0, "session_mode": "simple", "clean_machine_ids": []},
+            return_value={
+                "scanned": True,
+                "imported_total": 0,
+                "session_mode": r1setup.CONFIG_MODE_ADVANCED,
+                "clean_machine_ids": [],
+            },
         )
         cm._onboarding_gap_fill_clean_machines = MagicMock(return_value=0)
         cm.app.inventory = {"all": {"children": {"gpu_nodes": {"hosts": {}}}}}
@@ -2411,7 +2397,7 @@ class TestPhase3BatchDiscovery(unittest.TestCase):
         cm._create_machine_first_configuration()
 
         cm._onboarding_batch_discovery_and_import.assert_called_once_with(
-            ["m-1"], "testnet", session_mode="simple",
+            ["m-1"], "testnet", session_mode=r1setup.CONFIG_MODE_ADVANCED,
         )
 
 
@@ -2514,13 +2500,14 @@ class TestPhase4GapFill(unittest.TestCase):
         cm = self._make_cm()
         cm._prompt_new_config_name = MagicMock(return_value="test")
         cm._prompt_new_config_environment = MagicMock(return_value="testnet")
+        cm._select_configuration_mode = MagicMock(return_value=r1setup.CONFIG_MODE_ADVANCED)
         cm._prompt_machine_count = MagicMock(return_value=1)
-        cm._generate_config_name = MagicMock(return_value="test_20260329_1200_1m")
         cm._reset_inventory_for_new_config = MagicMock()
         cm.ensure_configuration_shell = MagicMock()
         cm._collect_machine_registration_entries = MagicMock(return_value=["m-1"])
+        cm._collect_advanced_instance_counts = MagicMock(return_value={"m-1": 1})
         cm._onboarding_batch_discovery_and_import = MagicMock(return_value={
-            "scanned": True, "imported_total": 2, "session_mode": "simple",
+            "scanned": True, "imported_total": 2, "session_mode": r1setup.CONFIG_MODE_ADVANCED,
             "clean_machine_ids": [],
         })
         cm._onboarding_gap_fill_clean_machines = MagicMock(return_value=0)

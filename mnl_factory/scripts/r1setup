@@ -65,7 +65,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.9.1"
+    CLI_VERSION = "1.9.2"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -1545,7 +1545,7 @@ class ConfigurationManager:
         """Create a new configuration.
 
         Simple mode produces an empty zero-host shell — the user adds nodes
-        one at a time via Configure Nodes → Add New Node. Advanced mode runs
+        one at a time via Configure Nodes -> Add Node(s). Advanced mode runs
         the full bulk machine-first flow (register N machines up front, run
         batch discovery, gap-fill fresh instances).
         """
@@ -6823,6 +6823,10 @@ class MigrationPlanner:
                 "Do not Add Node on the destination first; Execute Migration moves the selected existing node onto it.",
                 'yellow',
             )
+            self.app.print_colored(
+                "Need help? Open Main Menu -> 8) Help & FAQ -> Migration Workflow.",
+                'cyan',
+            )
             print()
             for index, machine_id in enumerate(target_machine_ids, start=1):
                 machine_record = machines[machine_id]
@@ -7092,6 +7096,10 @@ class MigrationPlanner:
                     "To create a standard migration target, use Register Machine only; do not Add Node on the "
                     "destination. Execute Migration moves the selected existing node onto the registered target."
                 ),
+            )
+            self._append_unique_hint(
+                hints,
+                "For the full explanation, open Help & FAQ -> Register Machine vs Add Node.",
             )
             self._append_unique_hint(
                 hints,
@@ -9678,6 +9686,254 @@ class SSHKeyManager:
 
 
 class R1Setup:
+    HELP_FAQ_TOPICS: Tuple[Dict[str, Any], ...] = (
+        {
+            'title': 'Core Concepts',
+            'summary': 'The basic terms r1setup uses across configuration, deployment, and operations.',
+            'sections': (
+                (
+                    'What the words mean',
+                    (
+                        'Configuration: a named local workspace with network, machines, instances, and deployment state.',
+                        'Machine: a physical or virtual host registered by SSH. A machine can exist without a node instance.',
+                        'Node or instance: an Edge Node entry assigned to a machine in the active configuration.',
+                        'Runtime: the remote service, container, volume, and status-path names used by an instance.',
+                        'Deployment: the remote service/container state created or updated from the active configuration.',
+                        'Migration plan: a saved, non-mutating checklist for moving one existing instance to another machine.',
+                    ),
+                ),
+                (
+                    'Related menu paths',
+                    (
+                        'Main Menu -> 1) Configuration Menu',
+                        'Main Menu -> 4) Node Status & Info',
+                    ),
+                ),
+            ),
+        },
+        {
+            'title': 'First-Time Setup',
+            'summary': 'The shortest path from a fresh install to managed nodes.',
+            'sections': (
+                (
+                    'Recommended flow',
+                    (
+                        'Create or load a configuration, then choose the target network.',
+                        'Register machines with SSH connection details before creating or importing instances.',
+                        'Run discovery when machines may already have edge_node services.',
+                        'Deploy only after the node list matches what you intend to manage.',
+                    ),
+                ),
+                (
+                    'Related menu paths',
+                    (
+                        'Main Menu -> 1) Configuration Menu -> Manage Configurations',
+                        'Main Menu -> 1) Configuration Menu -> Register Machine',
+                        'Main Menu -> 1) Configuration Menu -> Discover Services',
+                        'Main Menu -> 2) Deployment Menu -> Install GPU Nodes',
+                        'Main Menu -> 2) Deployment Menu -> Install CPU Nodes',
+                    ),
+                ),
+            ),
+        },
+        {
+            'title': 'Register Machine vs Add Node',
+            'summary': 'Use Register Machine for a host, and Add Node for a managed Edge Node instance.',
+            'sections': (
+                (
+                    'When to register a machine',
+                    (
+                        'Register Machine records SSH access and machine metadata without creating an Edge Node instance.',
+                        'Use Register Machine for migration destinations, discovery targets, and prepared-but-empty hosts.',
+                        'An empty registered machine can still be prepared or selected as a migration target.',
+                        'If Register Machine is hidden, switch the config to Advanced Mode first; that switch is one-way.',
+                    ),
+                ),
+                (
+                    'When to add a node',
+                    (
+                        'Add Node creates an instance assignment in the active configuration.',
+                        'In standard mode, Add Node consumes the machine slot even if the instance is not deployed yet.',
+                        'If you added a placeholder by mistake, use Remove Node; the machine stays registered.',
+                    ),
+                ),
+                (
+                    'Related menu paths',
+                    (
+                        'Main Menu -> 1) Configuration Menu -> Register Machine',
+                        'Main Menu -> 1) Configuration Menu -> Switch to Advanced Mode',
+                        'Main Menu -> 1) Configuration Menu -> Configure Nodes -> Add Node(s)',
+                        'Main Menu -> 1) Configuration Menu -> Configure Nodes -> Remove Node',
+                    ),
+                ),
+            ),
+        },
+        {
+            'title': 'Discovery And Import',
+            'summary': 'Find existing remote services and choose which ones this config should track.',
+            'sections': (
+                (
+                    'How it works',
+                    (
+                        'Discovery is read-only on the remote machine.',
+                        'Import is selective; services you do not import are left untouched.',
+                        'Imported services keep their discovered runtime names by default.',
+                        'If imports would track multiple instances on one machine, r1setup asks for explicit expert-mode confirmation.',
+                    ),
+                ),
+                (
+                    'Related menu paths',
+                    (
+                        'Main Menu -> 1) Configuration Menu -> Discover Services',
+                        'Main Menu -> 1) Configuration Menu -> Fleet Summary',
+                    ),
+                ),
+            ),
+        },
+        {
+            'title': 'Deployment And Prepare Machines',
+            'summary': 'Prepare hosts separately from deploying Edge Node instances.',
+            'sections': (
+                (
+                    'Prepare vs deploy',
+                    (
+                        'Prepare Machines installs or verifies host prerequisites without assigning a new node instance.',
+                        'Install GPU Nodes applies machine preparation and deploys configured GPU instances.',
+                        'Install CPU Nodes deploys the CPU Edge Node image for non-GPU hosts.',
+                        'Prepare a registered machine before migration when you want readiness checked ahead of execution.',
+                    ),
+                ),
+                (
+                    'Related menu paths',
+                    (
+                        'Main Menu -> 2) Deployment Menu -> Prepare Machines',
+                        'Main Menu -> 2) Deployment Menu -> Install GPU Nodes',
+                        'Main Menu -> 2) Deployment Menu -> Install CPU Nodes',
+                    ),
+                ),
+            ),
+        },
+        {
+            'title': 'Migration Workflow',
+            'summary': 'Move one existing Edge Node instance to another registered machine.',
+            'sections': (
+                (
+                    'Required target setup',
+                    (
+                        'Register Machine for the destination before planning the migration.',
+                        'If Register Machine is hidden, use Switch to Advanced Mode first.',
+                        'Register the destination machine; do not Add Node on the destination first.',
+                        'The target standard-mode machine should have instances=0 unless you use expert-mode custom runtimes.',
+                    ),
+                ),
+                (
+                    'Plan and execute',
+                    (
+                        'Plan Migration is non-mutating; it validates structure and saves the intended move.',
+                        'Execute Migration moves the selected existing node onto the registered target machine.',
+                        'Execute Migration updates the same config; do not add that node again afterward.',
+                        'Data moves source machine -> controller temp folder -> target machine.',
+                    ),
+                ),
+                (
+                    'Related menu paths',
+                    (
+                        'Main Menu -> 1) Configuration Menu -> Register Machine',
+                        'Main Menu -> 2) Deployment Menu -> Plan Migration',
+                        'Main Menu -> 2) Deployment Menu -> Execute Migration',
+                    ),
+                ),
+            ),
+        },
+        {
+            'title': 'Rollback vs Finalize Migration',
+            'summary': 'Use rollback for failed moves and finalization for verified successful moves.',
+            'sections': (
+                (
+                    'Choose the right action',
+                    (
+                        'Rollback Migration is for failed or interrupted execution and keeps source ownership authoritative.',
+                        'Finalize Migration is for executed plans after the target has been verified.',
+                        'Source cleanup and controller temp cleanup stay explicit so uncertain states are recoverable.',
+                    ),
+                ),
+                (
+                    'Related menu paths',
+                    (
+                        'Main Menu -> 2) Deployment Menu -> Rollback Migration',
+                        'Main Menu -> 2) Deployment Menu -> Finalize Migration',
+                    ),
+                ),
+            ),
+        },
+        {
+            'title': 'Service File Updates',
+            'summary': 'Re-apply the current systemd service template without recreating the node.',
+            'sections': (
+                (
+                    'When to update',
+                    (
+                        'Run Update Service File when Node Status & Info reports service version drift.',
+                        'A service-file update does not migrate node data or create a new instance.',
+                        'After updating, run Node Status & Info again to verify the target version.',
+                    ),
+                ),
+                (
+                    'Related menu paths',
+                    (
+                        'Main Menu -> 3) Operations Menu -> Update Service File',
+                        'Main Menu -> 4) Node Status & Info',
+                    ),
+                ),
+            ),
+        },
+        {
+            'title': 'SSH And Auth Troubleshooting',
+            'summary': 'Understand password, key, verification, and hardening states.',
+            'sections': (
+                (
+                    'Safe order',
+                    (
+                        'Install or configure SSH keys before disabling password authentication.',
+                        'Validate key login from this controller before hardening a remote machine.',
+                        'If reachability fails, fix SSH access first; deployment and migration probes depend on it.',
+                    ),
+                ),
+                (
+                    'Related menu paths',
+                    (
+                        'Main Menu -> 7) Advanced Menu -> SSH Key Management',
+                        'Main Menu -> 3) Operations Menu -> Test Connectivity',
+                    ),
+                ),
+            ),
+        },
+        {
+            'title': 'Common Mistakes',
+            'summary': 'Fast checks for the issues users most often hit.',
+            'sections': (
+                (
+                    'Avoid these',
+                    (
+                        'Adding a migration target with Add Node instead of Register Machine.',
+                        'Re-adding a migrated node after Execute Migration already moved it in the same config.',
+                        'Treating skipped preflight probes as remote failures; skipped means earlier structural validation blocked the probe.',
+                        'Ignoring service-file version drift after Node Status & Info recommends an update.',
+                        'Disabling SSH password authentication before key login is verified.',
+                    ),
+                ),
+                (
+                    'Related menu paths',
+                    (
+                        'Main Menu -> 8) Help & FAQ -> Register Machine vs Add Node',
+                        'Main Menu -> 8) Help & FAQ -> Migration Workflow',
+                        'Main Menu -> 4) Node Status & Info',
+                    ),
+                ),
+            ),
+        },
+    )
+
     def __init__(self):
         self.colors = {
             'red': '\033[91m',
@@ -9818,6 +10074,50 @@ class R1Setup:
         """Print a section header"""
         self.print_colored(f"\n{title}", 'yellow', bold=True)
         self.print_colored("-" * len(title), 'yellow')
+
+    def help_faq_menu(self) -> None:
+        """Display static operator help for common r1setup workflows."""
+        topic_count = len(self.HELP_FAQ_TOPICS)
+        while True:
+            self.print_header("Help & FAQ")
+            self.print_colored(
+                "Help is read-only; it does not change configs or remote machines.",
+                'cyan',
+            )
+            print()
+            for index, topic in enumerate(self.HELP_FAQ_TOPICS, start=1):
+                self.print_colored(f"  {index}) {topic['title']} - {topic['summary']}")
+            print()
+            self.print_colored("  0) Back")
+            print()
+
+            choice = self.get_input(f"Select topic (0-{topic_count})", "0").strip()
+            if choice == '0':
+                return
+
+            try:
+                selection = int(choice)
+            except ValueError:
+                self.print_colored(f"Invalid option. Valid choices are 0-{topic_count}.", 'red')
+                self.wait_for_enter()
+                continue
+
+            if 1 <= selection <= topic_count:
+                self._display_help_faq_topic(self.HELP_FAQ_TOPICS[selection - 1])
+                self.wait_for_enter()
+                continue
+
+            self.print_colored(f"Invalid option. Valid choices are 0-{topic_count}.", 'red')
+            self.wait_for_enter()
+
+    def _display_help_faq_topic(self, topic: Dict[str, Any]) -> None:
+        """Display one Help & FAQ topic."""
+        self.print_header(f"Help & FAQ: {topic['title']}")
+        self.print_colored(topic.get('summary', ''), 'cyan')
+        for section_title, lines in topic.get('sections', ()):
+            self.print_section(section_title)
+            for line in lines:
+                self.print_colored(f"  - {line}", 'white')
 
     def _print_cancellation_guidance(self) -> None:
         """Show recovery guidance after a keyboard interrupt when saved migration state exists."""
@@ -12270,6 +12570,7 @@ PY"""
         self.print_colored("\u2699\ufe0f  SETTINGS & TOOLS", 'cyan', bold=True)
         self.print_colored("  6) Settings                - Toggle live status display and preferences")
         self.print_colored(f"  7) Advanced Menu           - SSH, logs, and security tools{gated_suffix}", gated_color)
+        self.print_colored("  8) Help & FAQ              - Concepts, workflows, and common mistakes")
         print()
         self.print_colored("  0) Exit")
         print()
@@ -12277,7 +12578,7 @@ PY"""
         if not has_active:
             self.print_colored(
                 "\U0001f4a1 No active configuration. Use 1) Configuration Menu → Manage Configurations "
-                "to pick or create one before using other menus.",
+                "to pick or create one before using other menus. For concepts, open 8) Help & FAQ.",
                 'yellow',
             )
             print()
@@ -12878,7 +13179,8 @@ PY"""
                 self.print_section(f"{len(machines)} registered machine(s), no node instances yet")
                 self.print_colored(
                     "\U0001f4a1 Use 'Discover Services' (Main Menu \u2192 1 \u2192 5) to import existing services,\n"
-                    "   or 'Add New Node' (Main Menu \u2192 1 \u2192 1) to create new instances.",
+                    "   or 'Configure Nodes -> Add Node(s)' (Main Menu \u2192 1 \u2192 1 \u2192 1) to create new instances.\n"
+                    "   For the concepts, open Help & FAQ (Main Menu \u2192 8) \u2192 Core Concepts.",
                     'yellow',
                 )
             else:
@@ -12909,7 +13211,8 @@ PY"""
                     self.print_colored(
                         "Machines registered but no node instances configured.\n"
                         "Use 'Discover Services' (Main Menu \u2192 1 \u2192 5) to import existing services,\n"
-                        "or 'Add New Node' (Main Menu \u2192 1 \u2192 1) to create new instances.",
+                        "or 'Configure Nodes -> Add Node(s)' (Main Menu \u2192 1 \u2192 1 \u2192 1) to create new instances.\n"
+                        "For the concepts, open Help & FAQ (Main Menu \u2192 8) \u2192 Core Concepts.",
                         'red',
                     )
                 else:
@@ -13460,7 +13763,7 @@ PY"""
                 self.print_section(f"{len(machines)} registered machine(s), no node instances yet")
                 self.print_colored(
                     "\U0001f4a1 Use 'Discover Services' (Main Menu \u2192 1 \u2192 5) to import existing services,\n"
-                    "   or 'Add New Node' (Main Menu \u2192 1 \u2192 1) to create new instances.",
+                    "   or 'Configure Nodes -> Add Node(s)' (Main Menu \u2192 1 \u2192 1 \u2192 1) to create new instances.",
                     'yellow',
                 )
             else:
@@ -14213,7 +14516,7 @@ PY"""
 
     def _add_node(self) -> None:
         """Add a new node to existing configuration"""
-        self.print_section("Add New Node")
+        self.print_section("Add Node")
         hosts = self.inventory['all']['children']['gpu_nodes']['hosts']
 
         while True:
@@ -15662,10 +15965,11 @@ PY"""
                 self.print_colored("  1) Select an existing configuration to activate")
                 self.print_colored("  2) Create a new configuration")
                 self.print_colored("  3) Import configuration from .r1config file")
+                self.print_colored("  4) Help & FAQ")
                 print()
                 self.print_colored("  0) Exit")
 
-                choice = self.get_input("\nSelect option (0-3)", "1")
+                choice = self.get_input("\nSelect option (0-4)", "1")
 
                 if choice == '0':
                     self.print_colored("Exiting r1setup.", 'yellow')
@@ -15708,8 +16012,11 @@ PY"""
                         self.print_colored("Import was cancelled or failed. Please try again.", 'yellow')
                         self.wait_for_enter()
                         continue
+                elif choice == '4':
+                    self.help_faq_menu()
+                    continue
                 else:
-                    self.print_colored("Invalid option. Please enter 0, 1, 2, or 3.", 'red')
+                    self.print_colored("Invalid option. Please enter 0, 1, 2, 3, or 4.", 'red')
         else:
             # No saved configurations exist
             self.print_colored("\n📝 No configurations found!", 'yellow')
@@ -15720,10 +16027,11 @@ PY"""
                 self.print_colored("\n🔧 What would you like to do?", 'cyan', bold=True)
                 self.print_colored("  1) Create your first configuration")
                 self.print_colored("  2) Import configuration from .r1config file")
+                self.print_colored("  3) Help & FAQ")
                 print()
                 self.print_colored("  0) Exit")
 
-                choice = self.get_input("\nSelect option (0-2)", "1")
+                choice = self.get_input("\nSelect option (0-3)", "1")
 
                 if choice == '0':
                     self.print_colored("Exiting r1setup.", 'yellow')
@@ -15744,8 +16052,11 @@ PY"""
                         self.print_colored("Import was cancelled or failed. Please try again.", 'yellow')
                         self.wait_for_enter()
                         continue
+                elif choice == '3':
+                    self.help_faq_menu()
+                    continue
                 else:
-                    self.print_colored("Invalid option. Please enter 0, 1, or 2.", 'red')
+                    self.print_colored("Invalid option. Please enter 0, 1, 2, or 3.", 'red')
 
     def run(self) -> None:
         """Main program loop"""
@@ -15795,10 +16106,10 @@ PY"""
         while True:
             try:
                 self.show_main_menu()
-                choice = self.get_input("Select option (0-7)", "0")
+                choice = self.get_input("Select option (0-8)", "0")
 
                 # Gate entries 2-5 and 7 when no active config.
-                # Entry 1 (Configuration Menu) and 6 (Settings) and 0 (Exit)
+                # Entry 1 (Configuration Menu), 6 (Settings), 8 (Help), and 0 (Exit)
                 # remain always available. The user must pick or create a
                 # config from Configuration Menu → Manage Configurations
                 # before the deployment/operations/monitoring paths reopen.
@@ -15828,8 +16139,10 @@ PY"""
                     self.settings_menu()
                 elif choice == '7':
                     self.advanced_menu()
+                elif choice == '8':
+                    self.help_faq_menu()
                 else:
-                    self.print_colored("Invalid option. Valid choices are 0-7.", 'red')
+                    self.print_colored("Invalid option. Valid choices are 0-8.", 'red')
                     self.wait_for_enter()
 
             except KeyboardInterrupt:
