@@ -65,7 +65,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.9.0"
+    CLI_VERSION = "1.9.1"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -6815,6 +6815,14 @@ class MigrationPlanner:
         while True:
             self.app.print_header("Select Migration Target Machine")
             self.app.print_colored("Choose the target machine for the migration plan.", 'cyan')
+            self.app.print_colored(
+                "For standard-mode migrations, pick a registered machine with instances=0.",
+                'cyan',
+            )
+            self.app.print_colored(
+                "Do not Add Node on the destination first; Execute Migration moves the selected existing node onto it.",
+                'yellow',
+            )
             print()
             for index, machine_id in enumerate(target_machine_ids, start=1):
                 machine_record = machines[machine_id]
@@ -6968,6 +6976,30 @@ class MigrationPlanner:
             'target_free_probe': target_free_probe,
         }
 
+    @staticmethod
+    def _is_failed_preflight_probe(probe: Dict[str, Any]) -> bool:
+        """Return True only for probes that actually ran and failed."""
+        return str((probe or {}).get('status') or '').strip().lower() == 'error'
+
+    @staticmethod
+    def _format_migration_instance_label(instance_name: str, instance_data: Dict[str, Any]) -> str:
+        """Return a compact instance label for migration validation messages."""
+        status_data = instance_data.get('status') if isinstance(instance_data.get('status'), dict) else {}
+        node_status = str(
+            status_data.get('node_status')
+            or instance_data.get('node_status')
+            or 'unknown'
+        ).strip()
+        if node_status and node_status != 'unknown':
+            return f"{instance_name} [{node_status}]"
+        return instance_name
+
+    @staticmethod
+    def _append_unique_hint(hints: List[str], hint: str) -> None:
+        """Append a validation hint once."""
+        if hint not in hints:
+            hints.append(hint)
+
     def build_migration_plan(
         self,
         instance_name: str,
@@ -7015,16 +7047,58 @@ class MigrationPlanner:
             normalized_fleet,
             exclude_instance=instance_name,
         )
+        hints: List[str] = []
         if collisions:
             for field, conflicting_instances in sorted(collisions.items()):
+                conflicting_labels = [
+                    self._format_migration_instance_label(conflicting_instance, instances.get(conflicting_instance, {}))
+                    for conflicting_instance in sorted(conflicting_instances)
+                ]
                 errors.append(
-                    f"Target runtime {field} collides with: {', '.join(sorted(conflicting_instances))}"
+                    f"Target runtime {field} collides with existing target instance(s): {', '.join(conflicting_labels)}."
                 )
+            self._append_unique_hint(
+                hints,
+                (
+                    "Resolve target runtime collisions by choosing a registered machine with no assigned "
+                    "instances, removing unused target placeholders from the config, or selecting custom "
+                    "collision-free runtime names."
+                ),
+            )
 
         target_instance_names = list(target_machine_record.get('instance_names') or [])
         if target_topology_mode == 'standard' and target_instance_names:
+            target_instance_labels = [
+                self._format_migration_instance_label(target_instance_name, instances.get(target_instance_name, {}))
+                for target_instance_name in sorted(target_instance_names)
+            ]
             errors.append(
-                f"Target machine '{target_machine_id}' is standard mode and already has assigned instances."
+                (
+                    f"Target machine '{target_machine_id}' is standard mode and already has assigned "
+                    f"instance(s): {', '.join(target_instance_labels)}. Standard mode allows one assigned "
+                    "instance per machine, including not-deployed placeholders."
+                )
+            )
+            self._append_unique_hint(
+                hints,
+                (
+                    "If the listed target instance is an unused placeholder, use Configure Nodes -> Remove Node "
+                    "to remove it from the config; the machine stays registered for migration."
+                ),
+            )
+            self._append_unique_hint(
+                hints,
+                (
+                    "To create a standard migration target, use Register Machine only; do not Add Node on the "
+                    "destination. Execute Migration moves the selected existing node onto the registered target."
+                ),
+            )
+            self._append_unique_hint(
+                hints,
+                (
+                    "If the listed target instance should stay, choose another empty registered machine or "
+                    "prepare an expert-mode target with unique runtime names."
+                ),
             )
 
         target_deployment_state = str(target_machine_record.get('deployment_state') or DEFAULT_MACHINE_DEPLOYMENT_STATE)
@@ -7035,13 +7109,14 @@ class MigrationPlanner:
             )
 
         if errors:
+            skip_message = 'Skipped until blocking structural errors are resolved'
             preflight = {
                 'local_temp_dir': str(self.app._default_migration_temp_dir()),
-                'source_reachability': {'status': 'error', 'message': 'Skipped because plan has structural errors'},
-                'target_reachability': {'status': 'error', 'message': 'Skipped because plan has structural errors'},
-                'source_volume_probe': {'status': 'error', 'message': 'Skipped because plan has structural errors'},
-                'local_free_probe': {'status': 'error', 'message': 'Skipped because plan has structural errors'},
-                'target_free_probe': {'status': 'error', 'message': 'Skipped because plan has structural errors'},
+                'source_reachability': {'status': 'skipped', 'message': skip_message},
+                'target_reachability': {'status': 'skipped', 'message': skip_message},
+                'source_volume_probe': {'status': 'skipped', 'message': skip_message},
+                'local_free_probe': {'status': 'skipped', 'message': skip_message},
+                'target_free_probe': {'status': 'skipped', 'message': skip_message},
             }
         else:
             preflight = self._collect_preflight(
@@ -7053,29 +7128,29 @@ class MigrationPlanner:
 
         source_reachable = preflight['source_reachability'].get('status') == 'success'
         target_reachable = preflight['target_reachability'].get('status') == 'success'
-        if not source_reachable:
+        if self._is_failed_preflight_probe(preflight['source_reachability']):
             errors.append(
                 f"Source machine reachability probe failed: {preflight['source_reachability'].get('message', 'unknown error')}"
             )
-        if not target_reachable:
+        if self._is_failed_preflight_probe(preflight['target_reachability']):
             errors.append(
                 f"Target machine reachability probe failed: {preflight['target_reachability'].get('message', 'unknown error')}"
             )
 
         source_volume_bytes = preflight['source_volume_probe'].get('bytes')
-        if preflight['source_volume_probe'].get('status') != 'success':
+        if self._is_failed_preflight_probe(preflight['source_volume_probe']):
             errors.append(
                 f"Source volume size probe failed: {preflight['source_volume_probe'].get('message', 'unknown error')}"
             )
 
         local_free_bytes = preflight['local_free_probe'].get('bytes')
-        if preflight['local_free_probe'].get('status') != 'success':
+        if self._is_failed_preflight_probe(preflight['local_free_probe']):
             errors.append(
                 f"Controller temp-space probe failed: {preflight['local_free_probe'].get('message', 'unknown error')}"
             )
 
         target_free_bytes = preflight['target_free_probe'].get('bytes')
-        if preflight['target_free_probe'].get('status') != 'success':
+        if self._is_failed_preflight_probe(preflight['target_free_probe']):
             errors.append(
                 f"Target free-space probe failed: {preflight['target_free_probe'].get('message', 'unknown error')}"
             )
@@ -7118,11 +7193,19 @@ class MigrationPlanner:
                 'target_free_bytes': target_free_bytes,
                 'target_deployment_state': target_deployment_state,
                 'requires_target_preparation': requires_target_preparation,
+                'checks': {
+                    'source_reachability': dict(preflight['source_reachability']),
+                    'target_reachability': dict(preflight['target_reachability']),
+                    'source_volume_probe': dict(preflight['source_volume_probe']),
+                    'local_free_probe': dict(preflight['local_free_probe']),
+                    'target_free_probe': dict(preflight['target_free_probe']),
+                },
             },
             'validation': {
                 'errors': errors,
                 'warnings': warnings,
                 'collisions': collisions,
+                'hints': hints,
             },
         }
 
@@ -7138,6 +7221,24 @@ class MigrationPlanner:
         if value >= 1024:
             return f"{value / 1024:.2f} KB"
         return f"{value} B"
+
+    @staticmethod
+    def _format_preflight_check(check: Dict[str, Any], success_text: str) -> Tuple[str, str]:
+        """Format one preflight check with a display color."""
+        status = str((check or {}).get('status') or '').strip().lower()
+        if status == 'success':
+            return success_text, 'green'
+        message = str((check or {}).get('message') or 'unknown reason').strip()
+        if status == 'skipped':
+            return f"skipped - {message}", 'yellow'
+        if status == 'error':
+            return f"failed - {message}", 'red'
+        return 'unknown', 'white'
+
+    def _display_preflight_check(self, label: str, check: Dict[str, Any], success_text: str) -> None:
+        """Render one preflight check line."""
+        text, color = self._format_preflight_check(check, success_text)
+        self.app.print_colored(f"{label}: {text}", color)
 
     def _display_migration_plan(self, plan: Dict[str, Any], *, context: str = 'planning') -> None:
         """Render a migration plan review summary."""
@@ -7185,18 +7286,46 @@ class MigrationPlanner:
 
         self.app.print_section("Preflight")
         preflight = plan.get('preflight') or {}
-        self.app.print_colored(
-            f"Source volume size: {self._format_bytes(preflight.get('source_volume_bytes'))}",
-            'white',
-        )
-        self.app.print_colored(
-            f"Controller free space: {self._format_bytes(preflight.get('local_free_bytes'))}",
-            'white',
-        )
-        self.app.print_colored(
-            f"Target free space: {self._format_bytes(preflight.get('target_free_bytes'))}",
-            'white',
-        )
+        checks = preflight.get('checks') or {}
+        if checks:
+            self._display_preflight_check(
+                "Source reachability",
+                checks.get('source_reachability') or {},
+                "reachable",
+            )
+            self._display_preflight_check(
+                "Target reachability",
+                checks.get('target_reachability') or {},
+                "reachable",
+            )
+            self._display_preflight_check(
+                "Source volume size",
+                checks.get('source_volume_probe') or {},
+                self._format_bytes(preflight.get('source_volume_bytes')),
+            )
+            self._display_preflight_check(
+                "Controller free space",
+                checks.get('local_free_probe') or {},
+                self._format_bytes(preflight.get('local_free_bytes')),
+            )
+            self._display_preflight_check(
+                "Target free space",
+                checks.get('target_free_probe') or {},
+                self._format_bytes(preflight.get('target_free_bytes')),
+            )
+        else:
+            self.app.print_colored(
+                f"Source volume size: {self._format_bytes(preflight.get('source_volume_bytes'))}",
+                'white',
+            )
+            self.app.print_colored(
+                f"Controller free space: {self._format_bytes(preflight.get('local_free_bytes'))}",
+                'white',
+            )
+            self.app.print_colored(
+                f"Target free space: {self._format_bytes(preflight.get('target_free_bytes'))}",
+                'white',
+            )
         self.app.print_colored(
             f"Target deployment state: {preflight.get('target_deployment_state', 'unknown')}",
             'white',
@@ -7208,11 +7337,18 @@ class MigrationPlanner:
         validation = plan.get('validation') or {}
         errors = validation.get('errors') or []
         warnings = validation.get('warnings') or []
+        hints = validation.get('hints') or []
 
         if errors:
             self.app.print_section("Blocking Errors")
             for error in errors:
                 self.app.print_colored(f"  • {error}", 'red')
+            print()
+
+        if hints:
+            self.app.print_section("Suggested Fixes")
+            for hint in hints:
+                self.app.print_colored(f"  • {hint}", 'cyan')
             print()
 
         if warnings:
@@ -7222,8 +7358,14 @@ class MigrationPlanner:
             print()
 
         context_note = {
-            'planning': "Planning only: no source shutdown, assignment change, or data transfer has occurred.",
-            'execution': "Execution review: running this plan will stop the source service, transfer the volume, and update assignment on success.",
+            'planning': (
+                "Planning only: no source shutdown, assignment change, or data transfer has occurred. "
+                "The target should be a registered machine, not a separately added node."
+            ),
+            'execution': (
+                "Execution review: running this plan will stop the source service, transfer the volume, "
+                "and move the existing node assignment to the target on success."
+            ),
             'rollback': "Rollback review: this will clean partial target artifacts, remove transfer archives, and restore the source runtime.",
             'finalization': "Finalization review: this will clean deferred source-side artifacts after a verified migration.",
         }.get(context)

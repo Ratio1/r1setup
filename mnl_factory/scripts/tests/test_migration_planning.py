@@ -162,6 +162,8 @@ class TestMigrationPlanBuilder(unittest.TestCase):
                             "service_name": "edge_node",
                             "container_name": "edge_node",
                             "volume_path": "/var/cache/edge_node/_local_cache",
+                            "metadata_path": "/var/cache/edge_node/_local_cache/_data/r1setup/metadata.json",
+                            "exit_status_path": "/tmp/edge_node.exit",
                         },
                     },
                     "node-2": {
@@ -171,14 +173,25 @@ class TestMigrationPlanBuilder(unittest.TestCase):
                             "service_name": "edge_node",
                             "container_name": "edge_node",
                             "volume_path": "/var/cache/edge_node/_local_cache",
+                            "metadata_path": "/var/cache/edge_node/_local_cache/_data/r1setup/metadata.json",
+                            "exit_status_path": "/tmp/edge_node.exit",
                         },
+                        "status": {"node_status": "not_deployed"},
                     },
                 },
             },
         }
 
         app = self._build_app(fleet_state)
-        app.config_manager.detect_runtime_collisions.return_value = {"service_name": ["node-2"]}
+        app.config_manager.detect_runtime_collisions.side_effect = (
+            lambda machine_id, runtime, fleet, exclude_instance=None:
+            r1setup.ConfigurationManager.detect_runtime_collisions(
+                machine_id,
+                runtime,
+                fleet,
+                exclude_instance=exclude_instance,
+            )
+        )
         planner = r1setup.MigrationPlanner(app)
         planner._collect_preflight = MagicMock(return_value={
             "local_temp_dir": "/tmp/r1setup-migration",
@@ -195,6 +208,87 @@ class TestMigrationPlanBuilder(unittest.TestCase):
         joined_errors = " ".join(plan["validation"]["errors"])
         self.assertIn("collides", joined_errors)
         self.assertIn("standard mode", joined_errors)
+        self.assertIn("node-2 [not_deployed]", joined_errors)
+        self.assertIn("not-deployed placeholders", joined_errors)
+        self.assertNotIn("reachability probe failed", joined_errors)
+        self.assertNotIn("Skipped because plan has structural errors", joined_errors)
+        planner._collect_preflight.assert_not_called()
+        self.assertTrue(plan["validation"]["hints"])
+        joined_hints = " ".join(plan["validation"]["hints"])
+        self.assertIn("Remove Node", joined_hints)
+        self.assertIn("Register Machine", joined_hints)
+        self.assertIn("do not Add Node", joined_hints)
+        for check in plan["preflight"]["checks"].values():
+            self.assertEqual(check["status"], "skipped")
+
+    def test_display_migration_plan_renders_skipped_preflight_checks(self):
+        app = MagicMock()
+        app.print_header = MagicMock()
+        app.print_colored = MagicMock()
+        app.print_section = MagicMock()
+        planner = r1setup.MigrationPlanner(app)
+
+        plan = {
+            "plan_id": "migration-node-1",
+            "status": "blocked",
+            "instance_name": "node-1",
+            "source_machine_id": "machine-a",
+            "target_machine_id": "machine-b",
+            "runtime_name_policy": "preserve",
+            "target_runtime": {
+                "service_name": "edge_node",
+                "container_name": "edge_node",
+                "volume_path": "/var/cache/edge_node/_local_cache",
+            },
+            "transfer": {
+                "route": "machine-a -> local temp -> machine-b",
+                "source_archive_path": "/tmp/r1setup_migration_node-1.tar.gz",
+                "local_archive_path": "/tmp/r1setup-migration/node-1.tar.gz",
+                "target_archive_path": "/tmp/r1setup_migration_node-1.tar.gz",
+                "checksum_algorithm": "sha256",
+            },
+            "preflight": {
+                "source_volume_bytes": None,
+                "local_free_bytes": None,
+                "target_free_bytes": None,
+                "target_deployment_state": "prepared",
+                "requires_target_preparation": False,
+                "checks": {
+                    "source_reachability": {
+                        "status": "skipped",
+                        "message": "Skipped until blocking structural errors are resolved",
+                    },
+                    "target_reachability": {
+                        "status": "skipped",
+                        "message": "Skipped until blocking structural errors are resolved",
+                    },
+                    "source_volume_probe": {
+                        "status": "skipped",
+                        "message": "Skipped until blocking structural errors are resolved",
+                    },
+                    "local_free_probe": {
+                        "status": "skipped",
+                        "message": "Skipped until blocking structural errors are resolved",
+                    },
+                    "target_free_probe": {
+                        "status": "skipped",
+                        "message": "Skipped until blocking structural errors are resolved",
+                    },
+                },
+            },
+            "validation": {
+                "errors": ["Target machine 'machine-b' is standard mode and already has assigned instance(s)."],
+                "warnings": [],
+                "hints": ["Use Configure Nodes -> Remove Node for unused placeholders."],
+            },
+        }
+
+        planner._display_migration_plan(plan)
+
+        rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
+        self.assertIn("Source reachability: skipped - Skipped until blocking structural errors are resolved", rendered_text)
+        self.assertIn("Target free space: skipped - Skipped until blocking structural errors are resolved", rendered_text)
+        self.assertIn("Use Configure Nodes -> Remove Node", rendered_text)
 
 
 class TestMigrationPlanningFlow(unittest.TestCase):

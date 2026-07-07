@@ -147,6 +147,14 @@ Current migration support lives under `Deployment Menu`:
 - `Rollback Migration`: recover a failed or interrupted migration back to the source machine
 - `Finalize Migration`: clean up source-side artifacts after a verified migration
 
+Target machine rule:
+
+- Register the destination with `Register Machine` before planning the migration.
+- Do not use `Add Node` on the destination first. In standard mode, an added node creates an assigned
+  instance placeholder and the target is no longer empty.
+- `Execute Migration` moves the selected existing node onto the registered target machine and updates
+  its assignment in the same config; the user does not add that node to the config again afterward.
+
 Execution currently follows:
 
 - source machine -> local controller temp folder -> target machine

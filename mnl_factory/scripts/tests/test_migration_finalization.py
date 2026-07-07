@@ -181,7 +181,10 @@ class TestMigrationRollbackAndFinalization(unittest.TestCase):
 
         printed_messages = [call.args[0] for call in app.print_colored.call_args_list]
         self.assertIn(
-            "Execution review: running this plan will stop the source service, transfer the volume, and update assignment on success.",
+            (
+                "Execution review: running this plan will stop the source service, transfer the volume, "
+                "and move the existing node assignment to the target on success."
+            ),
             printed_messages,
         )
         self.assertNotIn(
