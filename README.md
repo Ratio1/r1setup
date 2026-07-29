@@ -184,7 +184,7 @@ The repository is split between an end-user bootstrap layer and an Ansible colle
 ### Dependencies
 
 Local machine prerequisites installed by [mnl_factory/scripts/1_prerequisites.sh](mnl_factory/scripts/1_prerequisites.sh):
-- Python 3 and a local virtualenv
+- Python 3 and a local virtual environment at `~/.ratio1/r1_setup/.r1_venv`. Package installation prefers a usable `uv`, falls back to `python3 -m pip`, and otherwise installs standalone `uv` in `~/.local/bin` without changing shell profiles.
 - Ansible
 - `ssh`, `ssh-keygen`, `openssl`, `sshpass`
 - Python packages: `pyyaml`, `typing_extensions`, `certifi`

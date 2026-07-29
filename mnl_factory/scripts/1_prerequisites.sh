@@ -31,6 +31,54 @@ else
     REAL_HOME=$HOME
 fi
 
+# Run user-scoped tooling as the invoking user even when this prerequisite
+# installer is run with sudo. Keep the user's local bin directory available so
+# a standalone uv installation is found consistently.
+REAL_USER_PATH="$REAL_HOME/.local/bin:$PATH"
+run_as_real_user() {
+    if [ -n "$SUDO_USER" ]; then
+        sudo -u "$REAL_USER" env HOME="$REAL_HOME" PATH="$REAL_USER_PATH" "$@"
+    else
+        env HOME="$REAL_HOME" PATH="$REAL_USER_PATH" "$@"
+    fi
+}
+
+# Select the Python package manager before Python bootstrap can introduce pip.
+# Prefer uv whenever it is usable for the real user.
+PYTHON_PACKAGE_MANAGER=""
+UV_BIN=""
+if run_as_real_user uv --version > /dev/null 2>&1; then
+    PYTHON_PACKAGE_MANAGER="uv"
+    UV_BIN="$(run_as_real_user sh -c 'command -v uv')"
+elif python3 -m pip --version > /dev/null 2>&1; then
+    PYTHON_PACKAGE_MANAGER="pip"
+else
+    PYTHON_PACKAGE_MANAGER="uv (installed)"
+    print_message "Installing uv for $REAL_USER..." "$YELLOW"
+
+    UV_INSTALL_SCRIPT="$(run_as_real_user mktemp)"
+    if ! run_as_real_user curl -LsSf https://astral.sh/uv/install.sh -o "$UV_INSTALL_SCRIPT"; then
+        run_as_real_user rm -f "$UV_INSTALL_SCRIPT"
+        print_message "Failed to download the uv installer. Install uv and rerun this script." "$RED"
+        exit 1
+    fi
+
+    if ! run_as_real_user env UV_INSTALL_DIR="$REAL_HOME/.local/bin" UV_NO_MODIFY_PATH=1 sh "$UV_INSTALL_SCRIPT"; then
+        run_as_real_user rm -f "$UV_INSTALL_SCRIPT"
+        print_message "Failed to install uv for $REAL_USER. Install uv and rerun this script." "$RED"
+        exit 1
+    fi
+    run_as_real_user rm -f "$UV_INSTALL_SCRIPT"
+
+    UV_BIN="$REAL_HOME/.local/bin/uv"
+    if ! run_as_real_user "$UV_BIN" --version > /dev/null 2>&1; then
+        print_message "uv installation did not produce a usable binary at $UV_BIN." "$RED"
+        exit 1
+    fi
+fi
+
+print_message "Selected Python package manager: $PYTHON_PACKAGE_MANAGER" "$GREEN"
+
 # Detect OS
 if [[ "$OSTYPE" == "darwin"* ]]; then
     OS_TYPE="macos"
@@ -100,9 +148,9 @@ if ! command -v python3 &> /dev/null; then
     print_message "Installing Python..." "$YELLOW"
     if [[ "$OS_TYPE" == "linux" ]]; then
         if [[ "$OS_NAME" =~ "Ubuntu"|"Debian" ]]; then
-            $INSTALL_CMD python3 python3-pip python3-venv
+            $INSTALL_CMD python3 python3-venv
         elif [[ "$OS_NAME" =~ "CentOS"|"Red Hat"|"Fedora" ]]; then
-            $INSTALL_CMD python3 python3-pip python3-virtualenv
+            $INSTALL_CMD python3 python3-virtualenv
         fi
     else
         sudo -u "$REAL_USER" $INSTALL_CMD python
@@ -114,6 +162,7 @@ if ! verify_command python3; then
     print_message "Python installation failed" "$RED"
     exit 1
 fi
+PYTHON3_BIN="$(command -v python3)"
 
 # Install SSH client tooling needed by SSH key management
 if ! command -v ssh &> /dev/null || ! command -v ssh-keygen &> /dev/null; then
@@ -156,51 +205,54 @@ fi
 # Define Venv Path (relative to $SETUP_DIR where this script runs)
 VENV_PATH_IN_SETUP_DIR=".r1_venv"
 
-print_message "Creating Python virtual environment at ./$VENV_PATH_IN_SETUP_DIR..." "$YELLOW"
-python3 -m venv "./$VENV_PATH_IN_SETUP_DIR"
-if [ $? -ne 0 ]; then
-    print_message "Failed to create virtual environment at ./$VENV_PATH_IN_SETUP_DIR." "$RED"
-    exit 1
-fi
+# Define Python executable from the venv
+PYTHON_IN_VENV="./$VENV_PATH_IN_SETUP_DIR/bin/python3"
 
-# Ensure the venv directory is owned by the original user if sudo was used
-# $REAL_USER is defined at the beginning of this script
-if [ -n "$SUDO_USER" ]; then
+# A prior pip-created environment may be root-owned because older installer
+# versions created it before switching back to the real user.
+if [ -n "$SUDO_USER" ] && [ -d "./$VENV_PATH_IN_SETUP_DIR" ]; then
     print_message "Setting ownership of ./$VENV_PATH_IN_SETUP_DIR to $REAL_USER..." "$YELLOW"
-    chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "./$VENV_PATH_IN_SETUP_DIR"
-    if [ $? -ne 0 ]; then
+    if ! chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "./$VENV_PATH_IN_SETUP_DIR"; then
         print_message "Failed to set ownership for ./$VENV_PATH_IN_SETUP_DIR. Please check permissions." "$RED"
-        # It might be non-fatal if REAL_USER already owns it (e.g. if script not run with sudo, though it usually is)
     fi
 fi
 
-# Define Python and Pip executables from the venv
-PYTHON_IN_VENV="./$VENV_PATH_IN_SETUP_DIR/bin/python3"
-PIP_IN_VENV="./$VENV_PATH_IN_SETUP_DIR/bin/pip"
-
-# Upgrade pip and install required packages into the venv
-print_message "Installing Python packages into virtual environment (./$VENV_PATH_IN_SETUP_DIR)..." "$YELLOW"
-
-# Pip commands should run as $REAL_USER if sudo was used for 1_prerequisites.sh,
-# to ensure packages are installed correctly within the user-owned venv.
-if [ -n "$SUDO_USER" ]; then
-    sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PIP_IN_VENV" install --upgrade pip
-    sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PIP_IN_VENV" install pyyaml typing_extensions certifi
+print_message "Creating Python virtual environment at ./$VENV_PATH_IN_SETUP_DIR..." "$YELLOW"
+if [[ "$PYTHON_PACKAGE_MANAGER" == uv* ]]; then
+    if ! run_as_real_user "$UV_BIN" venv --allow-existing --python "$PYTHON3_BIN" "./$VENV_PATH_IN_SETUP_DIR"; then
+        print_message "Failed to create virtual environment at ./$VENV_PATH_IN_SETUP_DIR with uv." "$RED"
+        exit 1
+    fi
 else
-    # If script somehow runs without sudo (not the typical path for this script)
-    "$PIP_IN_VENV" install --upgrade pip
-    "$PIP_IN_VENV" install pyyaml typing_extensions certifi
+    if ! python3 -m venv "./$VENV_PATH_IN_SETUP_DIR"; then
+        print_message "Failed to create virtual environment at ./$VENV_PATH_IN_SETUP_DIR." "$RED"
+        exit 1
+    fi
+    if [ -n "$SUDO_USER" ]; then
+        print_message "Setting ownership of ./$VENV_PATH_IN_SETUP_DIR to $REAL_USER..." "$YELLOW"
+        if ! chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "./$VENV_PATH_IN_SETUP_DIR"; then
+            print_message "Failed to set ownership for ./$VENV_PATH_IN_SETUP_DIR. Please check permissions." "$RED"
+        fi
+    fi
+fi
+
+print_message "Installing Python packages into virtual environment (./$VENV_PATH_IN_SETUP_DIR)..." "$YELLOW"
+if [[ "$PYTHON_PACKAGE_MANAGER" == uv* ]]; then
+    if ! run_as_real_user "$UV_BIN" pip install --python "$PYTHON_IN_VENV" pyyaml typing_extensions certifi; then
+        print_message "Failed to install required Python packages (pyyaml, typing_extensions, certifi) with uv." "$RED"
+        exit 1
+    fi
+else
+    if ! run_as_real_user "$PYTHON_IN_VENV" -m pip install --upgrade pip || \
+       ! run_as_real_user "$PYTHON_IN_VENV" -m pip install pyyaml typing_extensions certifi; then
+        print_message "Failed to install required Python packages (pyyaml, typing_extensions, certifi) into the virtual environment." "$RED"
+        exit 1
+    fi
 fi
 
 # Verify core packages installed in venv
-if ! sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PYTHON_IN_VENV" -m pip show pyyaml > /dev/null 2>&1 || \
-   ! sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PYTHON_IN_VENV" -m pip show typing_extensions > /dev/null 2>&1 || \
-   ! sudo -u "$REAL_USER" HOME="$REAL_HOME" "$PYTHON_IN_VENV" -m pip show certifi > /dev/null 2>&1; then
-   if [ -n "$SUDO_USER" ]; then
-        print_message "Failed to install required Python packages (pyyaml, typing_extensions, certifi) into the virtual environment as $REAL_USER." "$RED"
-   else
-        print_message "Failed to install required Python packages (pyyaml, typing_extensions, certifi) into the virtual environment." "$RED"
-   fi
+if ! run_as_real_user "$PYTHON_IN_VENV" -c 'import certifi; import typing_extensions; import yaml' > /dev/null 2>&1; then
+   print_message "Failed to import required Python packages (pyyaml, typing_extensions, certifi) from the virtual environment." "$RED"
    exit 1
 fi
 
