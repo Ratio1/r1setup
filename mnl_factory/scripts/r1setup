@@ -65,7 +65,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.9.3"
+    CLI_VERSION = "1.9.4"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -1120,7 +1120,7 @@ class SettingsManager:
         and routinely take many minutes — the per-probe
         ``connection_timeout`` (30-600s) is not the right ceiling. Default
         is 30 minutes; settable via the ``playbook_timeout`` preference
-        and clamped to [300, 7200] (5 min - 2 h).
+        and clamped to [300, 86400] (5 min - 24 h) so slow hosts can finish.
         """
         val = self.get('playbook_timeout')
         if val in (None, ''):
@@ -1129,7 +1129,7 @@ class SettingsManager:
             val = int(val)
         except (TypeError, ValueError):
             val = 1800
-        return max(300, min(7200, val))
+        return max(300, min(86400, val))
 
     def settings_menu(self):
         """Interactive toggle UI for user preferences."""
@@ -1153,6 +1153,14 @@ class SettingsManager:
             )
             self.app.print_colored(
                 f"     Base timeout for SSH/playbook operations on remote nodes (30-600s)",
+                'white'
+            )
+            print()
+            self.app.print_colored(
+                f"  3) Playbook Timeout: [{self.playbook_timeout}s]", 'white'
+            )
+            self.app.print_colored(
+                f"     Ceiling for long remote work: machine prep, migration transfers (300-86400s)",
                 'white'
             )
             print()
@@ -1184,8 +1192,23 @@ class SettingsManager:
                 except ValueError:
                     self.app.print_colored("Invalid input. Please enter a number.", 'red')
                 self.app.wait_for_enter()
+            elif choice == '3':
+                val = self.app.get_input(
+                    f"Enter playbook timeout in seconds (300-86400, current: {self.playbook_timeout}s)",
+                    str(self.playbook_timeout)
+                )
+                try:
+                    val = int(val)
+                    if 300 <= val <= 86400:
+                        self.set('playbook_timeout', val)
+                        self.app.print_colored(f"Playbook timeout set to {val}s", 'green')
+                    else:
+                        self.app.print_colored("Invalid value. Must be between 300 and 86400 seconds.", 'red')
+                except ValueError:
+                    self.app.print_colored("Invalid input. Please enter a number.", 'red')
+                self.app.wait_for_enter()
             else:
-                self.app.print_colored("Invalid option. Valid choices are 0-2.", 'red')
+                self.app.print_colored("Invalid option. Valid choices are 0-3.", 'red')
                 self.app.wait_for_enter()
 
 
@@ -7409,10 +7432,10 @@ class MigrationPlanner:
     def _migration_transfer_timeout(self) -> int:
         """Timeout for migration data-transfer phases (archive, SCP, extract).
 
-        These can run for a very long time on large volumes, so the floor is
-        1800 seconds (30 minutes).
+        These can run for a very long time on large volumes or slow hosts, so
+        the floor is 14400 seconds (4 hours); ``playbook_timeout`` raises it.
         """
-        return DeploymentService._phase_timeout(self.app.connection_timeout, 1800)
+        return DeploymentService._phase_timeout(self.app.playbook_timeout, 14400)
 
     def plan_instance_migration(self) -> None:
         """Interactively build and optionally persist a migration plan."""
@@ -7710,9 +7733,9 @@ class MigrationPlanner:
         if not plan.get('preflight', {}).get('requires_target_preparation'):
             return {'status': 'success', 'prepared': False}
         playbook_path = self.app.config_dir / 'playbooks/prepare_machine.yml'
-        prep_timeout = DeploymentService._phase_timeout(self.app.connection_timeout, 600)
+        prep_timeout = DeploymentService._phase_timeout(self.app.playbook_timeout, 600)
         self.app.print_colored(
-            f"Target machine preparation can take several minutes. Timeout for this phase: {prep_timeout}s (base setting: {self.app.connection_timeout}s).",
+            f"Target machine preparation can take several minutes. Timeout for this phase: {prep_timeout}s (playbook timeout setting: {self.app.playbook_timeout}s).",
             'cyan',
         )
         success, output, executed_hosts, execution_inventory = self.app.run_registered_machine_playbook(

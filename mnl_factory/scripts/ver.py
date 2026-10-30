@@ -3,7 +3,7 @@
 Version management for Ratio1 Multi-Node Launcher CLI
 """
 
-__VER__ = '1.9.3'
+__VER__ = '1.9.4'
 
 
 

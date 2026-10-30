@@ -53,6 +53,7 @@ class TestMigrationExecution(unittest.TestCase):
         app = MagicMock()
         app.active_config = {"config_name": "fleet", "migration_plan_state": plan}
         app.connection_timeout = 30
+        app.playbook_timeout = 1800
         app.get_input = MagicMock(return_value="y")
         app.print_header = MagicMock()
         app.print_colored = MagicMock()
@@ -369,3 +370,30 @@ class TestMigrationExecution(unittest.TestCase):
 
         timeout_values = [call.kwargs["timeout"] for call in app.run_custom_inventory_playbook.call_args_list]
         self.assertEqual(timeout_values, [180, 180, 60])
+
+
+class TestMigrationTimeouts(unittest.TestCase):
+    """Migration transfer and target-prep timeouts follow playbook_timeout."""
+
+    def _planner(self, connection_timeout=30, playbook_timeout=1800):
+        app = MagicMock()
+        app.connection_timeout = connection_timeout
+        app.playbook_timeout = playbook_timeout
+        return app, r1setup.MigrationPlanner(app)
+
+    def test_transfer_timeout_default_floor_is_four_hours(self):
+        _, planner = self._planner()
+        self.assertEqual(planner._migration_transfer_timeout(), 14400)
+
+    def test_transfer_timeout_follows_longer_playbook_timeout(self):
+        _, planner = self._planner(playbook_timeout=43200)
+        self.assertEqual(planner._migration_transfer_timeout(), 43200)
+
+    def test_target_preparation_uses_playbook_timeout(self):
+        app, planner = self._planner(playbook_timeout=7200)
+        app.run_registered_machine_playbook = MagicMock(return_value=(True, "ok", [], {}))
+        plan = {"target_machine_id": "machine-b", "preflight": {"requires_target_preparation": True}}
+
+        planner._prepare_target_machine_for_migration(plan)
+
+        self.assertEqual(app.run_registered_machine_playbook.call_args.kwargs["timeout"], 7200)
