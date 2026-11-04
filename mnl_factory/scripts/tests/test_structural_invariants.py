@@ -334,6 +334,7 @@ class TestStructuralInvariants(unittest.TestCase):
             "service_restart.yml",
             "customize_service.yml",
             "delete_edge_node.yml",
+            "reset_node_key.yml",
         ):
             source = (playbook_dir / relative_path).read_text()
             self.assertIn(
@@ -348,6 +349,7 @@ class TestStructuralInvariants(unittest.TestCase):
             "service_stop.yml",
             "service_restart.yml",
             "customize_service.yml",
+            "reset_node_key.yml",
         ):
             source = (playbook_dir / relative_path).read_text()
             self.assertIn(

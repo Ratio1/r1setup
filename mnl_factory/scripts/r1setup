@@ -65,7 +65,7 @@ try:
     from ver import __VER__ as CLI_VERSION
 except ImportError:
     # Fallback to hardcoded version if ver.py is not available
-    CLI_VERSION = "1.9.4"
+    CLI_VERSION = "1.9.5"
 
 # Debug configuration
 DEBUG = False  # Set to True to enable debug output, or use --debug flag
@@ -13802,6 +13802,7 @@ PY"""
             self.print_colored("\U0001f510 SECURITY TOOLS", 'red', bold=True)
             self.print_colored("  4) Import Private Keys   - Collect private keys from all nodes")
             self.print_colored("  5) SSH Key Management    - Install, validate, and track SSH keys")
+            self.print_colored("  8) Reset Node Key        - Delete e2.pem so the node generates a new identity")
             print()
             self.print_colored("\u2699\ufe0f  CUSTOMIZATION", 'cyan', bold=True)
             self.print_colored("  6) Customize Service     - Override service template variables")
@@ -13822,7 +13823,7 @@ PY"""
                 self.wait_for_enter()
                 continue
             # Service customization and backup require deployed node instances
-            elif choice in ('6', '7') and not has_config:
+            elif choice in ('6', '7', '8') and not has_config:
                 if has_machines:
                     self.print_colored(
                         "Machines registered but no node instances configured.\n"
@@ -13847,8 +13848,10 @@ PY"""
                 self.customize_service()
             elif choice == '7':
                 self.backup_node_data()
+            elif choice == '8':
+                self.reset_node_keys()
             else:
-                self.print_colored("Invalid option. Valid choices are 0-7.", 'red')
+                self.print_colored("Invalid option. Valid choices are 0-8.", 'red')
                 self.wait_for_enter()
 
 
@@ -14166,6 +14169,199 @@ PY"""
                     )
 
         self.wait_for_enter()
+
+    def reset_node_keys(self) -> None:
+        """Delete e2.pem on selected instances so the node regenerates a new identity on restart."""
+        if not self.check_hosts_config():
+            self.print_colored("No nodes configured. Key reset operates on deployed node instances.", 'red')
+            self.wait_for_enter()
+            return
+
+        self.print_header("Reset Node Key")
+        self.load_configuration()
+        hosts = _get_gpu_hosts(self.inventory)
+        if not hosts:
+            self.print_colored("No node instances found in inventory.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        self.print_section("⚠️  NODE IDENTITY CHANGE")
+        self.print_colored("Deleting e2.pem makes the node generate a NEW private key and address on restart.", 'red', bold=True)
+        self.print_colored("The old address loses its license/oracle binding and other nodes' allowed lists.", 'red')
+        self.print_colored("This cannot be undone unless the old e2.pem is backed up.", 'red')
+        print()
+
+        selected = self.select_hosts(hosts, "Reset Node Key", preselect_mode='none')
+        if not selected:
+            self.print_colored("Key reset cancelled.", 'yellow')
+            return
+
+        backup = self.get_input("\nBack up current e2.pem locally before reset? (Y/n)", "y").strip().lower() != 'n'
+        backup_dir = None
+        if backup:
+            default_dest = str(Path.home() / 'r1setup-backups')
+            dest_input = self.get_input("Local backup directory", default_dest)
+            backup_dir = Path(os.path.expanduser((dest_input or default_dest).strip()))
+            try:
+                if not backup_dir.exists():
+                    backup_dir.mkdir(parents=True)
+                    os.chmod(backup_dir, 0o700)
+            except OSError as e:
+                self.print_colored(f"❌ Cannot create backup directory {backup_dir}: {e}", 'red')
+                self.wait_for_enter()
+                return
+
+        if self.get_input("\nType 'RESET' to proceed", "").strip() != 'RESET':
+            self.print_colored("Key reset cancelled.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        def key_path_for(name: str) -> str:
+            volume_path = hosts[name].get('mnl_docker_volume_path') or DEFAULT_RUNTIME_VOLUME_PATH
+            return f"{volume_path}/_data/e2.pem"
+
+        def log_reset(
+            name: str,
+            status: str,
+            backup_path: Optional[Path],
+            old: Tuple[Optional[str], Optional[str]] = (None, None),
+            new: Tuple[Optional[str], Optional[str]] = (None, None),
+        ) -> None:
+            self.log_operation_event('reset_node_key', status, {
+                'instance': name,
+                'ansible_host': hosts[name].get('ansible_host'),
+                'key_path': key_path_for(name),
+                'backup_path': str(backup_path) if backup_path else None,
+                'old_address': old[0],
+                'old_eth_address': old[1],
+                'new_address': new[0],
+                'new_eth_address': new[1],
+            })
+
+        to_reset = []
+        backups: Dict[str, Optional[Path]] = {}
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        for name in selected:
+            if backup_dir is None:
+                to_reset.append(name)
+                backups[name] = None
+                continue
+            host_config = hosts[name]
+            pem_path = key_path_for(name)
+            remote_command = self.migration_planner._build_remote_root_shell_command(
+                host_config, f"cat {shlex.quote(pem_path)}"
+            )
+            result = self.migration_planner._run_machine_command(host_config, remote_command)
+            content = result.get('stdout') or ''
+            if result.get('status') != 'success' or not content.strip():
+                self.print_colored(
+                    f"❌ {name}: could not back up {pem_path} "
+                    f"({result.get('message', 'empty key file')}). Skipping reset for this node.",
+                    'red',
+                )
+                log_reset(name, 'skipped_backup_failed', None)
+                continue
+            key_path = backup_dir / f"{name}-{timestamp}-e2.pem"
+            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w') as f:
+                f.write(content)
+            os.chmod(key_path, 0o600)
+            self.print_colored(f"✅ {name}: old key saved to {key_path}", 'green')
+            to_reset.append(name)
+            backups[name] = key_path
+
+        if not to_reset:
+            self.print_colored("No nodes left to reset.", 'yellow')
+            self.wait_for_enter()
+            return
+
+        old_info = self._fetch_node_info_results(
+            "\nReading current node addresses...", host_names=to_reset
+        ) or {}
+        old_addresses = {name: self._node_info_addresses(old_info, name) for name in to_reset}
+
+        playbook_path = self.config_dir / 'playbooks' / 'reset_node_key.yml'
+        self.print_colored(f"\n\U0001f511 Resetting key on: {', '.join(to_reset)}", 'cyan')
+        success, _, _, _ = self.run_generated_playbook(
+            playbook_path,
+            to_reset,
+            machine_scope=False,
+            last_applied_action='reset_node_key',
+            show_output=True,
+            timeout=self.playbook_timeout,
+        )
+        new_addresses = self._wait_for_new_node_addresses(to_reset, old_addresses) if success else {}
+        for name in to_reset:
+            log_reset(
+                name,
+                'success' if success else 'failed',
+                backups[name],
+                old_addresses[name],
+                new_addresses.get(name, (None, None)),
+            )
+
+        if not success:
+            self.print_colored("\n❌ Key reset playbook failed. Check the output above.", 'red')
+            self.wait_for_enter()
+            return
+
+        self.print_colored("\n✅ Key reset complete. Each node generated a new e2.pem on restart.", 'green', bold=True)
+        self.print_section("New Node Addresses")
+        for name in to_reset:
+            old_addr, old_eth = old_addresses[name]
+            self.print_colored(f"  {name}", 'white', bold=True)
+            self.print_colored(f"    old: {old_addr or 'unknown'}  ({old_eth or 'unknown'})", 'white')
+            if name in new_addresses:
+                new_addr, new_eth = new_addresses[name]
+                self.print_colored(f"    new: {new_addr}  ({new_eth or 'unknown'})", 'green', bold=True)
+            else:
+                self.print_colored(
+                    "    new: not reported yet. Check Main Menu → Node Status & Info in a minute.",
+                    'yellow',
+                )
+        self.print_colored(
+            "\nUpdate licenses, oracle bindings and allowed lists to the new addresses.",
+            'yellow',
+        )
+        self.wait_for_enter()
+
+    @staticmethod
+    def _node_info_addresses(
+        node_info: Dict[str, Dict[str, Any]], name: str
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Return (address, eth_address) for a node from node-info results, or (None, None)."""
+        result = node_info.get(name) or {}
+        data = result.get('data') or {}
+        if result.get('status') != 'success':
+            return (None, None)
+        return (data.get('address'), data.get('eth_address'))
+
+    RESET_KEY_ADDRESS_POLL_ATTEMPTS = 6
+    RESET_KEY_ADDRESS_POLL_DELAY = 10
+
+    def _wait_for_new_node_addresses(
+        self,
+        names: List[str],
+        old_addresses: Dict[str, Tuple[Optional[str], Optional[str]]],
+    ) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
+        """Poll node info until each node reports an address different from its old one."""
+        import time
+        found: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+        pending = list(names)
+        for attempt in range(self.RESET_KEY_ADDRESS_POLL_ATTEMPTS):
+            if attempt:
+                time.sleep(self.RESET_KEY_ADDRESS_POLL_DELAY)
+            results = self._fetch_node_info_results(
+                "Reading new node addresses...", host_names=pending
+            ) or {}
+            for name in pending:
+                address, eth_address = self._node_info_addresses(results, name)
+                if address and address != old_addresses[name][0]:
+                    found[name] = (address, eth_address)
+            pending = [name for name in pending if name not in found]
+            if not pending:
+                break
+        return found
 
     def _run_instance_lifecycle_playbook(
         self,

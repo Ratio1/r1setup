@@ -5,6 +5,25 @@ Ansible collection are recorded here. The CLI version (`scripts/ver.py`)
 and the collection version (`mnl_factory/galaxy.yml`) track separate
 lineages and may bump independently.
 
+## CLI 1.9.5 / Collection 1.5.6 — 2026-11-04
+
+### Added
+
+- **Reset Node Key** (Advanced Menu → 🔐 SECURITY TOOLS → 8). Deletes
+  `e2.pem` on one or more selected instances so each node generates a
+  new private key and address on restart. By default the old key is first
+  saved locally as `<instance>-<timestamp>-e2.pem` (mode `0600`, in a
+  `0700` directory when r1setup creates it); a node whose backup fails is
+  skipped. Requires typing `RESET`. The new
+  `playbooks/reset_node_key.yml` stops the service, removes
+  `{{ mnl_docker_volume_path }}/_data/e2.pem`, starts the service, and
+  waits up to 300 s for the new key file. Afterwards the CLI polls
+  `get_node_info` until each node reports a changed address and shows
+  old and new addresses side by side. Every node outcome (including
+  skipped backups) is appended to `~/.ratio1/r1_setup/logs/operations.log`
+  as a `reset_node_key` event with backup path and old/new addresses.
+  Needs both a CLI and a collection release to reach operators.
+
 ## Collection 1.5.4 - 2026-06-06
 
 Patch release for edge-node host preparation.

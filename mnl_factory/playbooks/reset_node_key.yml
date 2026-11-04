@@ -1,0 +1,51 @@
+---
+- name: Reset Edge Node private key (e2.pem)
+  hosts: gpu_nodes
+  become: true
+  gather_facts: false
+  vars:
+    ansible_roles_path: "{{ playbook_dir }}/../roles"
+    r1setup_e2_pem_path: "{{ mnl_docker_volume_path }}/_data/e2.pem"
+    r1setup_e2_pem_regen_timeout: 300
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+    - ../group_vars/mnl.yml
+    - ../group_vars/variables.yml
+  pre_tasks:
+    - name: Resolve per-instance runtime vars
+      ansible.builtin.import_tasks: tasks/resolve_instance_runtime_vars.yml
+    - name: Probe configured service presence
+      ansible.builtin.import_tasks: tasks/probe_instance_service_presence.yml
+  tasks:
+    - name: Fail if service doesn't exist
+      ansible.builtin.fail:
+        msg: "Service {{ edge_node_service_name }} not found on {{ inventory_hostname }}; deploy the node first."
+      when: not r1setup_service_exists
+
+    - name: Stop the Edge Node service
+      ansible.builtin.systemd:
+        name: "{{ edge_node_service_name }}"
+        state: stopped
+
+    - name: Delete the node private key
+      ansible.builtin.file:
+        path: "{{ r1setup_e2_pem_path }}"
+        state: absent
+
+    - name: Start the Edge Node service
+      ansible.builtin.systemd:
+        name: "{{ edge_node_service_name }}"
+        state: started
+
+    - name: Wait for the node to generate a new private key
+      ansible.builtin.wait_for:
+        path: "{{ r1setup_e2_pem_path }}"
+        state: present
+        timeout: "{{ r1setup_e2_pem_regen_timeout }}"
+
+    - name: Display reset result
+      ansible.builtin.debug:
+        msg: |
+          ✅ New private key generated on {{ inventory_hostname }}: {{ r1setup_e2_pem_path }}
+          The node now has a new address. Check it with Node Status & Info.
