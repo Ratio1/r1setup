@@ -114,6 +114,7 @@ class TestMigrationExecution(unittest.TestCase):
 
             planner._prepare_target_machine_for_migration = MagicMock(return_value={"status": "success", "prepared": True})
             planner._stop_source_instance_for_migration = MagicMock(return_value={"status": "success"})
+            planner._set_source_unit_enabled = MagicMock(return_value={"status": "success"})
             planner._create_source_archive = MagicMock(return_value={"status": "success"})
             planner._compute_remote_checksum = MagicMock(side_effect=[
                 {"status": "success", "checksum": "abc123"},
@@ -175,6 +176,7 @@ class TestMigrationExecution(unittest.TestCase):
             planner.build_migration_plan = MagicMock(return_value=refreshed_plan)
             planner._prepare_target_machine_for_migration = MagicMock(return_value={"status": "success", "prepared": True})
             planner._stop_source_instance_for_migration = MagicMock(return_value={"status": "success"})
+            planner._set_source_unit_enabled = MagicMock(return_value={"status": "success"})
             planner._create_source_archive = MagicMock(return_value={"status": "success"})
             planner._compute_remote_checksum = MagicMock(side_effect=[
                 {"status": "success", "checksum": "abc123"},
@@ -238,6 +240,7 @@ class TestMigrationExecution(unittest.TestCase):
 
             planner._prepare_target_machine_for_migration = MagicMock(return_value={"status": "success", "prepared": True})
             planner._stop_source_instance_for_migration = MagicMock(return_value={"status": "success"})
+            planner._set_source_unit_enabled = MagicMock(return_value={"status": "success"})
             planner._create_source_archive = MagicMock(return_value={"status": "success"})
             planner._compute_remote_checksum = MagicMock(return_value={"status": "success", "checksum": "abc123"})
             planner._copy_from_machine = MagicMock(return_value={"status": "success"})
@@ -273,6 +276,7 @@ class TestMigrationExecution(unittest.TestCase):
 
             planner._prepare_target_machine_for_migration = MagicMock(return_value={"status": "success", "prepared": True})
             planner._stop_source_instance_for_migration = MagicMock(return_value={"status": "success"})
+            planner._set_source_unit_enabled = MagicMock(return_value={"status": "success"})
             planner._create_source_archive = MagicMock(return_value={"status": "success"})
             planner._compute_remote_checksum = MagicMock(side_effect=[
                 {"status": "success", "checksum": "abc123"},

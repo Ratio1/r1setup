@@ -205,6 +205,49 @@ def migration_next_action_hint(plan: Optional[Dict[str, Any]]) -> str:
         return "Deployment Menu -> Migration -> Plan a new migration"
     return f"Deployment Menu -> Migration -> {MIGRATION_ACTION_LABELS[primary]}"
 
+
+class SshpassCommand(list):
+    """argv for ``sshpass -e ...``. The password travels in the child's
+    environment (SSHPASS), never in argv, so other local users cannot read it
+    from the process list."""
+
+    def __init__(self, argv, password):
+        super().__init__(argv)
+        self.password = str(password)
+
+
+def wrap_sshpass(cmd: List[str], password: Any) -> 'SshpassCommand':
+    """Prefix an ssh/scp argv with ``sshpass -e`` and carry the password out of band."""
+    return SshpassCommand(['sshpass', '-e'] + list(cmd), password)
+
+
+def ssh_subprocess_env(cmd: Any) -> Optional[Dict[str, str]]:
+    """Environment for running *cmd*: adds SSHPASS for SshpassCommand, else None (inherit)."""
+    password = getattr(cmd, 'password', None)
+    if password is None:
+        return None
+    env = os.environ.copy()
+    env['SSHPASS'] = password
+    return env
+
+
+class RootShellCommand(str):
+    """Remote command string that expects *stdin_data* (the sudo password) on stdin."""
+
+    stdin_data: Optional[str] = None
+
+
+def ssh_extra_options(machine_config: Dict[str, Any]) -> List[str]:
+    """Keepalive options plus the host's ansible_ssh_common_args (e.g. ProxyJump)."""
+    options = ['-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4']
+    common_args = str(machine_config.get('ansible_ssh_common_args') or '').strip()
+    if common_args:
+        try:
+            options.extend(shlex.split(common_args))
+        except ValueError:
+            pass
+    return options
+
 SSH_KEY_MANAGEMENT_REQUIRED_PLAYBOOKS = (
     'playbooks/ssh_install_key.yml',
     'playbooks/ssh_add_extra_keys.yml',
@@ -7660,7 +7703,9 @@ class MigrationPlanner:
             return wrapped
         become_password = machine_record.get('ansible_become_password')
         if become_password:
-            return f"printf %s {shlex.quote(str(become_password))} | sudo -S -p '' {wrapped}"
+            command_with_stdin = RootShellCommand(f"sudo -S -p '' {wrapped}")
+            command_with_stdin.stdin_data = f"{become_password}\n"
+            return command_with_stdin
         return f"sudo -n {wrapped}"
 
     def _run_machine_command(
@@ -7679,6 +7724,8 @@ class MigrationPlanner:
         try:
             result = subprocess.run(
                 ssh_cmd,
+                env=ssh_subprocess_env(ssh_cmd),
+                input=getattr(remote_command, 'stdin_data', None),
                 capture_output=True,
                 text=True,
                 timeout=timeout or self.app.connection_timeout,
@@ -7720,6 +7767,7 @@ class MigrationPlanner:
             scp_cmd.extend(['-i', str(key_file)])
 
         scp_cmd.extend(['-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null'])
+        scp_cmd.extend(ssh_extra_options(machine_record))
         remote_spec = f"{user}@{host}:{source if download else destination}"
         if download:
             scp_cmd.extend([remote_spec, destination])
@@ -7727,7 +7775,7 @@ class MigrationPlanner:
             scp_cmd.extend([source, remote_spec])
 
         if 'ansible_ssh_pass' in machine_record:
-            return ['sshpass', '-p', machine_record['ansible_ssh_pass']] + scp_cmd
+            return wrap_sshpass(scp_cmd, machine_record['ansible_ssh_pass'])
         return scp_cmd
 
     def _copy_from_machine(self, machine_record: Dict[str, Any], remote_path: str, local_path: str, *, timeout: Optional[int] = None) -> Dict[str, Any]:
@@ -7743,6 +7791,7 @@ class MigrationPlanner:
                 capture_output=True,
                 text=True,
                 timeout=effective_timeout,
+                env=ssh_subprocess_env(scp_cmd),
                 check=False,
             )
         except FileNotFoundError as e:
@@ -7767,6 +7816,7 @@ class MigrationPlanner:
                 capture_output=True,
                 text=True,
                 timeout=effective_timeout,
+                env=ssh_subprocess_env(scp_cmd),
                 check=False,
             )
         except FileNotFoundError as e:
@@ -7908,6 +7958,16 @@ class MigrationPlanner:
         if success:
             return {'status': 'success', 'output': output}
         return {'status': 'error', 'message': output or 'Source stop failed'}
+
+    def _set_source_unit_enabled(self, machine_record: Dict[str, Any], runtime: Dict[str, Any], enabled: bool) -> Dict[str, Any]:
+        """Enable or disable the source service unit so a reboot cannot (or can) start it."""
+        service_name = str(runtime.get('service_name') or DEFAULT_RUNTIME_SERVICE_NAME).strip()
+        verb = 'enable' if enabled else 'disable'
+        remote_command = self._build_remote_root_shell_command(
+            machine_record,
+            f"systemctl {verb} {shlex.quote(service_name)}",
+        )
+        return self._run_machine_command(machine_record, remote_command, timeout=self.app.connection_timeout * 2)
 
     def _create_source_archive(self, machine_record: Dict[str, Any], source_volume_path: str, archive_path: str) -> Dict[str, Any]:
         """Create a source archive on the source machine."""
@@ -8430,6 +8490,15 @@ class MigrationPlanner:
                 leftovers.append(f"node runtime and volume on target {target_machine_id} ({message}); may still be running")
                 rolling_back_plan = self._persist_plan_step(rolling_back_plan, 'target_cleanup_overridden')
 
+        if plan.get('source_unit_disabled'):
+            enable_result = self._set_source_unit_enabled(source_machine, plan.get('source_runtime') or {}, True)
+            if enable_result.get('status') == 'success':
+                rolling_back_plan = self._persist_plan_step(rolling_back_plan, 'source_unit_enabled', source_unit_disabled=False)
+            else:
+                leftovers.append(
+                    f"source service on {plan.get('source_machine_id', '?')} is not enabled at boot "
+                    f"({self._short_error(enable_result.get('message'))}); run 'systemctl enable' on it"
+                )
         source_restart = self._start_source_instance_after_rollback(instance_name)
         if source_restart.get('status') != 'success':
             self._log_migration_event(
@@ -8809,7 +8878,16 @@ class MigrationPlanner:
             self.app.wait_for_enter()
             return
         self.app._update_node_status(executing_plan['instance_name'], 'stopped')
-        executing_plan = self._persist_plan_step(executing_plan, 'source_stopped')
+        # Disable, not only stop: a source reboot before Finalize must not start
+        # a second copy of the node with the same identity.
+        disable_result = self._set_source_unit_enabled(source_machine, source_runtime, False)
+        if disable_result.get('status') != 'success':
+            message = f"Source service stopped but could not be disabled: {self._short_error(disable_result.get('message'))}"
+            self._mark_migration_failure(executing_plan, message)
+            self.app.print_colored(message, 'red')
+            self.app.wait_for_enter()
+            return
+        executing_plan = self._persist_plan_step(executing_plan, 'source_stopped', source_unit_disabled=True)
 
         transfer_timeout = self._migration_transfer_timeout()
         source_vol_path = source_runtime.get('volume_path', '')
@@ -11246,7 +11324,7 @@ class R1Setup:
 
         ssh_cmd.extend([f"{user}@{host}", remote_command])
         if 'ansible_ssh_pass' in node_config:
-            return ['sshpass', '-p', node_config['ansible_ssh_pass']] + ssh_cmd
+            return wrap_sshpass(ssh_cmd, node_config['ansible_ssh_pass'])
         return ssh_cmd
 
     def _ensure_helper_mode_supported_for_hosts(
@@ -11658,7 +11736,7 @@ class R1Setup:
             ssh_cmd.extend(['-p', str(ssh_port)])
 
         if 'ansible_ssh_pass' in machine_config:
-            ssh_cmd = ['sshpass', '-p', machine_config['ansible_ssh_pass']] + ssh_cmd
+            ssh_cmd = wrap_sshpass(ssh_cmd, machine_config['ansible_ssh_pass'])
         elif 'ansible_ssh_private_key_file' in machine_config:
             key_file = machine_config['ansible_ssh_private_key_file']
             if str(key_file).startswith('~'):
@@ -11683,6 +11761,7 @@ class R1Setup:
         try:
             result = subprocess.run(
                 ssh_cmd,
+                env=ssh_subprocess_env(ssh_cmd),
                 capture_output=True,
                 text=True,
                 timeout=self.connection_timeout,
@@ -11759,11 +11838,12 @@ class R1Setup:
             '-o', 'UserKnownHostsFile=/dev/null',
             '-o', 'BatchMode=yes',
             '-o', f'ConnectTimeout={getattr(self, "ssh_connect_timeout", 10)}',
+            *ssh_extra_options(machine_config),
             f"{user}@{host}",
-            remote_command,
+            str(remote_command),
         ])
         if 'ansible_ssh_pass' in machine_config:
-            return ['sshpass', '-p', machine_config['ansible_ssh_pass']] + ssh_cmd
+            return wrap_sshpass(ssh_cmd, machine_config['ansible_ssh_pass'])
         return ssh_cmd
 
     def _run_machine_probe(self, machine_config: Dict[str, Any], remote_command: str) -> Dict[str, Any]:
@@ -11776,6 +11856,8 @@ class R1Setup:
         try:
             result = subprocess.run(
                 ssh_cmd,
+                env=ssh_subprocess_env(ssh_cmd),
+                input=getattr(remote_command, 'stdin_data', None),
                 capture_output=True,
                 text=True,
                 timeout=self.connection_timeout,
@@ -14259,7 +14341,7 @@ PY"""
             # Handle authentication
             if 'ansible_ssh_pass' in config:
                 # For password authentication, we need to use sshpass
-                ssh_cmd = ['sshpass', '-p', config['ansible_ssh_pass']] + ssh_cmd
+                ssh_cmd = wrap_sshpass(ssh_cmd, config['ansible_ssh_pass'])
             elif 'ansible_ssh_private_key_file' in config:
                 key_file = config['ansible_ssh_private_key_file']
                 if key_file.startswith('~'):
@@ -14277,7 +14359,7 @@ PY"""
 
             try:
                 # Execute SSH command to get the private key
-                result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=self.connection_timeout)
+                result = subprocess.run(ssh_cmd, env=ssh_subprocess_env(ssh_cmd), capture_output=True, text=True, timeout=self.connection_timeout)
                 
                 if result.returncode == 0 and result.stdout.strip():
                     # Save the private key to file
@@ -14718,7 +14800,7 @@ PY"""
         err = b''
         try:
             with open(local_archive_path, 'wb') as out:
-                proc = subprocess.Popen(ssh_cmd, stdout=out, stderr=subprocess.PIPE)
+                proc = subprocess.Popen(ssh_cmd, env=ssh_subprocess_env(ssh_cmd), stdout=out, stderr=subprocess.PIPE)
                 try:
                     _, err = proc.communicate()
                 except KeyboardInterrupt:
@@ -16786,6 +16868,7 @@ PY"""
             # Execute the command
             process = subprocess.Popen(
                 ssh_cmd,
+                env=ssh_subprocess_env(ssh_cmd),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -16925,6 +17008,7 @@ PY"""
             # Execute the command
             result = subprocess.run(
                 ssh_cmd,
+                env=ssh_subprocess_env(ssh_cmd),
                 capture_output=True,
                 text=True,
                 timeout=self.connection_timeout,
