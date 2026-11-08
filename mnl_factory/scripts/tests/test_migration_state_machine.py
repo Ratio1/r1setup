@@ -60,6 +60,7 @@ def last_saved(app):
 def build_planner(app, *, runtime_cleanup=None, start=None):
     planner = r1setup.MigrationPlanner(app)
     planner._display_migration_plan = MagicMock()
+    planner._display_live_host_state = MagicMock()
     planner._cleanup_runtime_artifacts = MagicMock(side_effect=runtime_cleanup) if callable(runtime_cleanup) or isinstance(runtime_cleanup, list) \
         else MagicMock(return_value=runtime_cleanup or {"status": "success"})
     planner._cleanup_remote_archive = MagicMock(return_value={"status": "success"})
@@ -111,7 +112,8 @@ class TestFinalizeRecovery(unittest.TestCase):
                 planner.finalize_saved_migration_plan()
 
                 self.assertEqual(last_saved(app)["status"], "finalized", status)
-                planner._cleanup_runtime_artifacts.assert_called_once_with(MACHINE_A, plan["source_runtime"], remove_volume=False)
+                planner._cleanup_runtime_artifacts.assert_called_once_with(MACHINE_A, plan["source_runtime"], remove_volume=False,
+                                                                               remove_global_helpers=True)
 
     def test_finalize_refused_for_planned_plan(self):
         with tempfile.TemporaryDirectory() as tmp:

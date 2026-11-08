@@ -4,13 +4,18 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from tests.support import r1setup
 
 
 class TestMigrationRollbackAndFinalization(unittest.TestCase):
     """Verify rollback and finalization safety behavior."""
+
+    def setUp(self):
+        live_state = patch.object(r1setup.MigrationPlanner, "_display_live_host_state")
+        live_state.start()
+        self.addCleanup(live_state.stop)
 
     def _build_plan(self, temp_dir: str, *, status: str):
         local_archive_path = str(Path(temp_dir) / "node-1.tar.gz")
@@ -128,6 +133,7 @@ class TestMigrationRollbackAndFinalization(unittest.TestCase):
                 {"machine_id": "machine-a", "ansible_host": "10.0.0.1", "ansible_user": "root"},
                 plan["source_runtime"],
                 remove_volume=False,
+                remove_global_helpers=True,
             )
             self.assertFalse(local_archive.exists())
             self.assertEqual(app.set_migration_plan_state.call_args_list[-1].args[0]["status"], "finalized")

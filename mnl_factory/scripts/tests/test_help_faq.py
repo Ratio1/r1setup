@@ -154,7 +154,9 @@ class TestHelpFaqMenu(unittest.TestCase):
         rendered = _rendered_text(app)
         self.assertIn("Register Machine", rendered)
         self.assertIn("do not Add Node", rendered)
-        self.assertIn("Execute Migration moves", rendered)
+        self.assertIn("Execute moves the selected existing node", rendered)
+        self.assertIn("Deployment Menu -> 4) Migration", rendered)
+        self.assertNotIn("Switch to Advanced Mode first", rendered)
         app.wait_for_enter.assert_called_once()
 
     def test_invalid_help_topic_mentions_valid_range(self):

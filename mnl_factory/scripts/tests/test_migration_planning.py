@@ -206,8 +206,11 @@ class TestMigrationPlanBuilder(unittest.TestCase):
 
         self.assertEqual(plan["status"], "blocked")
         joined_errors = " ".join(plan["validation"]["errors"])
-        self.assertIn("collides", joined_errors)
+        # One cause, one error: per-field collisions with the placeholder are
+        # folded into the occupied-standard-target error (still in "collisions").
+        self.assertNotIn("collides", joined_errors)
         self.assertIn("standard mode", joined_errors)
+        self.assertTrue(plan["validation"]["collisions"])
         self.assertIn("node-2 [not_deployed]", joined_errors)
         self.assertIn("not-deployed placeholders", joined_errors)
         self.assertNotIn("reachability probe failed", joined_errors)

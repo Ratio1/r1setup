@@ -186,6 +186,17 @@ MIGRATION_ACTION_LABELS = {
 # Execution steps after which the target may already run the node.
 MIGRATION_TARGET_RUNTIME_STEPS = frozenset({'target_extracted', 'target_applied', 'target_started', 'target_verified'})
 MIGRATION_PLAN_HISTORY_LIMIT = 10
+# Machine-global helpers installed by the setup role in standard topology
+# (same list as playbooks/delete_edge_node.yml).
+STANDARD_GLOBAL_HELPER_PATHS = (
+    '/usr/local/bin/get_logs',
+    '/usr/local/bin/restart_service',
+    '/usr/local/bin/get_node_info',
+    '/usr/local/bin/get_node_history',
+    '/usr/local/bin/get_e2_pem_file',
+    '/usr/local/bin/get_allowed',
+    '/usr/local/bin/update_allowed_batch',
+)
 
 
 def migration_allowed_actions(plan: Optional[Dict[str, Any]]) -> Tuple[str, ...]:
@@ -6958,7 +6969,7 @@ class MigrationPlanner:
         machines = fleet_state.get('fleet', {}).get('machines', {})
         target_machine_ids = [machine_id for machine_id in sorted(machines.keys()) if machine_id != source_machine_id]
         if not target_machine_ids:
-            return None
+            return self._offer_inline_target_registration()
 
         while True:
             self.app.print_header("Select Migration Target Machine")
@@ -6993,7 +7004,8 @@ class MigrationPlanner:
             self.app.print_colored("  0) Cancel", 'white')
             print()
 
-            choice = self.app.get_input("Select target machine", "0").strip()
+            default_choice = "1" if len(target_machine_ids) == 1 else "0"
+            choice = self.app.get_input("Select target machine", default_choice).strip()
             if choice == '0':
                 return None
             try:
@@ -7006,6 +7018,19 @@ class MigrationPlanner:
                 return target_machine_ids[selection - 1]
             self.app.print_colored(f"Invalid option. Valid choices are 0-{len(target_machine_ids)}.", 'red')
             self.app.wait_for_enter()
+
+    def _offer_inline_target_registration(self) -> Optional[str]:
+        """No destination registered yet: offer to register one here instead of a mode switch."""
+        self.app.print_colored("No other machine is registered to receive this node.", 'yellow')
+        self.app.print_colored(
+            "Register the destination now (host, SSH user, key or password). It does not get a node of its own: "
+            "Execute Migration moves this node onto it and prepares it first if needed.",
+            'cyan',
+        )
+        if not self._confirm("Register the destination machine now? (Y/n)", "Y"):
+            return None
+        registered = self.app.config_manager._collect_machine_registration_entries(1)
+        return registered[0] if registered else None
 
     def _select_runtime_name_policy(self) -> Optional[str]:
         """Choose how runtime names should be resolved on the target machine."""
@@ -7226,7 +7251,11 @@ class MigrationPlanner:
             exclude_instance=instance_name,
         )
         hints: List[str] = []
-        if collisions:
+        standard_target_occupied = (
+            str(target_machine_record.get('topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE) == 'standard'
+            and bool(target_machine_record.get('instance_names'))
+        )
+        if collisions and not standard_target_occupied:
             for field, conflicting_instances in sorted(collisions.items()):
                 conflicting_labels = [
                     self._format_migration_instance_label(conflicting_instance, instances.get(conflicting_instance, {}))
@@ -7519,6 +7548,15 @@ class MigrationPlanner:
         self.app.print_colored(f"Checksum: {transfer.get('checksum_algorithm', 'unknown')}", 'white')
         print()
 
+        if context in ('rollback', 'finalization', 'abandon'):
+            context_note = {
+                'rollback': "Rollback review: the source is restored first; target files and transfer archives are then removed where reachable.",
+                'finalization': "Finalization review: this will clean deferred source-side artifacts after a verified migration.",
+                'abandon': "Abandon review: the plan is closed locally; no host is contacted or changed.",
+            }[context]
+            self.app.print_colored(context_note, 'cyan')
+            return
+
         self.app.print_section("Preflight")
         preflight = plan.get('preflight') or {}
         checks = preflight.get('checks') or {}
@@ -7586,6 +7624,14 @@ class MigrationPlanner:
         )
         if context in ('planning', 'execution') and preflight.get('requires_target_preparation'):
             self.app.print_colored("Target preparation required before execution.", 'yellow')
+        volume_bytes = preflight.get('source_volume_bytes')
+        if context in ('planning', 'execution') and volume_bytes:
+            estimate_minutes = 2 + (volume_bytes / (1024 ** 3)) * 1.5
+            self.app.print_colored(
+                f"Expected node downtime: about {int(round(estimate_minutes))} min for {self._format_bytes(volume_bytes)} "
+                "(the node stops at step 2 and starts on the target at step 8; slow links take longer).",
+                'yellow',
+            )
         print()
 
         validation = plan.get('validation') or {}
@@ -8352,6 +8398,67 @@ class MigrationPlanner:
             },
         )
 
+    MIGRATION_STEP_STATE = {
+        1: ("running, not touched", "machine preparation incomplete"),
+        2: ("stop or disable may be incomplete", "prepared, no node files yet"),
+        3: ("stopped and disabled", "prepared, no node files yet"),
+        4: ("stopped and disabled", "prepared, no node files yet"),
+        5: ("stopped and disabled", "partial transfer archive"),
+        6: ("stopped and disabled", "archive present, volume not extracted"),
+        7: ("stopped and disabled", "partially extracted volume, node not started"),
+        8: ("stopped and disabled", "node files present; the node may be running"),
+        9: ("stopped and disabled", "node started but not verified"),
+    }
+
+    @classmethod
+    def _summarize_error(cls, raw_message: Optional[str], default: str = 'unknown error') -> str:
+        """Short, human-readable cause from raw SSH/tar/Ansible output."""
+        text = str(raw_message or '')
+        if 'fatal:' in text or 'FAILED!' in text:
+            messages = re.findall(r'"msg":\s*"([^"]{1,300})', text)
+            if messages:
+                return messages[-1]
+            failed_lines = [line.strip() for line in text.splitlines() if 'fatal:' in line or 'FAILED!' in line]
+            if failed_lines:
+                return failed_lines[-1][:300]
+        return cls._short_error(text, default)
+
+    def _write_migration_error_log(self, plan: Dict[str, Any], step_number: int, raw_message: Optional[str]) -> Optional[str]:
+        """Save the full raw error output next to the operation log; return its path."""
+        try:
+            log_dir = Path(self.app._get_operation_log_dir())
+            log_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            log_path = log_dir / f"migration-{plan.get('instance_name', 'node')}-step{step_number}-{stamp}.log"
+            log_path.write_text(str(raw_message or ''))
+            os.chmod(log_path, 0o600)
+            return str(log_path)
+        except Exception:
+            return None
+
+    def _fail_step(self, plan: Dict[str, Any], step_number: int, step_title: str, role: str, raw_message: Optional[str]) -> None:
+        """Record a failed execution step and print one summary block with the next action."""
+        host_label = {
+            'source': f"source {plan.get('source_machine_id', '?')}",
+            'target': f"target {plan.get('target_machine_id', '?')}",
+        }.get(role, 'this controller')
+        short = self._summarize_error(raw_message, f"{step_title} failed")
+        self._mark_migration_failure(plan, f"Step {step_number}/9 {step_title} failed on {host_label}: {short}")
+        log_path = self._write_migration_error_log(plan, step_number, raw_message)
+        source_state, target_state = self.MIGRATION_STEP_STATE.get(step_number, ("unknown", "unknown"))
+        print()
+        self.app.print_colored(f"✗ Step {step_number}/9 '{step_title}' failed on {host_label}", 'red', bold=True)
+        self.app.print_colored(f"  Cause:  {short}", 'red')
+        self.app.print_colored(f"  Source: {source_state}", 'white')
+        self.app.print_colored(f"  Target: {target_state}", 'white')
+        self.app.print_colored(
+            "  Next:   Deployment Menu -> Migration -> Roll back migration (restarts the node on the source)",
+            'yellow',
+        )
+        if log_path:
+            self.app.print_colored(f"  Full output: {log_path}", 'white')
+        self.app.wait_for_enter()
+
     def _persist_plan_step(self, plan: Dict[str, Any], step: str, **extra_updates: Any) -> Dict[str, Any]:
         """Persist a migration-plan step transition and return the updated plan."""
         updated_plan = self._update_plan_fields(
@@ -8368,18 +8475,41 @@ class MigrationPlanner:
         self.app.print_colored(f"[{step_number}/{total_steps}] {title}", 'cyan', bold=True)
         self.app.print_colored(detail, 'white')
 
-    def _run_with_spinner(self, label: str, func, *args, progress_fn=None, progress_poll_secs: float = 5.0, **kwargs):
-        """Run *func* while displaying a CLI spinner (with optional progress) on stdout.
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        seconds = int(max(0, seconds))
+        if seconds < 60:
+            return f"{seconds}s"
+        minutes, seconds = divmod(seconds, 60)
+        if minutes < 60:
+            return f"{minutes}m{seconds:02d}s"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h{minutes:02d}m"
+
+    def _run_with_spinner(
+        self,
+        label: str,
+        func,
+        *args,
+        progress_fn=None,
+        progress_poll_secs: float = 5.0,
+        stall_warn_secs: float = 60.0,
+        **kwargs,
+    ):
+        """Run *func* while displaying a CLI spinner with elapsed time and optional progress.
 
         Parameters
         ----------
         progress_fn : callable, optional
             Called periodically; should return ``(current_bytes, total_bytes)``
             or ``(current_bytes, None)`` when the total is unknown.  Return
-            ``None`` to skip the update.
+            ``None`` when the probe failed (the host did not answer).
         progress_poll_secs : float
             How often (in seconds) to call *progress_fn*.  Remote probes
             should use ~5 s; local file-size checks can use ~1 s.
+        stall_warn_secs : float
+            Show a stall warning when the reported size has not changed for
+            this long.
         """
         result_container: list = []
         done_event = threading.Event()
@@ -8395,29 +8525,53 @@ class MigrationPlanner:
         idx = 0
         poll_every = max(1, int(progress_poll_secs / 0.25))
         last_progress = ''
+        started = time.monotonic()
+        last_value = None
+        last_change = started
+        probe_failures = 0
         while not done_event.wait(timeout=0.25):
+            now = time.monotonic()
             if progress_fn and idx % poll_every == 0 and idx > 0:
                 try:
                     info = progress_fn()
-                    if info is not None:
-                        current, total = info
-                        if total and total > 0:
-                            pct = min(100, int(current * 100 / total))
-                            last_progress = f" {self._format_bytes(current)} / {self._format_bytes(total)} ({pct}%)"
-                        elif current and current > 0:
-                            last_progress = f" {self._format_bytes(current)}"
                 except Exception:
-                    pass
-            line = f"\r  {frames[idx % len(frames)]} {label}{last_progress}"
+                    info = None
+                if info is None:
+                    probe_failures += 1
+                else:
+                    probe_failures = 0
+                    current, total = info
+                    if current != last_value:
+                        last_value = current
+                        last_change = now
+                    elapsed = max(now - started, 0.001)
+                    rate = (current or 0) / elapsed
+                    if total and total > 0:
+                        pct = min(100, int((current or 0) * 100 / total))
+                        last_progress = f" {self._format_bytes(current)} / {self._format_bytes(total)} ({pct}%)"
+                        if rate > 0 and (current or 0) < total:
+                            eta = (total - current) / rate
+                            last_progress += f", {self._format_bytes(int(rate))}/s, about {self._format_duration(eta)} left"
+                    elif current and current > 0:
+                        last_progress = f" {self._format_bytes(current)}"
+            note = ''
+            if progress_fn and probe_failures >= 2:
+                note = "  - host not answering progress checks"
+            elif progress_fn and now - last_change >= stall_warn_secs:
+                note = f"  - no progress for {self._format_duration(now - last_change)}"
+            line = f"\r  {frames[idx % len(frames)]} {label} [{self._format_duration(now - started)}]{last_progress}{note}\033[K"
             sys.stdout.write(line)
             sys.stdout.flush()
             idx += 1
 
         # Clear the spinner line
-        sys.stdout.write(f"\r{' ' * (len(label) + len(last_progress) + 6)}\r")
+        sys.stdout.write("\r\033[K")
         sys.stdout.flush()
 
         worker.join()
+        elapsed_total = time.monotonic() - started
+        if elapsed_total >= 5:
+            self.app.print_colored(f"  {label.rstrip('.')}: finished in {self._format_duration(elapsed_total)}", 'white')
         return result_container[0]
 
     def _cleanup_local_archive(self, archive_path: Path) -> Dict[str, Any]:
@@ -8449,6 +8603,7 @@ class MigrationPlanner:
         runtime: Dict[str, Any],
         *,
         remove_volume: bool = False,
+        remove_global_helpers: bool = False,
     ) -> Dict[str, Any]:
         """Remove per-instance runtime artifacts without touching machine-global Docker config."""
         service_name = str(runtime.get('service_name') or DEFAULT_RUNTIME_SERVICE_NAME).strip()
@@ -8472,6 +8627,8 @@ class MigrationPlanner:
         ]
         if remove_volume and volume_path:
             cleanup_parts.append(f"rm -rf {shlex.quote(volume_path)}")
+        if remove_global_helpers:
+            cleanup_parts.append("rm -f " + " ".join(shlex.quote(path) for path in STANDARD_GLOBAL_HELPER_PATHS))
 
         remote_command = self._build_remote_root_shell_command(
             machine_record,
@@ -8585,6 +8742,7 @@ class MigrationPlanner:
 
         self.app.print_header("Rollback Saved Migration Plan")
         self._display_migration_plan(plan, context='rollback')
+        self._display_live_host_state(plan)
         if not self._confirm("\n↩️  Roll back this migration plan now? (y/N)", "N"):
             self.app.print_colored("Migration rollback cancelled.", 'yellow')
             self.app.wait_for_enter()
@@ -8745,6 +8903,80 @@ class MigrationPlanner:
         self._print_leftovers(leftovers)
         self.app.wait_for_enter()
 
+    def _probe_host_runtime_state(
+        self,
+        machine_record: Dict[str, Any],
+        runtime: Dict[str, Any],
+        archive_path: str,
+    ) -> Dict[str, Any]:
+        """One SSH round trip: unit, container, volume, archive and node-key fingerprint on a host."""
+        service = shlex.quote(str(runtime.get('service_name') or DEFAULT_RUNTIME_SERVICE_NAME))
+        container = shlex.quote(str(runtime.get('container_name') or DEFAULT_RUNTIME_CONTAINER_NAME))
+        volume = str(runtime.get('volume_path') or DEFAULT_RUNTIME_VOLUME_PATH)
+        archive = shlex.quote(archive_path or '/nonexistent')
+        script = "; ".join([
+            f"echo active=$(systemctl is-active {service} 2>/dev/null)",
+            f"echo enabled=$(systemctl is-enabled {service} 2>/dev/null || echo absent)",
+            "echo container=$(docker inspect -f '{{.State.Status}}' " + container + " 2>/dev/null || echo absent)",
+            f"echo volume=$(test -d {shlex.quote(volume)} && echo present || echo absent)",
+            f"echo archive=$(test -f {archive} && echo present || echo absent)",
+            f"echo key=$(sha256sum {shlex.quote(volume + '/_data/e2.pem')} 2>/dev/null | cut -c1-12)",
+        ])
+        result = self._run_machine_command(
+            machine_record,
+            self._build_remote_root_shell_command(machine_record, script),
+            timeout=self.app.connection_timeout,
+        )
+        if result.get('status') != 'success':
+            return {'status': 'error', 'message': self._short_error(result.get('message'), 'unreachable')}
+        state = {'status': 'success'}
+        for line in (result.get('stdout') or '').splitlines():
+            key, sep, value = line.partition('=')
+            if sep:
+                state[key.strip()] = value.strip()
+        return state
+
+    @staticmethod
+    def _format_host_runtime_state(state: Dict[str, Any]) -> Tuple[str, str]:
+        if state.get('status') != 'success':
+            return f"unreachable ({state.get('message', '?')})", 'red'
+        enabled = state.get('enabled') or 'absent'
+        text = (
+            f"service {state.get('active') or 'unknown'}/{enabled}, container {state.get('container') or 'absent'}, "
+            f"volume {state.get('volume') or '?'}, archive {state.get('archive') or '?'}"
+        )
+        if state.get('key'):
+            text += f", node key {state['key']}…"
+        running = state.get('active') == 'active' or state.get('container') == 'running'
+        return text, ('yellow' if running else 'white')
+
+    def _display_live_host_state(self, plan: Dict[str, Any]) -> None:
+        """Show what is on the source and target right now (not the planning-time preflight)."""
+        machines = self.app.get_fleet_state_copy().get('fleet', {}).get('machines', {})
+        transfer = plan.get('transfer') or {}
+        self.app.print_section("Hosts Right Now")
+        for role, machine_key, runtime_key, archive_key in (
+            ('Source', 'source_machine_id', 'source_runtime', 'source_archive_path'),
+            ('Target', 'target_machine_id', 'target_runtime', 'target_archive_path'),
+        ):
+            machine_id = plan.get(machine_key, '?')
+            machine_record = dict(machines.get(machine_id) or {})
+            if not machine_record:
+                self.app.print_colored(f"{role} {machine_id}: not registered in this config", 'yellow')
+                continue
+            state = self._run_with_spinner(
+                f"Checking {role.lower()} {machine_id}...",
+                self._probe_host_runtime_state,
+                machine_record,
+                plan.get(runtime_key) or {},
+                transfer.get(archive_key, ''),
+            )
+            text, color = self._format_host_runtime_state(state)
+            self.app.print_colored(f"{role} {machine_id}: {text}", color)
+        if plan.get('last_error'):
+            self.app.print_colored(f"Last error: {plan['last_error']}", 'red')
+        print()
+
     def _confirm_source_gone(self, plan: Dict[str, Any]) -> bool:
         """Warn about finalizing without touching the source, and require a typed confirmation."""
         instance_name = str(plan.get('instance_name') or '')
@@ -8774,6 +9006,7 @@ class MigrationPlanner:
 
         self.app.print_header("Finalize Saved Migration Plan")
         self._display_migration_plan(plan, context='finalization')
+        self._display_live_host_state(plan)
         remove_source_volume = False
         if skip_source_cleanup:
             if not self._confirm_source_gone(plan):
@@ -8824,11 +9057,19 @@ class MigrationPlanner:
             skip_source_cleanup=skip_source_cleanup,
         )
 
+        remove_helpers = (
+            not skip_source_cleanup
+            and str(source_machine.get('topology_mode') or DEFAULT_MACHINE_TOPOLOGY_MODE) == 'standard'
+            and not [name for name in (source_machine.get('instance_names') or []) if name != instance_name]
+        )
         if not skip_source_cleanup:
+            cleanup_kwargs = {'remove_volume': remove_source_volume}
+            if remove_helpers:
+                cleanup_kwargs['remove_global_helpers'] = True
             source_cleanup = self._cleanup_runtime_artifacts(
                 source_machine,
                 source_runtime,
-                remove_volume=remove_source_volume,
+                **cleanup_kwargs,
             )
             if source_cleanup.get('status') != 'success':
                 message = self._short_error(source_cleanup.get('message'), 'Source cleanup failed')
@@ -8890,9 +9131,39 @@ class MigrationPlanner:
             source_volume_removed=remove_source_volume,
             source_cleanup_skipped=skip_source_cleanup,
         )
-        self.app.print_colored("Migration finalization completed successfully.", 'green')
+        self._print_finalization_receipt(finalized_plan, remove_helpers=remove_helpers)
         self._print_leftovers(leftovers)
         self.app.wait_for_enter()
+
+    def _print_finalization_receipt(self, plan: Dict[str, Any], *, remove_helpers: bool) -> None:
+        """Summarize where the node runs now and what was removed or kept."""
+        cleanup = plan.get('finalization_cleanup') or {}
+        source_id = plan.get('source_machine_id', '?')
+        print()
+        self.app.print_colored(
+            f"✓ Migration finished: '{plan.get('instance_name', '?')}' runs on target {plan.get('target_machine_id', '?')}.",
+            'green',
+            bold=True,
+        )
+        if cleanup.get('source_cleanup_skipped'):
+            self.app.print_colored(f"  Source {source_id}: not contacted (marked gone).", 'yellow')
+        else:
+            removed = ["service unit", "container", "metadata"]
+            if remove_helpers:
+                removed.append("helper scripts")
+            if cleanup.get('source_volume_removed'):
+                removed.append("volume (including the node key e2.pem)")
+            self.app.print_colored(f"  Removed from source {source_id}: {', '.join(removed)}.", 'white')
+            if not cleanup.get('source_volume_removed'):
+                volume = (plan.get('source_runtime') or {}).get('volume_path', '?')
+                self.app.print_colored(
+                    f"  Kept on source {source_id}: {volume}, which holds the node key (e2.pem). "
+                    "Delete it once you no longer need a fallback.",
+                    'yellow',
+                )
+        health = str(plan.get('app_health_status') or 'unknown')
+        color = 'green' if health == 'verified' else 'yellow'
+        self.app.print_colored(f"  Target application health at execution: {health}", color)
 
     def abandon_saved_migration_plan(self) -> None:
         """Close the saved plan without touching any host, after showing what is left where."""
@@ -8903,6 +9174,7 @@ class MigrationPlanner:
         status = str(plan.get('status') or 'unknown')
         self.app.print_header("Abandon Saved Migration Plan")
         self._display_migration_plan(plan, context='abandon')
+        self._display_live_host_state(plan)
         self.app.print_colored(
             f"Abandoning closes the '{status}' plan for '{instance_name}' without contacting any host. "
             "Anything still on the source or target stays there.",
@@ -9027,18 +9299,14 @@ class MigrationPlanner:
         )
         prep_result = self._prepare_target_machine_for_migration(executing_plan)
         if prep_result.get('status') != 'success':
-            self._mark_migration_failure(executing_plan, prep_result.get('message', 'Target preparation failed'))
-            self.app.print_colored(prep_result.get('message', 'Target preparation failed'), 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 1, 'Prepare target machine', 'target', prep_result.get('message', 'Target preparation failed'))
             return
         executing_plan = self._persist_plan_step(executing_plan, 'target_prepared')
 
         self._announce_migration_phase(2, total_steps, "Stop Source Instance", "Stopping the source service before archiving its persistent volume.")
         stop_result = self._stop_source_instance_for_migration(executing_plan['instance_name'])
         if stop_result.get('status') != 'success':
-            self._mark_migration_failure(executing_plan, stop_result.get('message', 'Source stop failed'))
-            self.app.print_colored(stop_result.get('message', 'Source stop failed'), 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 2, 'Stop source instance', 'source', stop_result.get('message', 'Source stop failed'))
             return
         self.app._update_node_status(executing_plan['instance_name'], 'stopped')
         # Disable, not only stop: a source reboot before Finalize must not start
@@ -9046,9 +9314,7 @@ class MigrationPlanner:
         disable_result = self._set_source_unit_enabled(source_machine, source_runtime, False)
         if disable_result.get('status') != 'success':
             message = f"Source service stopped but could not be disabled: {self._short_error(disable_result.get('message'))}"
-            self._mark_migration_failure(executing_plan, message)
-            self.app.print_colored(message, 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 2, 'Stop source instance', 'source', message)
             return
         executing_plan = self._persist_plan_step(executing_plan, 'source_stopped', source_unit_disabled=True)
 
@@ -9081,9 +9347,7 @@ class MigrationPlanner:
             progress_fn=_archive_progress,
         )
         if archive_result.get('status') != 'success':
-            self._mark_migration_failure(executing_plan, archive_result.get('message', 'Source archive failed'))
-            self.app.print_colored(archive_result.get('message', 'Source archive failed'), 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 3, 'Archive source volume', 'source', archive_result.get('message', 'Source archive failed'))
             return
         executing_plan = self._persist_plan_step(executing_plan, 'source_archived')
 
@@ -9094,9 +9358,7 @@ class MigrationPlanner:
 
         source_checksum_result = self._compute_remote_checksum(source_machine, source_archive_path)
         if source_checksum_result.get('status') != 'success':
-            self._mark_migration_failure(executing_plan, source_checksum_result.get('message', 'Source checksum failed'))
-            self.app.print_colored(source_checksum_result.get('message', 'Source checksum failed'), 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 3, 'Archive source volume', 'source', source_checksum_result.get('message', 'Source checksum failed'))
             return
         source_checksum = source_checksum_result['checksum']
 
@@ -9119,16 +9381,12 @@ class MigrationPlanner:
             progress_poll_secs=1.0,
         )
         if download_result.get('status') != 'success':
-            self._mark_migration_failure(executing_plan, download_result.get('message', 'Archive download failed'))
-            self.app.print_colored(download_result.get('message', 'Archive download failed'), 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 4, 'Download to controller', 'source', download_result.get('message', 'Archive download failed'))
             return
 
         local_checksum = self._compute_local_checksum(local_archive_path)
         if local_checksum != source_checksum:
-            self._mark_migration_failure(executing_plan, 'Local checksum does not match source checksum')
-            self.app.print_colored("Local checksum does not match source checksum.", 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 4, 'Download to controller', 'controller', 'Local checksum does not match source checksum')
             return
         executing_plan = self._persist_plan_step(executing_plan, 'archive_downloaded')
 
@@ -9151,21 +9409,15 @@ class MigrationPlanner:
             progress_poll_secs=10.0,
         )
         if upload_result.get('status') != 'success':
-            self._mark_migration_failure(executing_plan, upload_result.get('message', 'Archive upload failed'))
-            self.app.print_colored(upload_result.get('message', 'Archive upload failed'), 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 5, 'Upload to target', 'target', upload_result.get('message', 'Archive upload failed'))
             return
 
         target_checksum_result = self._compute_remote_checksum(target_machine, target_archive_path)
         if target_checksum_result.get('status') != 'success':
-            self._mark_migration_failure(executing_plan, target_checksum_result.get('message', 'Target checksum failed'))
-            self.app.print_colored(target_checksum_result.get('message', 'Target checksum failed'), 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 5, 'Upload to target', 'target', target_checksum_result.get('message', 'Target checksum failed'))
             return
         if target_checksum_result['checksum'] != source_checksum:
-            self._mark_migration_failure(executing_plan, 'Target checksum does not match source checksum')
-            self.app.print_colored("Target checksum does not match source checksum.", 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 5, 'Upload to target', 'target', 'Target checksum does not match source checksum')
             return
         executing_plan = self._persist_plan_step(executing_plan, 'archive_uploaded')
 
@@ -9177,9 +9429,7 @@ class MigrationPlanner:
             target_vol_path,
         )
         if prepare_volume_result.get('status') != 'success':
-            self._mark_migration_failure(executing_plan, prepare_volume_result.get('message', 'Target volume preparation failed'))
-            self.app.print_colored(prepare_volume_result.get('message', 'Target volume preparation failed'), 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 6, 'Prepare target volume', 'target', prepare_volume_result.get('message', 'Target volume preparation failed'))
             return
         executing_plan = self._persist_plan_step(executing_plan, 'target_volume_prepared')
 
@@ -9201,9 +9451,7 @@ class MigrationPlanner:
             progress_poll_secs=10.0,
         )
         if extract_result.get('status') != 'success':
-            self._mark_migration_failure(executing_plan, extract_result.get('message', 'Target extract failed'))
-            self.app.print_colored(extract_result.get('message', 'Target extract failed'), 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 7, 'Extract on target', 'target', extract_result.get('message', 'Target extract failed'))
             return
         executing_plan = self._persist_plan_step(
             executing_plan,
@@ -9223,26 +9471,20 @@ class MigrationPlanner:
         )
         apply_result = self._apply_target_runtime_definition(executing_plan)
         if apply_result.get('status') != 'success':
-            self._mark_migration_failure(executing_plan, apply_result.get('message', 'Target apply failed'))
-            self.app.print_colored(apply_result.get('message', 'Target apply failed'), 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 8, 'Apply and start target runtime', 'target', apply_result.get('message', 'Target apply failed'))
             return
         executing_plan = self._persist_plan_step(executing_plan, 'target_applied')
 
         start_result = self._start_target_instance(executing_plan)
         if start_result.get('status') != 'success':
-            self._mark_migration_failure(executing_plan, start_result.get('message', 'Target start failed'))
-            self.app.print_colored(start_result.get('message', 'Target start failed'), 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 8, 'Apply and start target runtime', 'target', start_result.get('message', 'Target start failed'))
             return
         executing_plan = self._persist_plan_step(executing_plan, 'target_started')
 
         self._announce_migration_phase(9, total_steps, "Verify Target Health", "Checking runtime status and best-effort application health on the target machine.")
         verify_result = self._verify_target_migration_health(executing_plan)
         if verify_result.get('status') != 'success':
-            self._mark_migration_failure(executing_plan, verify_result.get('message', 'Target verification failed'))
-            self.app.print_colored(verify_result.get('message', 'Target verification failed'), 'red')
-            self.app.wait_for_enter()
+            self._fail_step(executing_plan, 9, 'Verify target health', 'target', verify_result.get('message', 'Target verification failed'))
             return
         executing_plan = self._persist_plan_step(
             executing_plan,
@@ -10218,7 +10460,7 @@ class R1Setup:
                         'Register Machine records SSH access and machine metadata without creating an Edge Node instance.',
                         'Use Register Machine for migration destinations, discovery targets, and prepared-but-empty hosts.',
                         'An empty registered machine can still be prepared or selected as a migration target.',
-                        'If Register Machine is hidden, switch the config to Advanced Mode first; that switch is one-way.',
+                        'In simple mode, Deployment Menu -> Migration -> Plan a new migration offers to register the destination inline; no mode switch is needed.',
                     ),
                 ),
                 (
@@ -10292,27 +10534,27 @@ class R1Setup:
                 (
                     'Required target setup',
                     (
-                        'Register Machine for the destination before planning the migration.',
-                        'If Register Machine is hidden, use Switch to Advanced Mode first.',
                         'Register the destination machine; do not Add Node on the destination first.',
+                        'If no destination is registered yet, Plan a new migration offers to register one inline (works in simple mode).',
                         'The target standard-mode machine should have instances=0 unless you use expert-mode custom runtimes.',
                     ),
                 ),
                 (
                     'Plan and execute',
                     (
-                        'Plan Migration is non-mutating; it validates structure and saves the intended move.',
-                        'Execute Migration moves the selected existing node onto the registered target machine.',
-                        'Execute Migration updates the same config; do not add that node again afterward.',
+                        'Planning is non-mutating; it checks reachability, free space and leftovers on the target, and saves the intended move.',
+                        'Execute moves the selected existing node onto the registered target machine.',
+                        'Execute stops and disables the node on the source, so a source reboot cannot start a second copy.',
+                        'Execute updates the same config; do not add that node again afterward.',
                         'Data moves source machine -> controller temp folder -> target machine.',
+                        'The Migration menu only lists the actions that are valid for the saved plan.',
                     ),
                 ),
                 (
                     'Related menu paths',
                     (
                         'Main Menu -> 1) Configuration Menu -> Register Machine',
-                        'Main Menu -> 2) Deployment Menu -> Plan Migration',
-                        'Main Menu -> 2) Deployment Menu -> Execute Migration',
+                        'Main Menu -> 2) Deployment Menu -> 4) Migration',
                     ),
                 ),
             ),
@@ -10324,16 +10566,17 @@ class R1Setup:
                 (
                     'Choose the right action',
                     (
-                        'Rollback Migration is for failed or interrupted execution and keeps source ownership authoritative.',
-                        'Finalize Migration is for executed plans after the target has been verified.',
-                        'Source cleanup and controller temp cleanup stay explicit so uncertain states are recoverable.',
+                        'Roll back is for failed or interrupted execution: the source is restarted first, then target files are removed where reachable.',
+                        'Finalize is for executed plans: it removes the stopped copy from the source.',
+                        'Both can be retried after an error or Ctrl-C; every step is safe to repeat.',
+                        'If the source host is gone for good, Finalize without source cleanup closes the move (the old disk still holds e2.pem).',
+                        'Abandon closes a plan without touching any host and lists what is left where.',
                     ),
                 ),
                 (
                     'Related menu paths',
                     (
-                        'Main Menu -> 2) Deployment Menu -> Rollback Migration',
-                        'Main Menu -> 2) Deployment Menu -> Finalize Migration',
+                        'Main Menu -> 2) Deployment Menu -> 4) Migration',
                     ),
                 ),
             ),
@@ -15040,6 +15283,8 @@ PY"""
                     host['ansible_host'] = host_address
                     host['ansible_user'] = prev_user
                     host['ansible_ssh_common_args'] = previous_config.get('ansible_ssh_common_args', '-o StrictHostKeyChecking=no')
+                    if previous_config.get('ansible_port'):
+                        host['ansible_port'] = previous_config['ansible_port']
                     for key in ('ansible_ssh_pass', 'ansible_become_password', 'ansible_ssh_private_key_file'):
                         if key in previous_config:
                             host[key] = previous_config[key]
@@ -15106,6 +15351,14 @@ PY"""
                 self.print_colored("Username cannot be empty", 'red')
                 continue
             host['ansible_user'] = username
+
+            default_port = str((existing_config or previous_config or {}).get('ansible_port') or 22)
+            while True:
+                port_value = self.get_input("Enter SSH port", default_port).strip()
+                if port_value.isdigit() and 1 <= int(port_value) <= 65535:
+                    host['ansible_port'] = int(port_value)
+                    break
+                self.print_colored("Invalid port. Enter a number from 1 to 65535.", 'red')
 
             # Authentication method selection (with retry loop)
             auth_configured = False
@@ -15295,6 +15548,7 @@ PY"""
             self.print_colored("\nConfiguration Summary:", 'yellow')
             self.print_colored(f"Host: {host['ansible_host']}")
             self.print_colored(f"User: {host['ansible_user']}")
+            self.print_colored(f"Port: {host.get('ansible_port', 22)}")
             self.print_colored(f"Auth: {'Password' if auth_choice == '1' else 'SSH Key'}")
 
             if self.get_input("\nConfirm this configuration? (y/n)", "y").lower() == 'y':
@@ -15646,9 +15900,14 @@ PY"""
                 f"Delete node '{name}' ({user}@{ip})? Remaining on this machine: {', '.join(sorted(remaining_instances))} (y/n)"
             )
         else:
+            machine_state = str(machine_record.get('deployment_state') or DEFAULT_MACHINE_DEPLOYMENT_STATE)
+            state_note = {
+                'prepared': "It stays registered as prepared",
+                'active': "It stays registered; its node runtime is not removed by this step",
+            }.get(machine_state, f"It stays registered (state: {machine_state})")
             confirmation_prompt = (
                 f"Delete node '{name}' ({user}@{ip})? This is the last instance on machine '{machine_id}'. "
-                "The machine will remain registered as prepared. (y/n)"
+                f"{state_note} and can be used as a migration target. (y/n)"
             )
 
         if self.get_input(confirmation_prompt, "n").lower() == 'y':
