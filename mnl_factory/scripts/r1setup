@@ -9310,9 +9310,14 @@ class MigrationPlanner:
             self.app.print_colored("  Next:   try again when the target answers.", 'yellow')
             self.app.wait_for_enter()
             return
+        target_archive = str((plan.get('transfer') or {}).get('target_archive_path') or '')
+        archive_removed = bool(target_archive) and (
+            self._cleanup_remote_archive(target_machine, target_archive).get('status') == 'success')
         cleanup = dict(plan.get('rollback_cleanup') or {})
         cleanup['leftovers'] = [
-            item for item in cleanup.get('leftovers') or [] if MIGRATION_DUPLICATE_LEFTOVER_MARK not in str(item)
+            item for item in cleanup.get('leftovers') or []
+            if MIGRATION_DUPLICATE_LEFTOVER_MARK not in str(item)
+            and not (archive_removed and str(item).startswith(f"archive {target_archive} on {target_machine_id}"))
         ]
         cleanup['target_volume_removed'] = True
         updated = self._update_plan_fields(

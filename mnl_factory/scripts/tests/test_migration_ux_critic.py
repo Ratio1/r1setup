@@ -38,6 +38,20 @@ class TestCleanupTargetAction(unittest.TestCase):
 
             planner._cleanup_runtime_artifacts.assert_called_once()
             self.assertEqual(last_saved(app)["rollback_cleanup"]["leftovers"], ["transfer archive on source"])
+            planner._cleanup_remote_archive.assert_called_once()
+
+    def test_cleanup_also_clears_target_archive_leftover(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = self.plan(tmp)
+            plan["rollback_cleanup"]["leftovers"].append(
+                "archive /tmp/r1setup_migration_node-1.tar.gz on machine-b (Connection timed out)")
+            app = build_app(plan, ["y"])
+            planner = build_planner(app)
+            planner._run_with_spinner = lambda label, func, *a, **k: func(*a, **k)
+
+            planner.cleanup_target_leftovers()
+
+            self.assertEqual(last_saved(app)["rollback_cleanup"]["leftovers"], ["transfer archive on source"])
             self.assertEqual(r1setup.migration_allowed_actions(last_saved(app)), ("plan",))
 
     def test_failed_cleanup_keeps_leftover(self):
