@@ -6937,7 +6937,7 @@ class MigrationPlanner:
             self.app.print_colored("  0) Cancel", 'white')
             print()
 
-            choice = self.app.get_input("Select instance", "0").strip()
+            choice = self.app.get_input("Select instance", "1" if len(instance_names) == 1 else "0").strip()
             if choice == '0':
                 return None
             try:
@@ -7600,11 +7600,14 @@ class MigrationPlanner:
                 )
             if checks.get('target_runtime_probe'):
                 found = (checks.get('target_runtime_probe') or {}).get('found') or []
-                self._display_preflight_check(
-                    "Existing node runtime on target",
-                    checks.get('target_runtime_probe') or {},
-                    ('found: ' + ', '.join(found)) if found else 'none',
-                )
+                if found:
+                    self.app.print_colored(f"Existing node runtime on target: found {', '.join(found)}", 'red')
+                else:
+                    self._display_preflight_check(
+                        "Existing node runtime on target",
+                        checks.get('target_runtime_probe') or {},
+                        'none',
+                    )
         else:
             self.app.print_colored(
                 f"Source volume size: {self._format_bytes(preflight.get('source_volume_bytes'))}",
@@ -8559,8 +8562,13 @@ class MigrationPlanner:
                 note = "  - host not answering progress checks"
             elif progress_fn and now - last_change >= stall_warn_secs:
                 note = f"  - no progress for {self._format_duration(now - last_change)}"
-            line = f"\r  {frames[idx % len(frames)]} {label} [{self._format_duration(now - started)}]{last_progress}{note}\033[K"
-            sys.stdout.write(line)
+            visible = f"  {frames[idx % len(frames)]} {label} [{self._format_duration(now - started)}]{last_progress}{note}"
+            # Never wrap: a wrapped line breaks the carriage-return redraw and
+            # spams the terminal with one copy per frame.
+            width = shutil.get_terminal_size((100, 24)).columns
+            if len(visible) > width - 1:
+                visible = visible[:max(1, width - 2)] + '…'
+            sys.stdout.write(f"\r{visible}\033[K")
             sys.stdout.flush()
             idx += 1
 
@@ -8916,7 +8924,7 @@ class MigrationPlanner:
         archive = shlex.quote(archive_path or '/nonexistent')
         script = "; ".join([
             f"echo active=$(systemctl is-active {service} 2>/dev/null)",
-            f"echo enabled=$(systemctl is-enabled {service} 2>/dev/null || echo absent)",
+            f"echo enabled=$(systemctl is-enabled {service} 2>/dev/null)",
             "echo container=$(docker inspect -f '{{.State.Status}}' " + container + " 2>/dev/null || echo absent)",
             f"echo volume=$(test -d {shlex.quote(volume)} && echo present || echo absent)",
             f"echo archive=$(test -f {archive} && echo present || echo absent)",

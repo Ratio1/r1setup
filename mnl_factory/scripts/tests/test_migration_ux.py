@@ -136,6 +136,26 @@ class TestPromptsAndTargetSelection(unittest.TestCase):
 
         app.set_migration_plan_state.assert_not_called()
 
+    def test_single_instance_is_default(self):
+        app = MagicMock()
+        app.get_input = MagicMock(return_value="1")
+        planner = r1setup.MigrationPlanner(app)
+        self.assertEqual(planner._select_migration_source_instance({"node-1": {}}), "node-1")
+        self.assertEqual(app.get_input.call_args.args[1], "1")
+
+    def test_spinner_line_never_exceeds_terminal_width(self):
+        import io
+        import os
+        import time as _time
+        planner = r1setup.MigrationPlanner(MagicMock())
+        out = io.StringIO()
+        with patch.object(r1setup.shutil, "get_terminal_size", return_value=os.terminal_size((30, 24))), \
+                patch.object(r1setup.sys, "stdout", out):
+            planner._run_with_spinner("Uploading a very long archive label to the target", _time.sleep, 0.6)
+        frames = [f.replace("\033[K", "") for f in out.getvalue().split("\r") if f.replace("\033[K", "")]
+        self.assertTrue(frames)
+        self.assertTrue(all(len(frame) <= 29 for frame in frames), frames)
+
     def test_format_duration(self):
         fmt = r1setup.MigrationPlanner._format_duration
         self.assertEqual([fmt(5), fmt(65), fmt(3725)], ["5s", "1m05s", "1h02m"])
