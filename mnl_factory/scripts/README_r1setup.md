@@ -172,6 +172,7 @@ last step, last error) and offers only the actions that are valid for it:
 | Plan status | Actions offered |
 |---|---|
 | no plan, `finalized`, `rolled_back`, `abandoned` | Plan a new migration |
+| `rolled_back` with a target copy that may still run (typed override) | Remove the node copy left on the target, Plan a new migration |
 | `planned`, `blocked` | Execute, replace the plan, Abandon |
 | `executing`, `failed`, `rolling_back`, `rollback_failed` | Roll back (retry), Abandon |
 | `executed`, `finalizing`, `finalization_failed` | Finalize (retry), Finalize without source cleanup, Abandon |
@@ -223,6 +224,8 @@ Rollback / finalize / abandon:
 - Finalize without source cleanup closes a migration whose source host is gone (typed confirmation);
   the old disk still holds `e2.pem`.
 - Abandon closes the plan without contacting any host, after showing what is on each host.
+- Rollback cleans the target first whenever the last completed step is not known to be before the target could run the node (this includes plans saved by older r1setup versions).
+- Register Machine refuses a `user@host:port` that is already registered (it would otherwise be merged into, and rename, the existing machine).
 - Review screens for these actions probe both hosts live (service, container, volume, archive,
   node-key fingerprint) instead of reprinting the planning-time preflight.
 - Closed plans are kept in a short history (last 10) shown in the Migration menu.

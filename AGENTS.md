@@ -263,3 +263,10 @@ Minimum required critic topics when relevant:
   - Plan Migration must not overwrite a non-terminal plan; closed plans go to `migration_plan_history` (last 10).
   - Never put sudo or SSH passwords in argv: use `RootShellCommand.stdin_data` (sudo -S on stdin) and `wrap_sshpass` + `ssh_subprocess_env` (sshpass -e).
   - Deployment Menu items 4-7 were replaced by one status-aware `4) Migration` menu; Help & FAQ paths point there.
+- 2026-11-09T01:30:00+02:00 | Second migration hardening pass after independent code/UX critics and a scripted 25-scenario e2e suite (project_r1_infra `workbooks/r1setup-migration-e2e/scripts/scenario.sh`). Stable rules added:
+  - Rollback is target-first unless the step is in `MIGRATION_PRE_TARGET_RUNTIME_STEPS`; unknown/legacy steps count as "target may run". Only a typed override skips target cleanup, and it leaves a `may still be running` leftover that keeps a red banner and offers `cleanup_target` until removed.
+  - Persist `source_unit_disabled=True` before calling `systemctl disable` (re-enable is idempotent).
+  - Any subprocess that runs a `RootShellCommand` must pass `stdin_data` (Popen `stdin=PIPE`, `communicate(input=...)`), including Backup Volume streaming.
+  - Preflight probes fail closed: a probe with status `error` is a blocking error; the target-runtime probe runs as root.
+  - Error text shown to operators goes through `_short_error`/`_summarize_error` (decoded Ansible `msg`, no PLAY/TASK banners); failure blocks name host, cause, state, log path and next action.
+  - Register Machine must reject an endpoint (`user@host:port`) that is already registered.
