@@ -182,7 +182,9 @@ MIGRATION_ACTION_LABELS = {
     'finalize': 'Finalize migration (clean up the source)',
     'finalize_without_source': 'Finalize without source cleanup (source host is gone)',
     'abandon': 'Abandon plan (hosts are left as they are)',
+    'cleanup_target': 'Remove the node copy left on the target (it may still be running)',
 }
+MIGRATION_DUPLICATE_LEFTOVER_MARK = 'may still be running'
 # Execution steps after which the target may already run the node.
 MIGRATION_TARGET_RUNTIME_STEPS = frozenset({'target_extracted', 'target_applied', 'target_started', 'target_verified'})
 # Execution steps after which the target certainly does not run the node yet.
@@ -211,6 +213,11 @@ def migration_allowed_actions(plan: Optional[Dict[str, Any]]) -> Tuple[str, ...]
     if not plan:
         return ('plan',)
     status = str(plan.get('status') or 'unknown')
+    if status == 'rolled_back' and any(
+        MIGRATION_DUPLICATE_LEFTOVER_MARK in str(item)
+        for item in (plan.get('rollback_cleanup') or {}).get('leftovers') or []
+    ):
+        return ('cleanup_target', 'plan')
     if status in MIGRATION_TERMINAL_STATUSES:
         return ('plan',)
     return MIGRATION_STATUS_ACTIONS.get(status, ('abandon',))
@@ -7591,7 +7598,7 @@ class MigrationPlanner:
                     "Rollback review: the source is restored first; target files and transfer archives are then removed where reachable."
                 ),
                 'finalization': "Finalization review: this will clean deferred source-side artifacts after a verified migration.",
-                'abandon': "Abandon review: the plan is closed locally; no host is contacted or changed.",
+                'abandon': "Abandon review: the plan is closed locally; no host is changed.",
             }[context]
             self.app.print_colored(context_note, 'cyan')
             return
@@ -7667,7 +7674,7 @@ class MigrationPlanner:
         if context in ('planning', 'execution') and preflight.get('requires_target_preparation'):
             self.app.print_colored("Target preparation required before execution.", 'yellow')
         volume_bytes = preflight.get('source_volume_bytes')
-        if context in ('planning', 'execution') and volume_bytes:
+        if context in ('planning', 'execution') and volume_bytes and plan.get('status') != 'blocked':
             estimate_minutes = 2 + (volume_bytes / (1024 ** 3)) * 1.5
             self.app.print_colored(
                 f"Expected node downtime: about {int(round(estimate_minutes))} min for {self._format_bytes(volume_bytes)} "
@@ -7710,8 +7717,10 @@ class MigrationPlanner:
             ),
             'rollback': "Rollback review: this will clean partial target artifacts, remove transfer archives, and restore the source runtime.",
             'finalization': "Finalization review: this will clean deferred source-side artifacts after a verified migration.",
-            'abandon': "Abandon review: the plan is closed locally; no host is contacted or changed.",
+            'abandon': "Abandon review: the plan is closed locally; no host is changed.",
         }.get(context)
+        if context == 'execution' and plan.get('status') == 'blocked':
+            context_note = None  # a blocked plan cannot run; the caller says what to do
         if context_note:
             self.app.print_colored(context_note, 'cyan')
 
@@ -8487,7 +8496,7 @@ class MigrationPlanner:
         self.app.print_colored(f"  Source: {source_state}", 'white')
         self.app.print_colored(f"  Target: {target_state}", 'white')
         self.app.print_colored(
-            "  Next:   Deployment Menu -> Migration -> Roll back migration (restarts the node on the source)",
+            f"  Next:   Deployment Menu -> Migration -> {MIGRATION_ACTION_LABELS['rollback']}",
             'yellow',
         )
         if log_path:
@@ -8611,7 +8620,10 @@ class MigrationPlanner:
         worker.join()
         elapsed_total = time.monotonic() - started
         if elapsed_total >= 5:
-            self.app.print_colored(f"  {label.rstrip('.')}: finished in {self._format_duration(elapsed_total)}", 'white')
+            outcome = result_container[0]
+            failed = outcome is False or (isinstance(outcome, dict) and outcome.get('status') not in (None, 'success'))
+            verb = 'stopped after' if failed else 'finished in'
+            self.app.print_colored(f"  {label.rstrip('.')}: {verb} {self._format_duration(elapsed_total)}", 'white')
         return result_container[0]
 
     def _cleanup_local_archive(self, archive_path: Path) -> Dict[str, Any]:
@@ -8777,9 +8789,16 @@ class MigrationPlanner:
     def _print_leftovers(self, leftovers: List[str]) -> None:
         if not leftovers:
             return
-        self.app.print_colored("Not cleaned up (remove by hand or ignore):", 'yellow')
+        self.app.print_colored("Not cleaned up:", 'yellow')
         for item in leftovers:
-            self.app.print_colored(f"  • {item}", 'yellow')
+            duplicate = MIGRATION_DUPLICATE_LEFTOVER_MARK in str(item)
+            self.app.print_colored(f"  • {item}", 'red' if duplicate else 'yellow')
+            if duplicate:
+                self.app.print_colored(
+                    "    Until it is removed the node may run twice with the same key. "
+                    f"Use Deployment Menu -> Migration -> {MIGRATION_ACTION_LABELS['cleanup_target']}.",
+                    'red',
+                )
 
     def rollback_saved_migration_plan(self) -> None:
         """Roll back a failed or interrupted migration and restore the source runtime.
@@ -8796,7 +8815,17 @@ class MigrationPlanner:
 
         self.app.print_header("Rollback Saved Migration Plan")
         self._display_migration_plan(plan, context='rollback')
-        self._display_live_host_state(plan)
+        host_lines = self._display_live_host_state(plan) or []
+        if self._rollback_target_first(plan) and any(
+                line.startswith('Target') and 'unreachable' in line for line in host_lines):
+            self.app.print_colored(
+                "The target is unreachable, so its node copy cannot be removed now. Rollback will stop before "
+                "restarting the source unless you confirm the duplicate-identity risk. Better: wait until the target answers.",
+                'yellow',
+            )
+        elif any(line.startswith('Source') and 'unreachable' in line for line in host_lines):
+            self.app.print_colored(
+                "The source is unreachable; restarting the node there will fail until it answers.", 'yellow')
         if not self._confirm("\n↩️  Roll back this migration plan now? (y/N)", "N"):
             self.app.print_colored("Migration rollback cancelled.", 'yellow')
             self.app.wait_for_enter()
@@ -9078,8 +9107,14 @@ class MigrationPlanner:
 
         self.app.print_header("Finalize Saved Migration Plan")
         self._display_migration_plan(plan, context='finalization')
-        self._display_live_host_state(plan)
+        host_lines = self._display_live_host_state(plan) or []
         remove_source_volume = False
+        if not skip_source_cleanup and any(line.startswith('Source') and 'unreachable' in line for line in host_lines):
+            self.app.print_colored(
+                "The source is unreachable, so its cleanup will fail now. Wait until it answers and retry, or use "
+                f"'{MIGRATION_ACTION_LABELS['finalize_without_source']}' if it is gone for good.",
+                'yellow',
+            )
         if skip_source_cleanup:
             if not self._confirm_source_gone(plan):
                 self.app.print_colored("Migration finalization cancelled.", 'yellow')
@@ -9237,6 +9272,58 @@ class MigrationPlanner:
         color = 'green' if health == 'verified' else 'yellow'
         self.app.print_colored(f"  Target application health at execution: {health}", color)
 
+    def cleanup_target_leftovers(self) -> None:
+        """After a rollback that skipped an unreachable target, remove the node copy there."""
+        plan = self._load_saved_plan_for('cleanup_target')
+        if not plan:
+            return
+        target_machine_id = str(plan.get('target_machine_id') or '?')
+        machines = self.app.get_fleet_state_copy().get('fleet', {}).get('machines', {})
+        target_machine = dict(machines.get(target_machine_id) or {})
+        self.app.print_header("Remove Node Copy Left On Target")
+        self._display_live_host_state(plan)
+        self.app.print_colored(
+            f"The rollback restarted the node on the source while target {target_machine_id} could not be reached. "
+            "This stops and removes the node service, container and volume on the target, so only the source runs it.",
+            'yellow',
+        )
+        if not target_machine:
+            self.app.print_colored(f"Target {target_machine_id} is not registered in this config.", 'red')
+            self.app.wait_for_enter()
+            return
+        if not self._confirm(f"Remove the node from {target_machine_id} now? (y/N)", "N"):
+            self.app.print_colored("Nothing was changed.", 'yellow')
+            self.app.wait_for_enter()
+            return
+        result = self._run_with_spinner(
+            f"Removing the node from {target_machine_id}...",
+            self._cleanup_runtime_artifacts,
+            target_machine,
+            plan.get('target_runtime') or {},
+            remove_volume=True,
+        )
+        if result.get('status') != 'success':
+            self.app.print_colored(
+                f"✗ Could not clean target {target_machine_id}: {self._short_error(result.get('message'), 'cleanup failed')}",
+                'red',
+            )
+            self.app.print_colored("  Next:   try again when the target answers.", 'yellow')
+            self.app.wait_for_enter()
+            return
+        cleanup = dict(plan.get('rollback_cleanup') or {})
+        cleanup['leftovers'] = [
+            item for item in cleanup.get('leftovers') or [] if MIGRATION_DUPLICATE_LEFTOVER_MARK not in str(item)
+        ]
+        cleanup['target_volume_removed'] = True
+        updated = self._update_plan_fields(
+            plan, rollback_cleanup=cleanup, target_cleaned_at=datetime.now().isoformat(),
+            last_updated_at=datetime.now().isoformat(),
+        )
+        self.app.set_migration_plan_state(updated)
+        self._log_migration_event('migration_rollback', 'target_leftover_removed', updated)
+        self.app.print_colored(f"✓ Node removed from target {target_machine_id}; only the source runs it now.", 'green')
+        self.app.wait_for_enter()
+
     def abandon_saved_migration_plan(self) -> None:
         """Close the saved plan without touching any host, after showing what is left where."""
         plan = self._load_saved_plan_for('abandon')
@@ -9304,9 +9391,11 @@ class MigrationPlanner:
                 'cyan',
             )
             plan = self._revalidate_saved_migration_plan(plan)
+            plan['last_updated_at'] = datetime.now().isoformat()
             self.app.set_migration_plan_state(plan)
             if plan.get('status') != 'planned':
-                self.app.print_colored("Saved migration plan remains blocked after revalidation.", 'red')
+                self.app.print_colored(
+                    f"Revalidation found blocking errors (was: {plan_status}). Nothing was changed on the hosts.", 'red')
                 self._display_migration_plan(plan, context='execution')
                 self.app.print_colored(
                     "Resolve the blocking errors above or rebuild the migration plan after fleet/runtime changes.",
@@ -9612,7 +9701,10 @@ class MigrationPlanner:
                 'local_archive_path': transfer.get('local_archive_path'),
             },
         )
-        self.app.print_colored("Migration execution completed successfully.", 'green')
+        if str(finalized_plan.get('app_health_status') or '') == 'verified':
+            self.app.print_colored("Migration executed successfully.", 'green')
+        else:
+            self.app.print_colored("Migration executed; the node's application health is not confirmed yet.", 'yellow')
         self.app.print_colored("  • Source service stopped: yes", 'white')
         self.app.print_colored("  • Archive verified across source, controller, and target: yes", 'white')
         self.app.print_colored("  • Target runtime verified running: yes", 'white')
@@ -9629,7 +9721,9 @@ class MigrationPlanner:
             self.app.print_colored("  • Application health: unknown (runtime verified, app probe not confirmed)", 'yellow')
         self.app.print_colored("  • Assignment updated to target machine: yes", 'white')
         self.app.print_colored(
-            "Assignment has been updated to the target machine. Source cleanup remains deferred for rollback/finalization.",
+            "Next: check the node, then Deployment Menu -> Migration -> Finalize migration (removes the stopped copy "
+            "on the source). Rollback is no longer offered now that the node runs on the target; to move it back, "
+            "plan a new migration.",
             'yellow',
         )
         self.app.wait_for_enter()
@@ -10939,10 +11033,15 @@ class R1Setup:
     def run_migration_action(self, func, *args, **kwargs):
         """Run a migration action; Ctrl-C returns to the menu with recovery guidance instead of exiting."""
         self._migration_action_active = True
+        status_before = str((self.active_config.get('migration_plan_state') or {}).get('status') or '')
         try:
             return func(*args, **kwargs)
         except KeyboardInterrupt:
             print()
+            status_after = str((self.active_config.get('migration_plan_state') or {}).get('status') or '')
+            if status_after in MIGRATION_TERMINAL_STATUSES and status_after != status_before:
+                self.print_colored(f"Back to the menu. The action had already finished (status: {status_after}).", 'white')
+                return None
             self.print_colored("Migration action interrupted.", 'yellow')
             self._print_cancellation_guidance()
             try:
@@ -11582,6 +11681,9 @@ class R1Setup:
     def abandon_saved_migration_plan(self):
         return self.run_migration_action(self.migration_planner.abandon_saved_migration_plan)
 
+    def cleanup_target_leftovers(self):
+        return self.run_migration_action(self.migration_planner.cleanup_target_leftovers)
+
     def _migration_banner(self, plan):
         """Return (text, color) for an open migration plan, or None when nothing is in progress."""
         if not plan:
@@ -11634,12 +11736,17 @@ class R1Setup:
         updated = plan.get('last_updated_at') or plan.get('created_at')
         age = f" (updated {self._format_timestamp_ago(updated)})" if updated else ''
         color = 'green' if status in ('planned', 'finalized', 'rolled_back') else ('red' if 'failed' in status else 'yellow')
-        self.print_colored(f"Status: {status}{age}   last step: {plan.get('last_step') or '-'}", color)
+        shown_status = f"{status} (interrupted)" if status in ('executing', 'rolling_back', 'finalizing') else status
+        self.print_colored(f"Status: {shown_status}{age}   last completed step: {plan.get('last_step') or '-'}", color)
         if plan.get('last_error'):
             self.print_colored(f"Last error: {plan.get('last_error')}", 'red')
         explanation = {
             'blocked': "The plan has blocking errors. Execute revalidates it first.",
-            'executing': "Execution was interrupted. The node may be stopped on the source; roll back to restore it.",
+            'executing': (
+                "Execution was interrupted after the source was stopped; roll back to restart the node there."
+                if plan.get('source_unit_disabled') or str(plan.get('last_step') or '') not in ('', 'target_prepared')
+                else "Execution was interrupted before the source was stopped; roll back to tidy up the target."
+            ),
             'failed': "Execution failed. The node still belongs to the source; roll back to restart it there.",
             'rolling_back': "Rollback was interrupted. Run it again; every step is safe to repeat.",
             'rollback_failed': "Rollback did not finish. Run it again; every step is safe to repeat.",
@@ -11680,6 +11787,7 @@ class R1Setup:
             'finalize': self.finalize_saved_migration_plan,
             'finalize_without_source': lambda: self.finalize_saved_migration_plan(skip_source_cleanup=True),
             'abandon': self.abandon_saved_migration_plan,
+            'cleanup_target': self.cleanup_target_leftovers,
             'history': self._show_migration_history,
         }
         while True:

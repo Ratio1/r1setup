@@ -255,7 +255,8 @@ class TestMigrationExecution(unittest.TestCase):
             self.assertEqual(app.set_migration_plan_state.call_count, 1)
             self.assertEqual(app.set_migration_plan_state.call_args.args[0]["status"], "blocked")
             rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
-            self.assertIn("remains blocked after revalidation", rendered_text)
+            self.assertIn("Revalidation found blocking errors (was: planned)", rendered_text)
+            self.assertNotIn("Execution review", rendered_text)
             self.assertIn("Target machine reachability probe failed: connection timed out", rendered_text)
 
     def test_execute_saved_migration_plan_checksum_mismatch_fails_without_finalizing(self):
