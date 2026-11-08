@@ -1760,8 +1760,8 @@ class TestCancellationGuidance(unittest.TestCase):
         app._print_cancellation_guidance()
 
         rendered = " ".join(call.args[0] for call in app.print_colored.call_args_list)
-        self.assertIn("remains in 'executing' state", rendered)
-        self.assertIn("Rollback Migration", rendered)
+        self.assertIn("interrupted in 'executing'", rendered)
+        self.assertIn("Roll back migration", rendered)
 
     def test_print_cancellation_guidance_is_silent_without_saved_plan(self):
         app = r1setup.R1Setup.__new__(r1setup.R1Setup)
