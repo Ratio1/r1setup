@@ -165,6 +165,31 @@ class TestMigrationExecution(unittest.TestCase):
                 [("migration_execution", "started"), ("migration_execution", "success")],
             )
 
+    def test_source_unit_disabled_flag_saved_before_disable_and_failure_stops_step_2(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plan = self._build_plan(temp_dir)
+            app = self._build_app(plan)
+            planner = r1setup.MigrationPlanner(app)
+            planner._revalidate_saved_migration_plan = MagicMock(return_value=plan)
+            planner._prepare_target_machine_for_migration = MagicMock(return_value={"status": "success", "prepared": True})
+            planner._stop_source_instance_for_migration = MagicMock(return_value={"status": "success"})
+            flag_at_disable = {}
+
+            def disable(*_args, **_kwargs):
+                flag_at_disable["saved"] = app.set_migration_plan_state.call_args.args[0].get("source_unit_disabled")
+                return {"status": "error", "message": "sudo: a password is required"}
+
+            planner._set_source_unit_enabled = MagicMock(side_effect=disable)
+            planner._create_source_archive = MagicMock()
+
+            planner.execute_saved_migration_plan()
+
+            self.assertTrue(flag_at_disable["saved"])
+            saved = app.set_migration_plan_state.call_args.args[0]
+            self.assertEqual(saved["status"], "failed")
+            self.assertIn("could not be disabled", saved["last_error"])
+            planner._create_source_archive.assert_not_called()
+
     def test_execute_saved_migration_plan_revalidates_blocked_plan_and_then_runs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             saved_plan = self._build_plan(temp_dir)

@@ -185,6 +185,13 @@ MIGRATION_ACTION_LABELS = {
 }
 # Execution steps after which the target may already run the node.
 MIGRATION_TARGET_RUNTIME_STEPS = frozenset({'target_extracted', 'target_applied', 'target_started', 'target_verified'})
+# Execution steps after which the target certainly does not run the node yet.
+# Rollback treats any other step (including unknown steps written by older
+# r1setup versions) as "the target may run the node".
+MIGRATION_PRE_TARGET_RUNTIME_STEPS = frozenset({
+    '', 'target_prepared', 'source_disabling', 'source_stopped', 'source_archived',
+    'archive_downloaded', 'archive_uploaded', 'target_volume_prepared',
+})
 MIGRATION_PLAN_HISTORY_LIMIT = 10
 # Machine-global helpers installed by the setup role in standard topology
 # (same list as playbooks/delete_edge_node.yml).
@@ -7137,7 +7144,8 @@ class MigrationPlanner:
         if volume_path:
             checks.append(f"test -e {shlex.quote(volume_path)} && echo volume")
         inner = "; ".join(checks) + "; true"
-        result = self.app._run_machine_probe(machine_record, self._build_remote_shell_probe(inner))
+        # As root: the volume may sit under a directory the SSH user cannot read.
+        result = self.app._run_machine_probe(machine_record, self._build_remote_root_shell_command(machine_record, inner))
         if result.get('status') != 'success':
             return result
         found = [line.strip() for line in (result.get('stdout') or '').splitlines() if line.strip() in ('unit', 'volume')]
@@ -7401,6 +7409,16 @@ class MigrationPlanner:
                     f"{self._format_bytes(needed)} for the archive"
                     + (" and the extracted volume." if same_filesystem else ".")
                 )
+        for probe, what in (
+            (source_tmp_probe, "free space in /tmp on the source"),
+            (target_tmp_probe, "free space in /tmp on the target"),
+            (target_runtime_probe, "whether the target already has this node's service or volume"),
+        ):
+            if self._is_failed_preflight_probe(probe):
+                errors.append(
+                    f"Could not check {what}: {self._short_error(probe.get('message'), 'probe failed')}. "
+                    "Plan again when the host answers."
+                )
         existing_runtime = list(target_runtime_probe.get('found') or [])
         if existing_runtime:
             what = ' and '.join(
@@ -7550,7 +7568,12 @@ class MigrationPlanner:
 
         if context in ('rollback', 'finalization', 'abandon'):
             context_note = {
-                'rollback': "Rollback review: the source is restored first; target files and transfer archives are then removed where reachable.",
+                'rollback': (
+                    "Rollback review: the target may already run the node, so it is stopped and removed first; "
+                    "then the source is restored. Transfer archives are removed where reachable."
+                    if self._rollback_target_first(plan) else
+                    "Rollback review: the source is restored first; target files and transfer archives are then removed where reachable."
+                ),
                 'finalization': "Finalization review: this will clean deferred source-side artifacts after a verified migration.",
                 'abandon': "Abandon review: the plan is closed locally; no host is contacted or changed.",
             }[context]
@@ -8433,8 +8456,9 @@ class MigrationPlanner:
             log_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
             log_path = log_dir / f"migration-{plan.get('instance_name', 'node')}-step{step_number}-{stamp}.log"
-            log_path.write_text(str(raw_message or ''))
-            os.chmod(log_path, 0o600)
+            fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w') as handle:
+                handle.write(str(raw_message or ''))
             return str(log_path)
         except Exception:
             return None
@@ -8771,7 +8795,7 @@ class MigrationPlanner:
         target_runtime = plan.get('target_runtime') or {}
         local_archive_path = Path(transfer.get('local_archive_path') or (self.app._default_migration_temp_dir() / f"{plan.get('instance_name', 'migration')}.tar.gz"))
         from_step = str(plan.get('rollback_from_step') or plan.get('last_step') or '')
-        target_may_run = from_step in MIGRATION_TARGET_RUNTIME_STEPS
+        target_may_run = self._rollback_target_first(plan)
 
         rolling_back_plan = self._persist_plan_step(
             plan,
@@ -8784,6 +8808,7 @@ class MigrationPlanner:
 
         leftovers: List[str] = []
         target_cleaned = False
+        target_overridden = False
         if target_may_run:
             self.app.print_colored(
                 f"The target may already run the node (last step: {from_step}). Removing it before restarting the source.",
@@ -8817,6 +8842,7 @@ class MigrationPlanner:
                     self.app.wait_for_enter()
                     return
                 leftovers.append(f"node runtime and volume on target {target_machine_id} ({message}); may still be running")
+                target_overridden = True
                 rolling_back_plan = self._persist_plan_step(rolling_back_plan, 'target_cleanup_overridden')
 
         if plan.get('source_unit_disabled'):
@@ -8868,7 +8894,7 @@ class MigrationPlanner:
         else:
             rolling_back_plan = self._persist_plan_step(rolling_back_plan, 'source_restored')
 
-        if not target_cleaned and not leftovers:
+        if not target_cleaned and not target_overridden:
             target_cleanup = self._cleanup_runtime_artifacts(target_machine, target_runtime, remove_volume=True)
             if target_cleanup.get('status') == 'success':
                 target_cleaned = True
@@ -8958,11 +8984,18 @@ class MigrationPlanner:
         running = state.get('active') == 'active' or state.get('container') == 'running'
         return text, ('yellow' if running else 'white')
 
-    def _display_live_host_state(self, plan: Dict[str, Any]) -> None:
-        """Show what is on the source and target right now (not the planning-time preflight)."""
+    @staticmethod
+    def _rollback_target_first(plan: Dict[str, Any]) -> bool:
+        """True when the target may already run the node (or the step is unknown, e.g. a plan from an older r1setup)."""
+        from_step = str(plan.get('rollback_from_step') or plan.get('last_step') or '')
+        return from_step not in MIGRATION_PRE_TARGET_RUNTIME_STEPS
+
+    def _display_live_host_state(self, plan: Dict[str, Any]) -> List[str]:
+        """Show what is on the source and target right now (not the planning-time preflight); return the lines."""
         machines = self.app.get_fleet_state_copy().get('fleet', {}).get('machines', {})
         transfer = plan.get('transfer') or {}
         self.app.print_section("Hosts Right Now")
+        lines: List[str] = []
         for role, machine_key, runtime_key, archive_key in (
             ('Source', 'source_machine_id', 'source_runtime', 'source_archive_path'),
             ('Target', 'target_machine_id', 'target_runtime', 'target_archive_path'),
@@ -8970,7 +9003,8 @@ class MigrationPlanner:
             machine_id = plan.get(machine_key, '?')
             machine_record = dict(machines.get(machine_id) or {})
             if not machine_record:
-                self.app.print_colored(f"{role} {machine_id}: not registered in this config", 'yellow')
+                lines.append(f"{role} {machine_id}: not registered in this config")
+                self.app.print_colored(lines[-1], 'yellow')
                 continue
             state = self._run_with_spinner(
                 f"Checking {role.lower()} {machine_id}...",
@@ -8980,10 +9014,12 @@ class MigrationPlanner:
                 transfer.get(archive_key, ''),
             )
             text, color = self._format_host_runtime_state(state)
-            self.app.print_colored(f"{role} {machine_id}: {text}", color)
+            lines.append(f"{role} {machine_id}: {text}")
+            self.app.print_colored(lines[-1], color)
         if plan.get('last_error'):
             self.app.print_colored(f"Last error: {plan['last_error']}", 'red')
         print()
+        return lines
 
     def _confirm_source_gone(self, plan: Dict[str, Any]) -> bool:
         """Warn about finalizing without touching the source, and require a typed confirmation."""
@@ -9182,20 +9218,32 @@ class MigrationPlanner:
         status = str(plan.get('status') or 'unknown')
         self.app.print_header("Abandon Saved Migration Plan")
         self._display_migration_plan(plan, context='abandon')
-        self._display_live_host_state(plan)
+        host_lines = self._display_live_host_state(plan) or []
         self.app.print_colored(
             f"Abandoning closes the '{status}' plan for '{instance_name}' without contacting any host. "
             "Anything still on the source or target stays there.",
             'yellow',
         )
         if status in ('executing', 'failed', 'rolling_back', 'rollback_failed'):
-            self.app.print_colored(
-                "The node assignment still points at the source. If the source is stopped, start it from Operations.",
-                'yellow',
-            )
+            self.app.print_colored("The node assignment still points at the source.", 'yellow')
+            if self._rollback_target_first(plan):
+                self.app.print_colored(
+                    "The target may already run this node. Do not start the source until the node is stopped "
+                    "and removed on the target, or both copies run with the same identity. Roll back does this for you.",
+                    'red',
+                )
+            elif plan.get('source_unit_disabled'):
+                self.app.print_colored(
+                    "The source service is stopped and disabled. Start it from Operations, or roll back instead.",
+                    'yellow',
+                )
         elif status in ('executed', 'finalizing', 'finalization_failed'):
+            source_note = (
+                "is stopped and disabled, but its files and node key (e2.pem) stay there"
+                if plan.get('source_unit_disabled') else "is not removed and may start again after a reboot"
+            )
             self.app.print_colored(
-                "The node now belongs to the target. The old copy on the source is not removed and may restart.",
+                f"The node now belongs to the target. The old copy on the source {source_note}.",
                 'yellow',
             )
         if not self._confirm_typed(instance_name, "Abandon this plan?"):
@@ -9207,6 +9255,7 @@ class MigrationPlanner:
             status='abandoned',
             abandoned_at=datetime.now().isoformat(),
             abandoned_from_status=status,
+            abandon_cleanup={'leftovers': [f"at abandon: {line}" for line in host_lines]},
             last_updated_at=datetime.now().isoformat(),
         )
         self.app.archive_migration_plan(abandoned_plan, clear_current=True)
@@ -9319,12 +9368,13 @@ class MigrationPlanner:
         self.app._update_node_status(executing_plan['instance_name'], 'stopped')
         # Disable, not only stop: a source reboot before Finalize must not start
         # a second copy of the node with the same identity.
+        executing_plan = self._persist_plan_step(executing_plan, 'source_disabling', source_unit_disabled=True)
         disable_result = self._set_source_unit_enabled(source_machine, source_runtime, False)
         if disable_result.get('status') != 'success':
             message = f"Source service stopped but could not be disabled: {self._short_error(disable_result.get('message'))}"
             self._fail_step(executing_plan, 2, 'Stop source instance', 'source', message)
             return
-        executing_plan = self._persist_plan_step(executing_plan, 'source_stopped', source_unit_disabled=True)
+        executing_plan = self._persist_plan_step(executing_plan, 'source_stopped')
 
         transfer_timeout = self._migration_transfer_timeout()
         source_vol_path = source_runtime.get('volume_path', '')
@@ -11509,10 +11559,19 @@ class R1Setup:
         if not plan:
             return None
         status = str(plan.get('status') or 'unknown')
-        if status in MIGRATION_TERMINAL_STATUSES:
-            return None
         instance_name = plan.get('instance_name', '?')
         route = f"{plan.get('source_machine_id', '?')} -> {plan.get('target_machine_id', '?')}"
+        if status in MIGRATION_TERMINAL_STATUSES:
+            leftovers = self._migration_leftovers(plan)
+            if not leftovers:
+                return None
+            duplicate = any('may still be running' in item for item in leftovers)
+            text = (
+                f"🧭 Last migration of {instance_name} ({route}) is {status} but left {len(leftovers)} item(s) behind"
+                + (", and the node may run on both hosts" if duplicate else '')
+                + ". See Deployment Menu -> Migration."
+            )
+            return text, ('red' if duplicate else 'yellow')
         updated = plan.get('last_updated_at') or plan.get('created_at')
         age = f", {self._format_timestamp_ago(updated)}" if updated else ''
         color = {
@@ -11521,6 +11580,12 @@ class R1Setup:
         }.get(status, 'red')
         text = f"🧭 Migration of {instance_name} ({route}): {status}{age}. Next: {migration_next_action_hint(plan)}"
         return text, color
+
+    @staticmethod
+    def _migration_leftovers(plan):
+        # Abandon only records host state (abandon_cleanup); it never promised a cleanup.
+        cleanup = plan.get('finalization_cleanup') or plan.get('rollback_cleanup') or {}
+        return list(cleanup.get('leftovers') or [])
 
     def _print_migration_banner(self):
         banner = self._migration_banner(copy.deepcopy(self.active_config.get('migration_plan_state') or {}))
@@ -11556,6 +11621,9 @@ class R1Setup:
         }.get(status)
         if explanation:
             self.print_colored(explanation, 'white')
+        if status in MIGRATION_TERMINAL_STATUSES:
+            for item in self._migration_leftovers(plan):
+                self.print_colored(f"Left behind: {item}", 'red' if 'may still be running' in item else 'yellow')
 
     def _show_migration_history(self):
         history = list(self.active_config.get('migration_plan_history') or [])
@@ -11568,7 +11636,9 @@ class R1Setup:
                 f"{entry.get('source_machine_id', '?')} -> {entry.get('target_machine_id', '?')}  [{entry.get('status', '?')}]",
                 'white',
             )
-            leftovers = (entry.get('finalization_cleanup') or entry.get('rollback_cleanup') or {}).get('leftovers') or []
+            leftovers = (
+                entry.get('finalization_cleanup') or entry.get('rollback_cleanup') or entry.get('abandon_cleanup') or {}
+            ).get('leftovers') or []
             for item in leftovers:
                 self.print_colored(f"      left: {item}", 'yellow')
         self.wait_for_enter()
@@ -15224,9 +15294,16 @@ PY"""
         err = b''
         try:
             with open(local_archive_path, 'wb') as out:
-                proc = subprocess.Popen(ssh_cmd, env=ssh_subprocess_env(ssh_cmd), stdout=out, stderr=subprocess.PIPE)
+                stdin_data = getattr(remote_command, 'stdin_data', None)
+                proc = subprocess.Popen(
+                    ssh_cmd,
+                    env=ssh_subprocess_env(ssh_cmd),
+                    stdin=subprocess.PIPE if stdin_data else subprocess.DEVNULL,
+                    stdout=out,
+                    stderr=subprocess.PIPE,
+                )
                 try:
-                    _, err = proc.communicate()
+                    _, err = proc.communicate(input=stdin_data.encode() if stdin_data else None)
                 except KeyboardInterrupt:
                     proc.terminate()
                     try:
