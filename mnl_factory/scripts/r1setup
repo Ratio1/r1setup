@@ -53,6 +53,7 @@ import tempfile
 import stat
 import ssl
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
@@ -7087,16 +7088,36 @@ class MigrationPlanner:
     def _probe_remote_free_space(self, machine_record: Dict[str, Any], remote_path: str) -> Dict[str, Any]:
         """Return free space in bytes for a remote path's filesystem."""
         probe_path = self._get_free_space_probe_path(remote_path)
-        inner = f"df -PB1 {shlex.quote(probe_path)} | tail -1 | awk '{{print $4}}'"
+        inner = f"df -PB1 {shlex.quote(probe_path)} | tail -1 | awk '{{print $4\" \"$6}}'"
         result = self.app._run_machine_probe(machine_record, self._build_remote_shell_probe(inner))
         if result.get('status') != 'success':
             return result
         try:
-            result['bytes'] = int((result.get('stdout') or '').strip().splitlines()[0])
+            fields = (result.get('stdout') or '').strip().splitlines()[0].split()
+            result['bytes'] = int(fields[0])
+            result['mount_point'] = fields[1] if len(fields) > 1 else None
             result['probe_path'] = probe_path
             return result
         except (IndexError, ValueError):
             return {'status': 'error', 'message': 'Unable to parse remote free-space output'}
+
+    def _probe_existing_target_runtime(self, machine_record: Dict[str, Any], target_runtime: Dict[str, Any]) -> Dict[str, Any]:
+        """Look for a service unit or volume on the target that already uses the target runtime names."""
+        service_name = str(target_runtime.get('service_name') or DEFAULT_RUNTIME_SERVICE_NAME).strip()
+        volume_path = str(target_runtime.get('volume_path') or '').strip()
+        checks = [
+            f"systemctl list-unit-files {shlex.quote(service_name + '.service')} --no-legend 2>/dev/null "
+            f"| grep -q . && echo unit",
+        ]
+        if volume_path:
+            checks.append(f"test -e {shlex.quote(volume_path)} && echo volume")
+        inner = "; ".join(checks) + "; true"
+        result = self.app._run_machine_probe(machine_record, self._build_remote_shell_probe(inner))
+        if result.get('status') != 'success':
+            return result
+        found = [line.strip() for line in (result.get('stdout') or '').splitlines() if line.strip() in ('unit', 'volume')]
+        result['found'] = found
+        return result
 
     def _collect_preflight(
         self,
@@ -7111,6 +7132,9 @@ class MigrationPlanner:
         target_reachability = self._probe_machine_reachability(target_machine_record)
         source_volume_probe = self._probe_remote_path_size(source_machine_record, source_runtime.get('volume_path', ''))
         target_free_probe = self._probe_remote_free_space(target_machine_record, target_runtime.get('volume_path', ''))
+        source_tmp_free_probe = self._probe_remote_free_space(source_machine_record, '/tmp')
+        target_tmp_free_probe = self._probe_remote_free_space(target_machine_record, '/tmp')
+        target_runtime_probe = self._probe_existing_target_runtime(target_machine_record, target_runtime)
 
         try:
             local_free_bytes = self.app._probe_local_free_space(local_temp_dir)
@@ -7125,6 +7149,9 @@ class MigrationPlanner:
             'source_volume_probe': source_volume_probe,
             'local_free_probe': local_free_probe,
             'target_free_probe': target_free_probe,
+            'source_tmp_free_probe': source_tmp_free_probe,
+            'target_tmp_free_probe': target_tmp_free_probe,
+            'target_runtime_probe': target_runtime_probe,
         }
 
     @staticmethod
@@ -7272,6 +7299,9 @@ class MigrationPlanner:
                 'source_volume_probe': {'status': 'skipped', 'message': skip_message},
                 'local_free_probe': {'status': 'skipped', 'message': skip_message},
                 'target_free_probe': {'status': 'skipped', 'message': skip_message},
+                'source_tmp_free_probe': {'status': 'skipped', 'message': skip_message},
+                'target_tmp_free_probe': {'status': 'skipped', 'message': skip_message},
+                'target_runtime_probe': {'status': 'skipped', 'message': skip_message},
             }
         else:
             preflight = self._collect_preflight(
@@ -7315,6 +7345,53 @@ class MigrationPlanner:
         if source_volume_bytes is not None and target_free_bytes is not None and target_free_bytes < source_volume_bytes:
             errors.append("Target machine does not have enough free space for the migrated volume.")
 
+        # The archive is written to /tmp on the source (after the node is
+        # stopped) and on the target (next to the extracted volume).
+        skipped = {'status': 'skipped', 'message': 'not collected'}
+        source_tmp_probe = preflight.get('source_tmp_free_probe') or skipped
+        target_tmp_probe = preflight.get('target_tmp_free_probe') or skipped
+        target_runtime_probe = preflight.get('target_runtime_probe') or skipped
+        source_tmp_free_bytes = source_tmp_probe.get('bytes')
+        target_tmp_free_bytes = target_tmp_probe.get('bytes')
+        if source_volume_bytes is not None and source_tmp_free_bytes is not None and source_tmp_free_bytes < source_volume_bytes:
+            errors.append(
+                f"Source /tmp has {self._format_bytes(source_tmp_free_bytes)} free but the archive can be up to "
+                f"{self._format_bytes(source_volume_bytes)}. Free space on the source before migrating; the node "
+                "would be stopped before the archive fails."
+            )
+        if source_volume_bytes is not None and target_tmp_free_bytes is not None:
+            target_free_probe_data = preflight.get('target_free_probe') or {}
+            same_filesystem = (
+                target_tmp_probe.get('mount_point')
+                and target_tmp_probe.get('mount_point') == target_free_probe_data.get('mount_point')
+            )
+            needed = source_volume_bytes * 2 if same_filesystem else source_volume_bytes
+            if target_tmp_free_bytes < needed:
+                errors.append(
+                    f"Target /tmp has {self._format_bytes(target_tmp_free_bytes)} free but needs about "
+                    f"{self._format_bytes(needed)} for the archive"
+                    + (" and the extracted volume." if same_filesystem else ".")
+                )
+        existing_runtime = list(target_runtime_probe.get('found') or [])
+        if existing_runtime:
+            what = ' and '.join(
+                {'unit': f"service unit {target_runtime.get('service_name', '?')}",
+                 'volume': f"volume {target_runtime.get('volume_path', '?')}"}[item]
+                for item in existing_runtime
+            )
+            errors.append(
+                f"Target machine '{target_machine_id}' already has a {what}, possibly a copy left by an earlier "
+                "migration or install. Extracting over it would mix old and new node files."
+            )
+            self._append_unique_hint(
+                hints,
+                (
+                    f"If it is a leftover, remove it on the target (systemctl disable --now "
+                    f"{target_runtime.get('service_name', 'edge_node')}; rm the unit file; "
+                    f"rm -rf {target_runtime.get('volume_path', '?')}), or choose custom runtime names."
+                ),
+            )
+
         safe_archive_name = f"{self.app.config_manager._sanitize_runtime_suffix(instance_name)}.tar.gz"
         source_archive_path = f"/tmp/r1setup_migration_{safe_archive_name}"
         local_archive_path = str(Path(preflight['local_temp_dir']) / safe_archive_name)
@@ -7354,6 +7431,9 @@ class MigrationPlanner:
                     'source_volume_probe': dict(preflight['source_volume_probe']),
                     'local_free_probe': dict(preflight['local_free_probe']),
                     'target_free_probe': dict(preflight['target_free_probe']),
+                    'source_tmp_free_probe': dict(source_tmp_probe),
+                    'target_tmp_free_probe': dict(target_tmp_probe),
+                    'target_runtime_probe': dict(target_runtime_probe),
                 },
             },
             'validation': {
@@ -7468,6 +7548,25 @@ class MigrationPlanner:
                 checks.get('target_free_probe') or {},
                 self._format_bytes(preflight.get('target_free_bytes')),
             )
+            if checks.get('source_tmp_free_probe'):
+                self._display_preflight_check(
+                    "Source /tmp free space",
+                    checks.get('source_tmp_free_probe') or {},
+                    self._format_bytes((checks.get('source_tmp_free_probe') or {}).get('bytes')),
+                )
+            if checks.get('target_tmp_free_probe'):
+                self._display_preflight_check(
+                    "Target /tmp free space",
+                    checks.get('target_tmp_free_probe') or {},
+                    self._format_bytes((checks.get('target_tmp_free_probe') or {}).get('bytes')),
+                )
+            if checks.get('target_runtime_probe'):
+                found = (checks.get('target_runtime_probe') or {}).get('found') or []
+                self._display_preflight_check(
+                    "Existing node runtime on target",
+                    checks.get('target_runtime_probe') or {},
+                    ('found: ' + ', '.join(found)) if found else 'none',
+                )
         else:
             self.app.print_colored(
                 f"Source volume size: {self._format_bytes(preflight.get('source_volume_bytes'))}",
@@ -8125,6 +8224,50 @@ class MigrationPlanner:
             return {'status': 'success', 'output': output}
         return {'status': 'error', 'message': output or 'Target start failed'}
 
+    def _probe_remote_epoch(self, machine_record: Dict[str, Any]) -> Optional[int]:
+        """Return the remote host's current Unix time, or None if it cannot be read."""
+        result = self._run_machine_command(machine_record, self._build_remote_shell_probe("date +%s"))
+        if result.get('status') != 'success':
+            return None
+        try:
+            return int((result.get('stdout') or '').strip().splitlines()[0])
+        except (IndexError, ValueError):
+            return None
+
+    def _wait_for_fresh_node_info(
+        self,
+        machine_record: Dict[str, Any],
+        runtime: Dict[str, Any],
+        since_epoch: int,
+        *,
+        window_secs: int = 120,
+        interval_secs: int = 10,
+    ) -> bool:
+        """Wait until the node rewrites _data/local_info.json after *since_epoch*.
+
+        The migrated volume carries the source's last local_info.json (tar keeps
+        its mtime), so only a file written after the target start proves the
+        target node itself is alive.
+        """
+        volume_path = str(runtime.get('volume_path') or DEFAULT_RUNTIME_VOLUME_PATH).strip()
+        info_path = f"{volume_path}/_data/local_info.json"
+        remote_command = self._build_remote_root_shell_command(
+            machine_record,
+            f"stat -c %Y {shlex.quote(info_path)} 2>/dev/null || echo 0",
+        )
+        deadline = time.monotonic() + window_secs
+        while True:
+            result = self._run_machine_command(machine_record, remote_command)
+            if result.get('status') == 'success':
+                try:
+                    if int((result.get('stdout') or '0').strip().splitlines()[0]) > since_epoch:
+                        return True
+                except (IndexError, ValueError):
+                    pass
+            if time.monotonic() + interval_secs > deadline:
+                return False
+            time.sleep(interval_secs)
+
     def _verify_target_migration_health(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """Verify target runtime health after startup."""
         success, output = self._run_target_instance_playbook(
@@ -8141,6 +8284,26 @@ class MigrationPlanner:
         host_status = status_data.get(plan['instance_name'], {})
         if host_status.get('status') != 'running':
             return {'status': 'error', 'message': f"Target status is {host_status.get('status', 'unknown')} instead of running"}
+
+        since_epoch = plan.get('target_start_epoch')
+        if since_epoch:
+            target_machine = dict(
+                self.app.get_fleet_state_copy().get('fleet', {}).get('machines', {}).get(plan['target_machine_id'], {})
+            )
+            fresh = self._run_with_spinner(
+                "Waiting for the node to write fresh node info (up to 2 min)...",
+                self._wait_for_fresh_node_info,
+                target_machine,
+                plan.get('target_runtime') or {},
+                int(since_epoch),
+            )
+            if not fresh:
+                return {
+                    'status': 'success',
+                    'runtime_health': 'verified',
+                    'app_health': None,
+                    'app_health_status': 'unverified',
+                }
 
         node_info_success, node_info_output = self._run_target_instance_playbook(
             plan,
@@ -9042,7 +9205,11 @@ class MigrationPlanner:
             self.app.print_colored(extract_result.get('message', 'Target extract failed'), 'red')
             self.app.wait_for_enter()
             return
-        executing_plan = self._persist_plan_step(executing_plan, 'target_extracted')
+        executing_plan = self._persist_plan_step(
+            executing_plan,
+            'target_extracted',
+            target_start_epoch=self._probe_remote_epoch(target_machine),
+        )
 
         self._announce_migration_phase(8, total_steps, "Apply And Start Target Runtime", "Rendering the service definition on the target machine and starting the node.")
         apply_timeout = self._migration_runtime_timeout()
@@ -9124,6 +9291,12 @@ class MigrationPlanner:
         app_health_status = str(finalized_plan.get('app_health_status') or 'unknown')
         if app_health_status == 'verified':
             self.app.print_colored("  • Application health: verified", 'green')
+        elif app_health_status == 'unverified':
+            self.app.print_colored(
+                "  • Application health: not confirmed. The node has not written fresh node info yet; "
+                "check Node Status & Info in a few minutes before you finalize.",
+                'yellow',
+            )
         else:
             self.app.print_colored("  • Application health: unknown (runtime verified, app probe not confirmed)", 'yellow')
         self.app.print_colored("  • Assignment updated to target machine: yes", 'white')

@@ -125,6 +125,7 @@ class TestMigrationExecution(unittest.TestCase):
             planner._copy_to_machine = MagicMock(return_value={"status": "success"})
             planner._prepare_target_volume_root = MagicMock(return_value={"status": "success"})
             planner._extract_archive_on_target = MagicMock(return_value={"status": "success"})
+            planner._probe_remote_epoch = MagicMock(return_value=None)
             planner._apply_target_runtime_definition = MagicMock(return_value={"status": "success"})
             planner._start_target_instance = MagicMock(return_value={"status": "success"})
             planner._verify_target_migration_health = MagicMock(side_effect=verify_target)
@@ -187,6 +188,7 @@ class TestMigrationExecution(unittest.TestCase):
             planner._copy_to_machine = MagicMock(return_value={"status": "success"})
             planner._prepare_target_volume_root = MagicMock(return_value={"status": "success"})
             planner._extract_archive_on_target = MagicMock(return_value={"status": "success"})
+            planner._probe_remote_epoch = MagicMock(return_value=None)
             planner._apply_target_runtime_definition = MagicMock(return_value={"status": "success"})
             planner._start_target_instance = MagicMock(return_value={"status": "success"})
             planner._verify_target_migration_health = MagicMock(return_value={
@@ -287,6 +289,7 @@ class TestMigrationExecution(unittest.TestCase):
             planner._copy_to_machine = MagicMock(return_value={"status": "success"})
             planner._prepare_target_volume_root = MagicMock(return_value={"status": "success"})
             planner._extract_archive_on_target = MagicMock(return_value={"status": "success"})
+            planner._probe_remote_epoch = MagicMock(return_value=None)
             planner._apply_target_runtime_definition = MagicMock(return_value={"status": "success"})
             planner._start_target_instance = MagicMock(return_value={"status": "success"})
             planner._verify_target_migration_health = MagicMock(return_value={
