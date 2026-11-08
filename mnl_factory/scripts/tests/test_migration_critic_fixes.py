@@ -177,5 +177,32 @@ class TestExecuteDisableFlag(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
 
 
+class TestDuplicateEndpointRegistration(unittest.TestCase):
+
+    def manager(self, access):
+        cm = r1setup.ConfigurationManager.__new__(r1setup.ConfigurationManager)
+        cm.app = MagicMock()
+        cm.app.get_input = MagicMock(side_effect=["tgt-dup", "n"])
+        cm.app._configure_single_node = MagicMock(return_value={})
+        cm.app._extract_machine_access_config = MagicMock(return_value=access)
+        fleet = {"config_schema_version": r1setup.CONFIG_SCHEMA_VERSION, "fleet": {"machines": {
+            "src-1": {"machine_id": "src-1", "ansible_host": "10.0.0.1", "ansible_user": "ops", "ansible_port": 22},
+        }, "instances": {}}}
+        cm.get_fleet_state_copy = MagicMock(return_value=fleet)
+        cm._normalize_fleet_state = MagicMock(side_effect=lambda f: f)
+        cm.upsert_machine_record = MagicMock()
+        return cm
+
+    def test_same_endpoint_as_registered_machine_is_refused(self):
+        cm = self.manager({"ansible_host": "10.0.0.1", "ansible_user": "ops", "ansible_port": 22})
+        self.assertEqual(cm._collect_machine_registration_entries(1), [])
+        cm.upsert_machine_record.assert_not_called()
+        self.assertIn("already registered as machine 'src-1'", printed(cm.app))
+
+    def test_same_host_other_port_is_allowed(self):
+        cm = self.manager({"ansible_host": "10.0.0.1", "ansible_user": "ops", "ansible_port": 2222})
+        self.assertEqual(cm._collect_machine_registration_entries(1), ["tgt-dup"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1542,6 +1542,22 @@ class ConfigurationManager:
             node_config = self.app._configure_single_node()
             machine_access = self.app._extract_machine_access_config(node_config)
 
+            # Same user@host:port as a registered machine would be merged into it
+            # (and rename it), so refuse instead of registering.
+            endpoint = self._machine_endpoint_from_record(machine_access)
+            fleet_machines = self._normalize_fleet_state(self.get_fleet_state_copy()).get('fleet', {}).get('machines', {})
+            duplicate_of = next(
+                (mid for mid, record in fleet_machines.items() if self._machine_endpoint_from_record(record) == endpoint),
+                None,
+            )
+            if duplicate_of:
+                self.app.print_colored(
+                    f"{endpoint} is already registered as machine '{duplicate_of}'. Not registered again; "
+                    "use a different host, user or port.",
+                    'red',
+                )
+                continue
+
             # Build and persist machine record (no specs yet)
             machine_data = {
                 'topology_mode': 'standard',
@@ -8439,17 +8455,9 @@ class MigrationPlanner:
     @classmethod
     def _summarize_error(cls, raw_message: Optional[str], default: str = 'unknown error') -> str:
         """Short, human-readable cause from raw SSH/tar/Ansible output."""
-        text = str(raw_message or '')
-        if 'fatal:' in text or 'FAILED!' in text:
-            messages = re.findall(r'"msg":\s*"([^"]{1,300})', text)
-            if messages:
-                return messages[-1]
-            failed_lines = [line.strip() for line in text.splitlines() if 'fatal:' in line or 'FAILED!' in line]
-            if failed_lines:
-                return failed_lines[-1][:300]
-        return cls._short_error(text, default)
+        return cls._short_error(raw_message, default)
 
-    def _write_migration_error_log(self, plan: Dict[str, Any], step_number: int, raw_message: Optional[str]) -> Optional[str]:
+    def _write_migration_error_log(self, plan: Dict[str, Any], step_number: Any, raw_message: Optional[str]) -> Optional[str]:
         """Save the full raw error output next to the operation log; return its path."""
         try:
             log_dir = Path(self.app._get_operation_log_dir())
@@ -8744,10 +8752,24 @@ class MigrationPlanner:
 
     @staticmethod
     def _short_error(message: Optional[str], default: str = 'unknown error') -> str:
-        """Return the first meaningful line of a raw SSH/Ansible error."""
-        for line in str(message or '').splitlines():
+        """One readable line from raw SSH/tar/Ansible output: the last Ansible failure
+        "msg" (JSON-decoded) when there is one, else the first non-noise line."""
+        text = str(message or '')
+        if 'fatal:' in text or 'FAILED!' in text:
+            messages = re.findall(r'"msg":\s*"((?:[^"\\]|\\.)*)"', text)
+            if messages:
+                try:
+                    decoded = json.loads(f'"{messages[-1]}"')
+                except ValueError:
+                    decoded = messages[-1]
+                return ' '.join(decoded.split())[:300] or default
+            failed_lines = [line.strip() for line in text.splitlines() if 'fatal:' in line or 'FAILED!' in line]
+            if failed_lines:
+                return failed_lines[-1][:300]
+        noise = ('Warning: Permanently added', 'PLAY [', 'PLAY RECAP', 'TASK [', 'ok: [', 'changed: [', 'skipping: [', 'included: ')
+        for line in text.splitlines():
             line = line.strip()
-            if not line or line.startswith('Warning: Permanently added'):
+            if not line or line.startswith(noise) or set(line) <= set('*') or re.match(r'^\S+\s*:\s*ok=\d+', line):
                 continue
             return line[:300]
         return default
@@ -8872,8 +8894,14 @@ class MigrationPlanner:
                     last_error=f"Source restart failed on {plan.get('source_machine_id', '?')}: {message}",
                 )
                 self.app._update_node_status(instance_name, 'stopped')
-                self.app.print_colored(f"Source restart failed: {message}", 'red')
-                self.app.print_colored(f"Next: {migration_next_action_hint(failed_plan)} (retry)", 'yellow')
+                self.app.print_colored(f"✗ Source restart failed on {plan.get('source_machine_id', '?')}", 'red')
+                self.app.print_colored(f"  Cause:  {message}", 'red')
+                if target_cleaned:
+                    self.app.print_colored("  State:  the node is not running anywhere (target copy removed, source stopped).", 'yellow')
+                log_path = self._write_migration_error_log(failed_plan, "rollback", source_restart.get('message'))
+                if log_path:
+                    self.app.print_colored(f"  Full output: {log_path}", 'white')
+                self.app.print_colored(f"  Next:   {migration_next_action_hint(failed_plan)} again once the source can start", 'yellow')
                 self.app.wait_for_enter()
                 return
             rolling_back_plan = self._persist_plan_step(

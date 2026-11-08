@@ -25,6 +25,16 @@ class TestFailureSummary(unittest.TestCase):
         self.assertEqual(r1setup.MigrationPlanner._summarize_error(ANSIBLE_OUTPUT),
                          "Unable to start service edge_node: Job failed")
 
+    def test_summarize_error_decodes_escaped_ansible_msg(self):
+        raw = ('fatal: [n]: FAILED! => {"changed": false, "msg": "Unable to start service edge_node: Job failed.\\n'
+               'See \\"systemctl status edge_node.service\\" for details.\\n"}')
+        self.assertEqual(r1setup.MigrationPlanner._summarize_error(raw),
+                         'Unable to start service edge_node: Job failed. See "systemctl status edge_node.service" for details.')
+
+    def test_short_error_skips_ansible_banners(self):
+        raw = "PLAY [Start Edge Node Services] ****\n\nTASK [Start] ****\nok: [n]\nPLAY RECAP ****\nn : ok=1 changed=0 failed=1\n"
+        self.assertEqual(r1setup.MigrationPlanner._short_error(raw, "Source restart failed"), "Source restart failed")
+
     def test_summarize_error_skips_ssh_noise(self):
         raw = "Warning: Permanently added '10.0.0.2' (ED25519) to the list of known hosts.\r\nConnection timed out during banner exchange"
         self.assertEqual(r1setup.MigrationPlanner._summarize_error(raw), "Connection timed out during banner exchange")
