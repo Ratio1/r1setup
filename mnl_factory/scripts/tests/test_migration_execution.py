@@ -114,6 +114,7 @@ class TestMigrationExecution(unittest.TestCase):
 
             planner._prepare_target_machine_for_migration = MagicMock(return_value={"status": "success", "prepared": True})
             planner._stop_source_instance_for_migration = MagicMock(return_value={"status": "success"})
+            planner._set_source_unit_enabled = MagicMock(return_value={"status": "success"})
             planner._create_source_archive = MagicMock(return_value={"status": "success"})
             planner._compute_remote_checksum = MagicMock(side_effect=[
                 {"status": "success", "checksum": "abc123"},
@@ -124,6 +125,7 @@ class TestMigrationExecution(unittest.TestCase):
             planner._copy_to_machine = MagicMock(return_value={"status": "success"})
             planner._prepare_target_volume_root = MagicMock(return_value={"status": "success"})
             planner._extract_archive_on_target = MagicMock(return_value={"status": "success"})
+            planner._probe_remote_epoch = MagicMock(return_value=None)
             planner._apply_target_runtime_definition = MagicMock(return_value={"status": "success"})
             planner._start_target_instance = MagicMock(return_value={"status": "success"})
             planner._verify_target_migration_health = MagicMock(side_effect=verify_target)
@@ -163,6 +165,31 @@ class TestMigrationExecution(unittest.TestCase):
                 [("migration_execution", "started"), ("migration_execution", "success")],
             )
 
+    def test_source_unit_disabled_flag_saved_before_disable_and_failure_stops_step_2(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plan = self._build_plan(temp_dir)
+            app = self._build_app(plan)
+            planner = r1setup.MigrationPlanner(app)
+            planner._revalidate_saved_migration_plan = MagicMock(return_value=plan)
+            planner._prepare_target_machine_for_migration = MagicMock(return_value={"status": "success", "prepared": True})
+            planner._stop_source_instance_for_migration = MagicMock(return_value={"status": "success"})
+            flag_at_disable = {}
+
+            def disable(*_args, **_kwargs):
+                flag_at_disable["saved"] = app.set_migration_plan_state.call_args.args[0].get("source_unit_disabled")
+                return {"status": "error", "message": "sudo: a password is required"}
+
+            planner._set_source_unit_enabled = MagicMock(side_effect=disable)
+            planner._create_source_archive = MagicMock()
+
+            planner.execute_saved_migration_plan()
+
+            self.assertTrue(flag_at_disable["saved"])
+            saved = app.set_migration_plan_state.call_args.args[0]
+            self.assertEqual(saved["status"], "failed")
+            self.assertIn("could not be disabled", saved["last_error"])
+            planner._create_source_archive.assert_not_called()
+
     def test_execute_saved_migration_plan_revalidates_blocked_plan_and_then_runs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             saved_plan = self._build_plan(temp_dir)
@@ -175,6 +202,7 @@ class TestMigrationExecution(unittest.TestCase):
             planner.build_migration_plan = MagicMock(return_value=refreshed_plan)
             planner._prepare_target_machine_for_migration = MagicMock(return_value={"status": "success", "prepared": True})
             planner._stop_source_instance_for_migration = MagicMock(return_value={"status": "success"})
+            planner._set_source_unit_enabled = MagicMock(return_value={"status": "success"})
             planner._create_source_archive = MagicMock(return_value={"status": "success"})
             planner._compute_remote_checksum = MagicMock(side_effect=[
                 {"status": "success", "checksum": "abc123"},
@@ -185,6 +213,7 @@ class TestMigrationExecution(unittest.TestCase):
             planner._copy_to_machine = MagicMock(return_value={"status": "success"})
             planner._prepare_target_volume_root = MagicMock(return_value={"status": "success"})
             planner._extract_archive_on_target = MagicMock(return_value={"status": "success"})
+            planner._probe_remote_epoch = MagicMock(return_value=None)
             planner._apply_target_runtime_definition = MagicMock(return_value={"status": "success"})
             planner._start_target_instance = MagicMock(return_value={"status": "success"})
             planner._verify_target_migration_health = MagicMock(return_value={
@@ -226,7 +255,8 @@ class TestMigrationExecution(unittest.TestCase):
             self.assertEqual(app.set_migration_plan_state.call_count, 1)
             self.assertEqual(app.set_migration_plan_state.call_args.args[0]["status"], "blocked")
             rendered_text = " ".join(call.args[0] for call in app.print_colored.call_args_list if call.args)
-            self.assertIn("remains blocked after revalidation", rendered_text)
+            self.assertIn("Revalidation found blocking errors (was: planned)", rendered_text)
+            self.assertNotIn("Execution review", rendered_text)
             self.assertIn("Target machine reachability probe failed: connection timed out", rendered_text)
 
     def test_execute_saved_migration_plan_checksum_mismatch_fails_without_finalizing(self):
@@ -238,6 +268,7 @@ class TestMigrationExecution(unittest.TestCase):
 
             planner._prepare_target_machine_for_migration = MagicMock(return_value={"status": "success", "prepared": True})
             planner._stop_source_instance_for_migration = MagicMock(return_value={"status": "success"})
+            planner._set_source_unit_enabled = MagicMock(return_value={"status": "success"})
             planner._create_source_archive = MagicMock(return_value={"status": "success"})
             planner._compute_remote_checksum = MagicMock(return_value={"status": "success", "checksum": "abc123"})
             planner._copy_from_machine = MagicMock(return_value={"status": "success"})
@@ -273,6 +304,7 @@ class TestMigrationExecution(unittest.TestCase):
 
             planner._prepare_target_machine_for_migration = MagicMock(return_value={"status": "success", "prepared": True})
             planner._stop_source_instance_for_migration = MagicMock(return_value={"status": "success"})
+            planner._set_source_unit_enabled = MagicMock(return_value={"status": "success"})
             planner._create_source_archive = MagicMock(return_value={"status": "success"})
             planner._compute_remote_checksum = MagicMock(side_effect=[
                 {"status": "success", "checksum": "abc123"},
@@ -283,6 +315,7 @@ class TestMigrationExecution(unittest.TestCase):
             planner._copy_to_machine = MagicMock(return_value={"status": "success"})
             planner._prepare_target_volume_root = MagicMock(return_value={"status": "success"})
             planner._extract_archive_on_target = MagicMock(return_value={"status": "success"})
+            planner._probe_remote_epoch = MagicMock(return_value=None)
             planner._apply_target_runtime_definition = MagicMock(return_value={"status": "success"})
             planner._start_target_instance = MagicMock(return_value={"status": "success"})
             planner._verify_target_migration_health = MagicMock(return_value={

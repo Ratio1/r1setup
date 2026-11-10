@@ -255,3 +255,18 @@ Minimum required critic topics when relevant:
   - verified migrations are cleaned up through `Finalize Migration`, which must keep source cleanup explicit and optionally remove source volume data only after the operator confirms
   - saved `migration_plan_state` now tracks `last_step` so recovery logic can reason about how far execution progressed
   - rollback/finalization must clean controller-temp archive artifacts explicitly; do not silently delete them during uncertain execution state
+- 2026-11-08T18:00:00+02:00 | Migration state machine hardened after an e2e testbed run (project_r1_infra `workbooks/r1setup-migration-e2e/`). Corrects the 2026-03-19 Phase 10 entry ("restart the source runtime after conservative target cleanup"). Stable rules now:
+  - `MIGRATION_STATUS_ACTIONS` in `r1setup` is the single source of which actions each plan status allows; every non-terminal status must keep a forward action plus `abandon`. Terminal: `rolled_back`, `finalized`, `abandoned`.
+  - Rollback restores the source first (re-enable unit, start) and cleans the target best-effort, recording leftovers on the plan. Exception: when `last_step` (or `rollback_from_step`) is `target_extracted`/`target_applied`/`target_started`/`target_verified`, the target is cleaned first and a failure requires a typed override before the source restarts (duplicate-identity risk).
+  - Execute step 2 stops **and disables** the source unit (`source_unit_disabled`); never leave a stopped-but-enabled source between Execute and Finalize.
+  - Finalize and Rollback are retryable from their in-progress/failed statuses; transfer-archive cleanup is best-effort and never blocks them. `Finalize without source cleanup` exists for a dead source.
+  - Plan Migration must not overwrite a non-terminal plan; closed plans go to `migration_plan_history` (last 10).
+  - Never put sudo or SSH passwords in argv: use `RootShellCommand.stdin_data` (sudo -S on stdin) and `wrap_sshpass` + `ssh_subprocess_env` (sshpass -e).
+  - Deployment Menu items 4-7 were replaced by one status-aware `4) Migration` menu; Help & FAQ paths point there.
+- 2026-11-09T01:30:00+02:00 | Second migration hardening pass after independent code/UX critics and a scripted 25-scenario e2e suite (project_r1_infra `workbooks/r1setup-migration-e2e/scripts/scenario.sh`). Stable rules added:
+  - Rollback is target-first unless the step is in `MIGRATION_PRE_TARGET_RUNTIME_STEPS`; unknown/legacy steps count as "target may run". Only a typed override skips target cleanup, and it leaves a `may still be running` leftover that keeps a red banner and offers `cleanup_target` until removed.
+  - Persist `source_unit_disabled=True` before calling `systemctl disable` (re-enable is idempotent).
+  - Any subprocess that runs a `RootShellCommand` must pass `stdin_data` (Popen `stdin=PIPE`, `communicate(input=...)`), including Backup Volume streaming.
+  - Preflight probes fail closed: a probe with status `error` is a blocking error; the target-runtime probe runs as root.
+  - Error text shown to operators goes through `_short_error`/`_summarize_error` (decoded Ansible `msg`, no PLAY/TASK banners); failure blocks name host, cause, state, log path and next action.
+  - Register Machine must reject an endpoint (`user@host:port`) that is already registered.

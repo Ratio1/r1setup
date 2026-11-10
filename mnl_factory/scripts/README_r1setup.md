@@ -100,8 +100,8 @@ Current topics:
 - Common mistakes
 
 The migration help explicitly covers the standard target rule: register the destination machine,
-do not add it as a node first, then use `Execute Migration` to move the existing node assignment in
-the same config.
+do not add it as a node first, then use `Deployment Menu -> 4) Migration` to move the existing node
+assignment in the same config.
 
 ## Discovery And Import
 Discovery and import are integrated into the first-run onboarding flow. They are also available standalone under `Configuration Menu`:
@@ -166,35 +166,76 @@ Available actions:
 ```
 
 ## Migration
-Current migration support lives under `Deployment Menu`:
+Migration lives under `Deployment Menu -> 4) Migration`. The menu shows the saved plan (status,
+last step, last error) and offers only the actions that are valid for it:
 
-- `Plan Migration`: build and save a non-mutating migration plan
-- `Execute Migration`: run the saved plan through the controller temp folder
-- `Rollback Migration`: recover a failed or interrupted migration back to the source machine
-- `Finalize Migration`: clean up source-side artifacts after a verified migration
+| Plan status | Actions offered |
+|---|---|
+| no plan, `finalized`, `rolled_back`, `abandoned` | Plan a new migration |
+| `rolled_back` with a target copy that may still run (typed override) | Remove the node copy left on the target, Plan a new migration |
+| `planned`, `blocked` | Execute, replace the plan, Abandon |
+| `executing`, `failed`, `rolling_back`, `rollback_failed` | Roll back (retry), Abandon |
+| `executed`, `finalizing`, `finalization_failed` | Finalize (retry), Finalize without source cleanup, Abandon |
+
+Every status has a forward action, so an error, a dead host or Ctrl-C never leaves a plan stuck.
+Ctrl-C during a migration action returns to the menu with the next step instead of exiting.
+The main menu and the Deployment Menu show a banner while a migration is open.
 
 Target machine rule:
 
-- Register the destination with `Register Machine` before planning the migration.
-- If `Register Machine` is not visible, use `Configuration Menu -> Switch to Advanced Mode` first.
-- Do not use `Add Node` on the destination first. In standard mode, an added node creates an assigned
-  instance placeholder and the target is no longer empty.
-- `Execute Migration` moves the selected existing node onto the registered target machine and updates
-  its assignment in the same config; the user does not add that node to the config again afterward.
+- Register the destination machine; do not `Add Node` on it first. In standard mode an added node
+  creates an assigned instance placeholder and the target is no longer empty.
+- If no destination is registered, `Plan a new migration` offers to register one inline. This works
+  in simple mode; no switch to Advanced Mode is needed.
+- Execute moves the selected existing node onto the registered target machine and updates its
+  assignment in the same config; do not add that node to the config again afterward.
 - For the in-app explanation, open `Main Menu -> Help & FAQ -> Migration workflow`.
 
-Execution currently follows:
+Planning (non-mutating) checks:
+
+- reachability of both hosts, source volume size, controller temp space, target volume free space
+- free space in `/tmp` on the source (the archive is written there after the node stops) and on
+  the target (archive, plus the extracted volume when `/tmp` shares its filesystem)
+- an existing service unit or volume on the target with the same runtime names (a leftover copy);
+  the plan is blocked with a cleanup hint
+- a rough downtime estimate from the volume size
+
+Execution follows:
 
 - source machine -> local controller temp folder -> target machine
 - target preparation before transfer when needed
-- source stop before archive creation
+- source stop **and disable** before archive creation, so a source reboot cannot start a second copy
+  with the same `e2.pem`
 - assignment finalization only after target verification succeeds
+- application health is reported `verified` only when the target node rewrites
+  `_data/local_info.json` after it started (up to 2 min); otherwise `unverified`
+- a failed step prints one block: step, host, short cause, source/target state, next action, and the
+  path of the full output log (next to the operation log)
 
-Rollback/finalization currently follow these rules:
+Rollback / finalize / abandon:
 
-- rollback is only for failed or interrupted plans and keeps the source assignment authoritative
-- finalization is only for executed plans and keeps source cleanup explicit
-- local temp artifacts are cleaned only during rollback or finalization, not during uncertain execution state
+- Rollback restores the source first (re-enable + start) and then removes target files and transfer
+  archives where reachable; anything it cannot remove is listed as a leftover. If the target may
+  already run the node, it is stopped first; if it cannot be reached, restarting the source requires
+  typing the node name (duplicate-identity risk).
+- Finalize removes the stopped copy from the source (unit, container, metadata, and the global helper
+  scripts when no other instance is left there). Deleting the source volume is optional; the prompt
+  says it holds the node key (`e2.pem`). A receipt lists what was removed and kept.
+- Finalize without source cleanup closes a migration whose source host is gone (typed confirmation);
+  the old disk still holds `e2.pem`.
+- Abandon closes the plan without contacting any host, after showing what is on each host.
+- Rollback cleans the target first whenever the last completed step is not known to be before the target could run the node (this includes plans saved by older r1setup versions).
+- Register Machine refuses a `user@host:port` that is already registered (it would otherwise be merged into, and rename, the existing machine).
+- Review screens for these actions probe both hosts live (service, container, volume, archive,
+  node-key fingerprint) instead of reprinting the planning-time preflight.
+- Closed plans are kept in a short history (last 10) shown in the Migration menu.
+
+Security:
+
+- sudo passwords for migration commands are sent to `sudo -S` on stdin, and SSH passwords reach
+  `sshpass -e` through the environment; neither appears in the process list.
+- migration `ssh`/`scp` use `ServerAliveInterval` and honour the host's `ansible_ssh_common_args`
+  (for example `ProxyJump`).
 
 Existing configurations remain compatible.
 

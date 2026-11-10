@@ -101,8 +101,10 @@ class TestDispatcherHelpers(unittest.TestCase):
             "ansible_ssh_pass": "secret",
         }, "get_logs -f")
 
-        self.assertEqual(command[:3], ["sshpass", "-p", "secret"])
-        self.assertEqual(command[3:8], ["ssh", "-p", "2222", "root@10.0.0.2", "get_logs -f"])
+        self.assertEqual(command[:2], ["sshpass", "-e"])
+        self.assertEqual(command[2:7], ["ssh", "-p", "2222", "root@10.0.0.2", "get_logs -f"])
+        self.assertNotIn("secret", command)
+        self.assertEqual(r1setup.ssh_subprocess_env(command)["SSHPASS"], "secret")
 
     def test_ensure_helper_mode_supported_for_hosts_rejects_mixed_machine(self):
         self.app.detect_helper_mode_conflicts = MagicMock(return_value={
