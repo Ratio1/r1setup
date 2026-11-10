@@ -5,6 +5,82 @@ Ansible collection are recorded here. The CLI version (`scripts/ver.py`)
 and the collection version (`mnl_factory/galaxy.yml`) track separate
 lineages and may bump independently.
 
+## CLI 1.9.6 / Collection 1.5.7 — 2026-11-10
+
+Migration recovery and hardening, after an end-to-end testbed run and two
+independent review passes.
+
+### Added
+
+- **One status-aware Migration menu.** Deployment Menu items 4–7 are
+  replaced by `4) Migration`, which offers only the actions the current
+  plan status allows. The main and deployment menus show a banner while a
+  migration is open, and keep it (red when the node may run on both
+  hosts) while a finished plan still records leftovers.
+- **Finalize without source cleanup** closes a migration whose source
+  host is gone (typed confirmation).
+- **Abandon** closes a plan without contacting any host (typed
+  confirmation). Closed plans are kept in a history of the last 10.
+- **Remove the node copy left on the target**, offered when a rolled-back
+  plan still records a target copy that may be running. It removes the
+  target service, container, volume and transfer archive.
+- **Preflight checks** for free space in `/tmp` on source and target, and
+  for an existing service unit or volume on the target. Either blocks the
+  plan. A probe that fails now blocks the plan instead of passing.
+- **Failure summary.** A failed Execute or Rollback step prints one
+  block: step, host, short cause, source/target state, next action, and
+  the path of the full raw output (log files are created `0600`).
+- **Live host state** on the Rollback, Finalize and Abandon review
+  screens (service, container, volume, archive, node-key fingerprint),
+  with a warning when a needed host is unreachable.
+- Progress spinner shows elapsed time, rate and time left, and warns
+  after 60 s without progress. Execution review shows a rough downtime
+  estimate. Finalize prints a receipt of what was removed and kept.
+- Plan Migration can register the destination machine inline. Add Node
+  and Register Machine ask for the SSH port (default 22).
+
+### Changed
+
+- **Every non-terminal plan status has a forward action.** Finalize and
+  Rollback can be retried from their in-progress and failed statuses;
+  transfer-archive cleanup no longer blocks them.
+- **Rollback order.** The target is cleaned first unless the migration
+  stopped before the target could run the node; a failed target cleanup
+  needs a typed override before the source restarts, to avoid two nodes
+  with the same identity. Plans saved by older versions take the
+  target-first path.
+- **Execute disables the source unit** after stopping it, so a source
+  reboot before Finalize cannot start a second copy. Rollback re-enables
+  it.
+- Application health is reported as verified only after the target has
+  rewritten `local_info.json`; otherwise it is reported as unverified.
+- Plan Migration refuses to overwrite an open plan.
+- Ctrl-C during a migration action returns to the menu instead of
+  exiting the CLI.
+- Migration `ssh`/`scp` use keepalives and honour the host's
+  `ansible_ssh_common_args` (ProxyJump / bastion hosts).
+- Collection: the docker role retries the Docker GPG key and
+  docker-compose downloads (timeout 30 s, 3 retries).
+
+### Fixed
+
+- Statuses `finalizing`, `finalization_failed`, `rolling_back` and
+  `rollback_failed` no longer dead-end with no accepted action.
+- Rollback with an unreachable target no longer leaves the node stopped
+  on both hosts.
+- Register Machine refuses an endpoint (`user@host:port`) that is already
+  registered, instead of merging into and renaming the existing record.
+- Error text no longer shows Ansible `PLAY`/`TASK` banners or escaped
+  newlines.
+- Spinner line no longer wraps on narrow terminals.
+
+### Security
+
+- **Passwords are kept out of process arguments.** sudo passwords go to
+  `sudo -S` on stdin and SSH passwords to `sshpass -e` through the child
+  environment, in the migration, probe, log-streaming, key-import and
+  Backup Volume paths. Before, they were visible to local users in `ps`.
+
 ## CLI 1.9.5 / Collection 1.5.6 — 2026-11-04
 
 ### Added
