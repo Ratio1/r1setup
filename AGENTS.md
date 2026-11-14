@@ -275,3 +275,7 @@ Minimum required critic topics when relevant:
   - The numbers are literals in the template, not variables; `tests/test_service_template.py` pins them and the continuation lines of `docker run`.
   - The unit is ordered `After=docker.service containerd.service` so systemd stops the node before the container runtime.
   - Any CLI step that stops a service synchronously must allow for a stop of up to 150 s. `_cleanup_runtime_artifacts` still waits `connection_timeout * 3` (90 s by default); it is retryable, and raising that floor is an open follow-up.
+- 2026-11-14T17:30:00+00:00 | The service definition also owns a needrestart file. Stable rules:
+  - `render_edge_node_definition.yml` renders `/etc/needrestart/conf.d/50-r1setup-<service>.conf` from `needrestart-edge-node.conf.j2`, only when `/etc/needrestart/conf.d` exists, validated with `perl -c`; `delete_edge_node.yml` removes it.
+  - The file defers only the instance's own unit, by an element assignment that keeps needrestart's stock table; do not defer host daemons from here.
+  - It is part of service file `v3`: a change to it needs a new `mnl_service_version` so deployed hosts are offered the update.

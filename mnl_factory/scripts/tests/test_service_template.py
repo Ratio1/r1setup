@@ -3,8 +3,19 @@
 
 # Pattern matching on the template text.
 import re
+# Finds the Perl interpreter that evaluates the needrestart file.
+import shutil
+# Runs that interpreter.
+import subprocess
+# Holds the rendered needrestart file for one test.
+import tempfile
 # Test framework.
 import unittest
+# Path of the rendered file.
+from pathlib import Path
+
+# Reads the Ansible task files.
+import yaml
 
 # Location of the CLI script; the collection root is two folders above it.
 from tests.support import R1SETUP_PATH
@@ -16,6 +27,14 @@ COLLECTION_ROOT = R1SETUP_PATH.parent.parent
 SERVICE_TEMPLATE = COLLECTION_ROOT / "roles" / "setup" / "templates" / "edge_node.service.j2"
 # Collection variables, among them the template version marker.
 GROUP_VARS = COLLECTION_ROOT / "group_vars" / "mnl.yml"
+# The needrestart file rendered beside the unit.
+NEEDRESTART_TEMPLATE = COLLECTION_ROOT / "roles" / "setup" / "templates" / "needrestart-edge-node.conf.j2"
+# The tasks that render the service definition of one instance.
+RENDER_TASKS = COLLECTION_ROOT / "roles" / "setup" / "tasks" / "render_edge_node_definition.yml"
+# The playbook that removes an instance.
+DELETE_PLAYBOOK = COLLECTION_ROOT / "playbooks" / "delete_edge_node.yml"
+# Where the file is installed, with the service name still as a template expression.
+NEEDRESTART_DEST = "/etc/needrestart/conf.d/50-r1setup-{{ edge_node_service_name }}.conf"
 
 
 def _directives(text: str) -> list[str]:
@@ -39,6 +58,154 @@ def _directives(text: str) -> list[str]:
     """
     # Comments and blank lines carry no setting.
     return [line for line in text.splitlines() if line.strip() and not line.startswith("#")]
+
+
+def _render_needrestart(service_name: str) -> str:
+    """Render the needrestart template for one service name.
+
+    The template has a single expression, the service name passed through
+    Ansible's ``regex_escape`` filter, which is Python's ``re.escape``; it is
+    filled in here the same way.
+
+    Parameters
+    ----------
+    service_name : str
+        Name of the systemd service, without ``.service``.
+
+    Returns
+    -------
+    str
+        The file as Ansible writes it to the host.
+
+    Examples
+    --------
+    >>> _render_needrestart("edge_node").splitlines()[-1]
+    "$nrconf{override_rc}{'^edge_node\\.service$'} = 0;"
+    """
+    # Every `{{ edge_node_service_name ... }}` expression of the template, with or without the filter.
+    return re.sub(
+        r"\{\{ edge_node_service_name( \| regex_escape)? \}\}",
+        lambda match: re.escape(service_name) if match.group(1) else service_name,
+        NEEDRESTART_TEMPLATE.read_text(),
+    )
+
+
+def _needrestart_verdicts(override: str, *units: str) -> dict:
+    """Evaluate a needrestart file with Perl and report what happens to some units.
+
+    The file is evaluated on top of a table that already defers ``docker``,
+    like the stock configuration. A unit counts as deferred when at least one
+    pattern of the table matches its name and no matching pattern asks for a
+    restart, which is how needrestart reads the table.
+
+    Parameters
+    ----------
+    override : str
+        Text of the rendered file.
+    *units : str
+        Unit names to judge.
+
+    Returns
+    -------
+    dict
+        Unit name to ``"deferred"`` or ``"restart"``.
+
+    Examples
+    --------
+    >>> _needrestart_verdicts("", "docker.service", "ssh.service")
+    {'docker.service': 'deferred', 'ssh.service': 'restart'}
+    """
+    # The stock table, the evaluation of the file, then one verdict line per unit.
+    program = (
+        "our %nrconf = (override_rc => { qr(^docker) => 0 });"
+        " my $file = shift @ARGV;"
+        " do $file;"
+        " die $@ if $@;"
+        " for my $unit (@ARGV) {"
+        "   my @values = map { $nrconf{override_rc}{$_} } grep { $unit =~ /$_/ } keys %{ $nrconf{override_rc} };"
+        "   print $unit, '=', ((@values && !grep { $_ } @values) ? 'deferred' : 'restart'), qq(\\n);"
+        " }"
+    )
+    # A throw-away folder for the file.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # The rendered file, where Perl can read it.
+        path = Path(tmpdir) / "50-r1setup.conf"
+        # Same text as on a host.
+        path.write_text(override)
+        # Evaluate; a file that is not valid Perl makes this fail.
+        result = subprocess.run(["perl", "-e", program, str(path), *units], capture_output=True, text=True, check=True)
+    # One "unit=verdict" line per unit.
+    return dict(line.split("=", 1) for line in result.stdout.splitlines())
+
+
+class TestNeedrestartDeferral(unittest.TestCase):
+    """The file that keeps needrestart from restarting the node unit after a host library upgrade."""
+
+    def test_file_is_one_deferral_for_the_exact_service(self):
+        """The rendered file holds one statement: the service's own unit name, anchored, mapped to 0."""
+        # Only the lines needrestart evaluates.
+        statements = [line for line in _render_needrestart("edge_node").splitlines() if line and not line.startswith("#")]
+        # An element assignment (the stock table stays), a single-quoted pattern (no Perl interpolation of the name).
+        self.assertEqual(statements, ["$nrconf{override_rc}{'^edge_node\\.service$'} = 0;"])
+
+    @unittest.skipUnless(shutil.which("perl"), "perl evaluates the needrestart file, as needrestart itself does")
+    def test_node_unit_is_deferred_and_nothing_else(self):
+        """Evaluated like needrestart does, the file defers the instance's unit only and keeps the stock table."""
+        # Default name, an expert-mode name, a preserved numbered name and a name with a dash.
+        for service in ("edge_node", "edge_node_node_1_canary", "edge_node7", "edge-node.b"):
+            # Report a failure under the service name.
+            with self.subTest(service=service):
+                # What needrestart would do with the unit, with look-alike units, a host daemon and docker.
+                verdicts = _needrestart_verdicts(
+                    _render_needrestart(service),
+                    f"{service}.service", f"{service}2.service", f"x{service}.service", f"{service}.service.d", "containerd.service", "docker.service",
+                )
+                # Only the instance's own unit is added; docker stays deferred by the stock table.
+                self.assertEqual(
+                    verdicts,
+                    {
+                        f"{service}.service": "deferred",
+                        f"{service}2.service": "restart",
+                        f"x{service}.service": "restart",
+                        f"{service}.service.d": "restart",
+                        "containerd.service": "restart",
+                        "docker.service": "deferred",
+                    },
+                )
+        # A dot in a service name is matched literally, not as "any character".
+        self.assertEqual(_needrestart_verdicts(_render_needrestart("edge-node.b"), "edge-nodeXb.service"), {"edge-nodeXb.service": "restart"})
+
+    @unittest.skipUnless(shutil.which("perl"), "perl evaluates the needrestart file, as needrestart itself does")
+    def test_without_the_file_the_node_unit_is_restarted(self):
+        """With the stock table alone needrestart restarts the node unit: the restart seen at every library upgrade."""
+        # No override at all.
+        self.assertEqual(_needrestart_verdicts("", "edge_node.service"), {"edge_node.service": "restart"})
+
+    def test_definition_renders_the_file_only_where_needrestart_is(self):
+        """The file is rendered with the unit, once per service, compiled first, and only on a host with needrestart."""
+        # The tasks of the service definition, by name.
+        tasks = {task["name"]: task for task in yaml.safe_load(RENDER_TASKS.read_text())}
+        # The probe for needrestart's snippet folder.
+        self.assertEqual(tasks["Check for needrestart"]["ansible.builtin.stat"], {"path": "/etc/needrestart/conf.d"})
+        # The task that writes the file.
+        write = tasks["Defer needrestart restarts of {{ edge_node_service_name }}"]
+        # Skipped on a host that has no needrestart.
+        self.assertEqual(write["when"], "r1setup_needrestart_conf_dir.stat.exists")
+        # The probe result it reads is the one registered above.
+        self.assertEqual(tasks["Check for needrestart"]["register"], "r1setup_needrestart_conf_dir")
+        # One file per service name, so instances on one machine do not overwrite each other.
+        self.assertEqual(write["ansible.builtin.template"]["dest"], NEEDRESTART_DEST)
+        # Rendered from the template of this collection.
+        self.assertTrue(write["ansible.builtin.template"]["src"].endswith("/roles/setup/templates/needrestart-edge-node.conf.j2"))
+        # Compiled before it replaces anything: needrestart stops on a file that is not valid Perl.
+        self.assertEqual(write["ansible.builtin.template"]["validate"], "perl -c %s")
+
+    def test_deleting_an_instance_removes_its_file(self):
+        """Delete removes the same per-service file the definition installs."""
+        # The tasks of the delete play, by name.
+        tasks = {task["name"]: task for task in yaml.safe_load(DELETE_PLAYBOOK.read_text())[0]["tasks"]}
+        # Same path as the install, state absent.
+        self.assertEqual(tasks["Remove the needrestart deferral of the service"]["ansible.builtin.file"], {"path": NEEDRESTART_DEST, "state": "absent"})
 
 
 class TestServiceTemplateStopLimit(unittest.TestCase):

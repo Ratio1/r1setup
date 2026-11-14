@@ -22,6 +22,17 @@ Service file `v3`: the node gets time to stop in order. Collection version to be
   new unit and restarts the node once. See
   [`docs/20261114_170500_service_file_v3_stop_limit.md`](docs/20261114_170500_service_file_v3_stop_limit.md).
 
+### Added
+
+- **needrestart no longer restarts the node after a host library
+  upgrade.** The service definition also renders
+  `/etc/needrestart/conf.d/50-r1setup-<service>.conf`, one line that
+  defers the instance's own unit, on hosts that have needrestart. The
+  node runs on the libraries of its image, so that restart patched
+  nothing; one `libc6` update restarted the node on all 16 hosts read
+  within 2 days. `Delete Edge Node` removes the file. Part of service
+  file `v3`.
+
 ## CLI 1.9.6 / Collection 1.5.7 — 2026-11-10
 
 Migration recovery and hardening, after an end-to-end testbed run and two

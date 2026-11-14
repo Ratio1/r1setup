@@ -1,4 +1,4 @@
-# Service File v3: Stop Limit
+# Service File v3: Stop Limit And needrestart Deferral
 
 Date: 2026-11-14
 
@@ -6,7 +6,8 @@ Status: **prepared, not released and not applied to any host.** The collection v
 release; nothing below has been run against a machine.
 
 This note covers what service file `v3` changes, the measurements behind it, and how an operator
-applies and verifies it.
+applies and verifies it. `v3` has two parts: the stop limit of the unit, and a needrestart file that
+is rendered together with the unit.
 
 ## Stop limit
 
@@ -86,3 +87,68 @@ not close by itself.
 - A node whose broker is unreachable while it stops, or a host with several container apps (each
   may take up to 45 s to stop), can need more than 120 s.
 - Nodes installed without r1setup keep the unit they have.
+
+## needrestart deferral
+
+### Problem (measured 2026-11-13 and 2026-11-14)
+
+- On Ubuntu, unattended-upgrades installs library updates in a daily window, and needrestart then
+  restarts every unit whose processes map a replaced library. For the node unit that is only the
+  docker client of the unit: the node runs in a container on the libraries of its image, so the
+  restart patches nothing.
+- One `libc6` update restarted the node on all 16 hosts read (6 oracles, 10 workers) within 2 days,
+  each in its own 06:00-07:00 local window, and every worker node restarted exactly once. That the
+  worker restarts have this cause is inferred from the node logs and from the oracle hosts, where it
+  is proven; the workers' package logs were not read.
+- Each such restart also runs the unit's image pull, so an operating-system update deploys whatever
+  the image tag points to at that moment.
+
+### Change
+
+The service definition (`roles/setup/tasks/render_edge_node_definition.yml`) now also renders
+`/etc/needrestart/conf.d/50-r1setup-<service>.conf` from
+`roles/setup/templates/needrestart-edge-node.conf.j2`:
+
+```perl
+$nrconf{override_rc}{'^edge_node\.service$'} = 0;
+```
+
+- One file per service name, so several instances on one machine each defer their own unit.
+- The line adds one pattern to needrestart's table and keeps the stock entries. `0` means:
+  never restart this unit automatically, list it under "Service restarts being deferred".
+- The file is written only on a host that has `/etc/needrestart/conf.d` (needrestart installed),
+  and it is compiled with `perl -c` before it is installed.
+- `Delete Edge Node` removes the file with the unit.
+- Nothing else is deferred: host daemons such as `containerd` use the host libraries and are still
+  restarted.
+
+### Apply and verify
+
+The file comes with the unit: `Operations -> Update Service File` (or a deployment) installs it.
+On a host (read-only):
+
+```bash
+cat /etc/needrestart/conf.d/50-r1setup-edge_node.conf
+perl -c /etc/needrestart/conf.d/50-r1setup-edge_node.conf
+```
+
+After the next library upgrade, `/var/log/unattended-upgrades/unattended-upgrades-dpkg.log` lists
+the unit under "Service restarts being deferred" and the container's `StartedAt` is unchanged.
+
+To see the full effect before relying on it, use a disposable Ubuntu 24.04 host, not a production
+node: `apt-get install --reinstall libc6` must list the unit as deferred and leave the container
+running; with the file removed the restart must happen.
+
+### Rollback
+
+Delete the file. needrestart reads its configuration at every run.
+
+### Not covered
+
+- A host where needrestart is installed after the last service-file update gets the file at the
+  next update.
+- A deferred unit keeps its old docker client until its next restart; `needrestart -b` lists what
+  is pending.
+- Hosts installed without r1setup: see the FAQ line in `mnl_factory/scripts/README_r1setup.md`.
+- A migration's target cleanup does not remove the file; it names a unit that no longer exists and
+  matches nothing.
