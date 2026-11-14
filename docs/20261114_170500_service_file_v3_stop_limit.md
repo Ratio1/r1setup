@@ -5,23 +5,23 @@ Date: 2026-11-14
 Status: **prepared, not released and not applied to any host.** The collection version is set at
 release; nothing below has been run against a machine.
 
-This note covers what service file `v3` changes, the measurements behind it, and how an operator
+This note covers what service file `v3` changes, the reasons for it, and how an operator
 applies and verifies it. `v3` has two parts: the stop limit of the unit, and a needrestart file that
 is rendered together with the unit.
 
 ## Stop limit
 
-### Problem (measured 2026-11-13 and 2026-11-14)
+### Problem
 
 - Service files `v1` and `v2` stop the node with `docker stop -t 20`: SIGTERM, then SIGKILL 20 s
   later. They set no `TimeoutStopSec` and no `--stop-timeout`.
 - Since node core 7.7.357 the node handles SIGTERM and closes in order: it stops its plugins and
-  container apps and saves its state. That close does not fit in 20 s. **0 of 6** observed stops
-  that came from the host finished (3 of them on worker nodes, where the customer app containers
-  were killed with the node); complete closes took **61-94 s** to process exit where they were
-  measured, and 12-65 s on workers before that release.
-- In 1 of the 6 stops the container runtime restarted in the same systemd transaction; the stop
-  signal could not be delivered and the node was killed after 2 s.
+  container apps and saves its state. That close does not fit in 20 s: where it was measured, a
+  complete close took **61-94 s** to process exit. A stop that comes from the host therefore ends
+  in SIGKILL part-way through the close, and the app containers the node runs are most likely
+  stopped with it, without their own orderly stop.
+- If the container runtime is restarted just before the node is stopped, the stop signal cannot be
+  delivered and the node is killed after 2 s, whatever the grace.
 
 ### Change
 
@@ -39,8 +39,15 @@ is rendered together with the unit.
   command first.
 - `--stop-timeout` covers a stop that does not come from the unit: `docker stop` or
   `docker restart` without `-t`, and a daemon shutdown.
-- `After=containerd.service` also sets the stop order: the node is stopped before the container
-  runtime when both stop in one transaction.
+- `After=containerd.service` also sets the stop order when both units are stopped together: at a
+  host shutdown, and in a command that names the node's unit before the runtime. `systemctl` sends
+  one request per unit in the order of the command line, so a command that names the runtime first
+  restarts it at once; the ordering does not help there. The needrestart file described below
+  removes the usual source of such a command.
+- A unit that is still `v1` also gets what `v2` introduced when it is updated: the restart
+  watchdog (the host reboots when the unit is started 30 times within 1800 s) and a 60 s delay
+  before each restart of the unit (`v1`: systemd's 100 ms default). Set `mnl_service_restart_sec`
+  for a host where that delay is not wanted.
 - The numbers are fixed in the template; there is no new variable.
 
 ### What an operator sees
@@ -93,16 +100,14 @@ not close by itself.
 
 ## needrestart deferral
 
-### Problem (measured 2026-11-13 and 2026-11-14)
+### Problem
 
 - On Ubuntu, unattended-upgrades installs library updates in a daily window, and needrestart then
   restarts every unit whose processes map a replaced library. For the node unit that is only the
   docker client of the unit: the node runs in a container on the libraries of its image, so the
   restart patches nothing.
-- One `libc6` update restarted the node on all 16 hosts read (6 oracles, 10 workers) within 2 days,
-  each in its own 06:00-07:00 local window, and every worker node restarted exactly once. That the
-  worker restarts have this cause is inferred from the node logs and from the oracle hosts, where it
-  is proven; the workers' package logs were not read.
+- An upgrade of a widely used library, such as the C library, therefore restarts the node on every
+  host that installs it, each in its own upgrade window.
 - Each such restart also runs the unit's image pull, so an operating-system update deploys whatever
   the image tag points to at that moment.
 

@@ -16,8 +16,8 @@ Service file `v3`: the node gets time to stop in order. Collection version to be
   `TimeoutStopSec=150`, `docker run` gets `--stop-timeout 120`, and the
   unit is ordered after `containerd.service` as well as `docker.service`.
   The node's orderly close, which it runs on SIGTERM since core 7.7.357,
-  took 61-94 s where it was measured, and none of 6 observed stops fit
-  in 20 s. `mnl_service_version` bumps `v2` → `v3`, so deployed nodes are
+  took 61-94 s where it was measured, so the 20 s limit ended it with
+  SIGKILL part-way through. `mnl_service_version` bumps `v2` → `v3`, so deployed nodes are
   reported as outdated; `Operations -> Update Service File` applies the
   new unit and restarts the node once. See
   [`docs/20261114_170500_service_file_v3_stop_limit.md`](docs/20261114_170500_service_file_v3_stop_limit.md).
@@ -28,10 +28,10 @@ Service file `v3`: the node gets time to stop in order. Collection version to be
   upgrade.** The service definition also renders
   `/etc/needrestart/conf.d/50-r1setup-<service>.conf`, one line that
   defers the instance's own unit, on hosts that have needrestart. The
-  node runs on the libraries of its image, so that restart patched
-  nothing; one `libc6` update restarted the node on all 16 hosts read
-  within 2 days. `Delete Edge Node` removes the file. Part of service
-  file `v3`.
+  node runs on the libraries of its image, so that restart patches
+  nothing, yet an upgrade of a widely used host library restarts the
+  node on every host that installs it. `Delete Edge Node` removes the
+  file. Part of service file `v3`.
 
 ## Unreleased (CLI)
 

@@ -2,8 +2,9 @@
 # R1SETUP_SERVICE_FILE_VERSION={{ mnl_service_version }}
 [Unit]
 Description=MultiNodeLauncher Execution Engine
-# Ordered after the container runtime as well: systemd stops units in the reverse
-# order, so the node is stopped while the runtime can still deliver the stop signal.
+# Ordered after the container runtime as well: when both are stopped together (a host
+# shutdown, or a command that names this unit first) the node is stopped first, while
+# the runtime can still deliver the stop signal.
 After=docker.service containerd.service
 Requires=docker.service
 StartLimitBurst={{ mnl_service_start_limit_burst | default(30) }}

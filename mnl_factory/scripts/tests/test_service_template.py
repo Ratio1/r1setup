@@ -260,7 +260,7 @@ class TestServiceTemplateStopLimit(unittest.TestCase):
         self.assertEqual([line for line in self.directives[start:image + 1] if not line.endswith("\\")], [])
 
     def test_unit_is_ordered_after_the_container_runtime(self):
-        """After= names containerd as well as docker, so systemd stops the node before the runtime in one transaction."""
+        """After= names containerd as well as docker, so systemd stops the node first when it stops both together."""
         # The ordering line of the unit.
         after = [line for line in self.directives if line.startswith("After=")]
         # Docker as before, plus the container runtime.
