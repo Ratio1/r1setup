@@ -8657,7 +8657,49 @@ class MigrationPlanner:
         remove_volume: bool = False,
         remove_global_helpers: bool = False,
     ) -> Dict[str, Any]:
-        """Remove per-instance runtime artifacts without touching machine-global Docker config."""
+        """Stop one instance's service on a machine and remove its runtime artifacts.
+
+        Runs one root shell command over SSH: stop and disable the service,
+        remove its unit file, reload systemd, remove the container, the
+        launcher metadata, the exit-status file and the helper registry entry
+        and, on request, the data volume and the machine-global helpers.
+        Machine-global Docker configuration is not touched. Each removal
+        tolerates an absent target, so the step can be repeated.
+
+        Parameters
+        ----------
+        machine_record : Dict[str, Any]
+            Fleet machine record the SSH command is built from.
+        runtime : Dict[str, Any]
+            Runtime names of the instance: ``service_name``,
+            ``container_name``, ``volume_path``, and optionally
+            ``metadata_path`` and ``exit_status_path``. Missing names fall
+            back to the standard single-instance names.
+        remove_volume : bool, optional
+            Also delete the instance's data volume.
+        remove_global_helpers : bool, optional
+            Also delete the machine-global helper scripts.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Result of the SSH command: ``status`` is ``'success'`` or
+            ``'error'``, with ``message`` on an error (a timeout included).
+
+        Notes
+        -----
+        The command waits for ``systemctl stop``. Service file ``v3`` lets a
+        stop take up to 150 s (``TimeoutStopSec``), so the SSH call waits at
+        least 180 s; ``connection_timeout * 3`` applies when it is larger. A
+        call that ended first would report a failed cleanup while the node on
+        that machine is still closing.
+
+        Examples
+        --------
+        >>> planner._cleanup_runtime_artifacts(  # doctest: +SKIP
+        ...     machine, {'service_name': 'edge_node'}, remove_volume=True)
+        {'status': 'success', ...}
+        """
         service_name = str(runtime.get('service_name') or DEFAULT_RUNTIME_SERVICE_NAME).strip()
         container_name = str(runtime.get('container_name') or DEFAULT_RUNTIME_CONTAINER_NAME).strip()
         volume_path = str(runtime.get('volume_path') or DEFAULT_RUNTIME_VOLUME_PATH).strip()
@@ -8686,7 +8728,14 @@ class MigrationPlanner:
             machine_record,
             " && ".join(cleanup_parts),
         )
-        return self._run_machine_command(machine_record, remote_command, timeout=self.app.connection_timeout * 3)
+        # Wait at least 180 s: the first command is a synchronous `systemctl stop`, and the unit lets the
+        # node take up to 150 s to stop. The default of connection_timeout * 3 is 90 s, which ended this
+        # step while the node was still closing; a larger setting keeps its own, longer wait.
+        return self._run_machine_command(
+            machine_record,
+            remote_command,
+            timeout=DeploymentService._phase_timeout(self.app.connection_timeout * 3, 180),
+        )
 
     def _start_source_instance_after_rollback(self, instance_name: str) -> Dict[str, Any]:
         """Restart the source instance after rollback cleanup."""

@@ -51,10 +51,13 @@ is rendered together with the unit.
   service already stops with the new command, so this restart is the first one with 120 s.
 - A stop or restart can now take up to 120 s (150 s at most) instead of 20 s. A node older than core
   7.7.357 ignores SIGTERM and always takes the full 120 s.
-- Rollback of a migration removes the node copy on the target with a command that waits
-  `connection_timeout x 3` (90 s by default). If the target node needs longer than that to stop, the
-  step reports a timeout; the stop itself continues on the host and `Rollback Migration` can be
-  retried. Raising `Settings -> Connection Timeout` to 60 s avoids it.
+- The CLI step that stops and removes a service over SSH (the target cleanup of a migration
+  rollback, `Remove the node copy left on the target`, the source cleanup of `Finalize Migration`)
+  now waits at least 180 s. Before, it waited `connection_timeout x 3`, 90 s by default: a node that
+  took longer to stop made the step report a failed cleanup while the node was still closing, and
+  a rollback then asked whether to restart the source anyway, which can run the node twice. **This
+  fix is in the CLI, not in the collection: release the CLI no later than the collection that
+  carries `v3`.**
 
 ### Apply and verify
 

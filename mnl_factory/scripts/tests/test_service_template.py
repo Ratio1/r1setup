@@ -13,12 +13,14 @@ import tempfile
 import unittest
 # Path of the rendered file.
 from pathlib import Path
+# Stands in for the application object and records the SSH command of the cleanup step.
+from unittest.mock import MagicMock
 
 # Reads the Ansible task files.
 import yaml
 
-# Location of the CLI script; the collection root is two folders above it.
-from tests.support import R1SETUP_PATH
+# Location of the CLI script (the collection root is two folders above it) and the CLI loaded as a module.
+from tests.support import R1SETUP_PATH, r1setup
 
 
 # Root of the Ansible collection (mnl_factory).
@@ -272,6 +274,59 @@ class TestServiceTemplateStopLimit(unittest.TestCase):
         version = re.search(r'^mnl_service_version:\s*"([^"]+)"', GROUP_VARS.read_text(), re.M)
         # v2 already exists with the 20 s grace; the new limit needs a new version.
         self.assertEqual(version.group(1), "v3")
+
+
+def _cleanup_wait(connection_timeout: int) -> int:
+    """Return how long the CLI waits for the SSH step that stops and removes a service.
+
+    Runs ``MigrationPlanner._cleanup_runtime_artifacts`` with a recording
+    stand-in for the SSH call, so no host is contacted.
+
+    Parameters
+    ----------
+    connection_timeout : int
+        The operator's ``connection_timeout`` setting, in seconds.
+
+    Returns
+    -------
+    int
+        The ``timeout`` the step hands to the SSH call, in seconds.
+
+    Examples
+    --------
+    >>> _cleanup_wait(100)
+    300
+    """
+    # A planner whose application object only carries the setting.
+    planner = r1setup.MigrationPlanner(MagicMock(connection_timeout=connection_timeout))
+    # Record the SSH call instead of making it.
+    planner._run_machine_command = MagicMock(return_value={"status": "success"})
+    # The step as a migration rollback runs it against the target: stop the service, then remove its files.
+    planner._cleanup_runtime_artifacts({"ansible_host": "192.0.2.10", "ansible_user": "root"}, {"service_name": "edge_node"}, remove_volume=True)
+    # The command must start with the synchronous stop this wait is for.
+    assert "systemctl stop edge_node" in planner._run_machine_command.call_args.args[1]
+    # The wait of that one SSH call.
+    return planner._run_machine_command.call_args.kwargs["timeout"]
+
+
+class TestCleanupWaitsForTheServiceStop(unittest.TestCase):
+    """The CLI step that stops a service over SSH waits longer than the unit lets a stop take."""
+
+    def test_default_setting_outlasts_the_unit_stop_limit(self):
+        """With the default connection timeout (30 s) the cleanup waits 180 s, 30 s more than the unit's TimeoutStopSec."""
+        # The default of the setting gives 3 x 30 = 90 s, which a 120 s close does not fit in.
+        self.assertEqual(_cleanup_wait(30), 180)
+        # The stop limit of the unit the CLI deploys.
+        limit = int(re.search(r"^TimeoutStopSec=(\d+)$", SERVICE_TEMPLATE.read_text(), re.M).group(1))
+        # The SSH step must not end before systemd has ended the stop; 30 s are left for the removals after it.
+        self.assertGreaterEqual(_cleanup_wait(30) - limit, 30)
+
+    def test_larger_setting_is_not_capped(self):
+        """The 180 s are a floor: a connection timeout above 60 s keeps its three-fold wait."""
+        # 3 x 100 s, as before the floor.
+        self.assertEqual(_cleanup_wait(100), 300)
+        # The smallest allowed setting still gets the floor.
+        self.assertEqual(_cleanup_wait(30), 180)
 
 
 if __name__ == "__main__":

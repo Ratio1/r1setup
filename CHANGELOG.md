@@ -33,6 +33,22 @@ Service file `v3`: the node gets time to stop in order. Collection version to be
   within 2 days. `Delete Edge Node` removes the file. Part of service
   file `v3`.
 
+## Unreleased (CLI)
+
+CLI version to be set at release. Release it no later than the collection that carries service
+file `v3`.
+
+### Fixed
+
+- **Service cleanup waits for the node to stop.** The step that stops and
+  removes a service on a machine over SSH (target cleanup of a migration
+  rollback, `Remove the node copy left on the target`, source cleanup of
+  `Finalize Migration`) waited `connection_timeout x 3`, 90 s by default.
+  Service file `v3` lets a stop take up to 150 s, so the step could
+  report a failed cleanup while the node was still closing, and a
+  rollback then asked whether to restart the source anyway. The step now
+  waits at least 180 s; a larger `connection_timeout` keeps its own wait.
+
 ## CLI 1.9.6 / Collection 1.5.7 — 2026-11-10
 
 Migration recovery and hardening, after an end-to-end testbed run and two
