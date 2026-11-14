@@ -270,3 +270,8 @@ Minimum required critic topics when relevant:
   - Preflight probes fail closed: a probe with status `error` is a blocking error; the target-runtime probe runs as root.
   - Error text shown to operators goes through `_short_error`/`_summarize_error` (decoded Ansible `msg`, no PLAY/TASK banners); failure blocks name host, cause, state, log path and next action.
   - Register Machine must reject an endpoint (`user@host:port`) that is already registered.
+- 2026-11-14T17:05:00+00:00 | Service file `v3` raises the stop limit. Stable rules:
+  - `edge_node.service.j2` gives the node 120 s to stop in three places that must stay equal: `docker stop -t 120` in `ExecStop` and in `ExecStartPre`, and `--stop-timeout 120` on `docker run`. `TimeoutStopSec` stays at least 30 s above that (150).
+  - The numbers are literals in the template, not variables; `tests/test_service_template.py` pins them and the continuation lines of `docker run`.
+  - The unit is ordered `After=docker.service containerd.service` so systemd stops the node before the container runtime.
+  - Any CLI step that stops a service synchronously must allow for a stop of up to 150 s. `_cleanup_runtime_artifacts` still waits `connection_timeout * 3` (90 s by default); it is retryable, and raising that floor is an open follow-up.

@@ -106,6 +106,7 @@ class TestStructuralInvariants(unittest.TestCase):
         )
 
     def test_service_version_tracks_service_template(self):
+        """The service-version marker, the unit template, the metadata file and the helper templates stay wired together."""
         group_vars_path = R1SETUP_PATH.parent.parent / "group_vars" / "mnl.yml"
         template_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "templates" / "edge_node.service.j2"
         metadata_template_path = R1SETUP_PATH.parent.parent / "roles" / "setup" / "templates" / "r1setup-metadata.json.j2"
@@ -131,7 +132,8 @@ class TestStructuralInvariants(unittest.TestCase):
         self.assertIsNotNone(service_version_match, "mnl_service_version must be defined in group_vars/mnl.yml")
         self.assertEqual(
             service_version_match.group(1),
-            "v2",
+            # v3 is the template revision that raises the stop limit to 120 s / 150 s.
+            "v3",
             "mnl_service_version should default to a visible service-template revision",
         )
         self.assertRegex(

@@ -69,6 +69,7 @@ Notes:
 - Start, stop, and restart deployed services
 - Re-apply the current versioned service file from `Operations -> Update Service File`
 - On startup, `r1setup` may offer a direct service-file update prompt when deployed nodes are behind the current target version
+- Service file `v3` gives the node 120 s to stop (`docker stop -t 120`, `--stop-timeout 120`) and the unit 150 s (`TimeoutStopSec`); a stop or restart can take that long, and updating a node to `v3` restarts it once. Details: [`../../docs/20261114_170500_service_file_v3_stop_limit.md`](../../docs/20261114_170500_service_file_v3_stop_limit.md)
 - Applied service definitions also render launcher metadata inside the shared persistent volume at `/var/cache/edge_node/_local_cache/_data/r1setup/metadata.json`, exposed in-container via `R1SETUP_METADATA_PATH`
 
 ### Information

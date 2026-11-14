@@ -5,6 +5,23 @@ Ansible collection are recorded here. The CLI version (`scripts/ver.py`)
 and the collection version (`mnl_factory/galaxy.yml`) track separate
 lineages and may bump independently.
 
+## Unreleased (collection)
+
+Service file `v3`: the node gets time to stop in order. Collection version to be set at release.
+
+### Changed
+
+- **`edge_node.service` stop limit.** `docker stop -t 20` becomes
+  `docker stop -t 120` in `ExecStop` and `ExecStartPre`, the unit sets
+  `TimeoutStopSec=150`, `docker run` gets `--stop-timeout 120`, and the
+  unit is ordered after `containerd.service` as well as `docker.service`.
+  The node's orderly close, which it runs on SIGTERM since core 7.7.357,
+  took 61-94 s where it was measured, and none of 6 observed stops fit
+  in 20 s. `mnl_service_version` bumps `v2` → `v3`, so deployed nodes are
+  reported as outdated; `Operations -> Update Service File` applies the
+  new unit and restarts the node once. See
+  [`docs/20261114_170500_service_file_v3_stop_limit.md`](docs/20261114_170500_service_file_v3_stop_limit.md).
+
 ## CLI 1.9.6 / Collection 1.5.7 — 2026-11-10
 
 Migration recovery and hardening, after an end-to-end testbed run and two
