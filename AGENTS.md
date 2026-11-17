@@ -270,3 +270,19 @@ Minimum required critic topics when relevant:
   - Preflight probes fail closed: a probe with status `error` is a blocking error; the target-runtime probe runs as root.
   - Error text shown to operators goes through `_short_error`/`_summarize_error` (decoded Ansible `msg`, no PLAY/TASK banners); failure blocks name host, cause, state, log path and next action.
   - Register Machine must reject an endpoint (`user@host:port`) that is already registered.
+- 2026-11-14T17:05:00+00:00 | Service file `v3` raises the stop limit. Stable rules:
+  - `edge_node.service.j2` gives the node 120 s to stop in three places that must stay equal: `docker stop -t 120` in `ExecStop` and in `ExecStartPre`, and `--stop-timeout 120` on `docker run`. `TimeoutStopSec` stays at least 30 s above that (150).
+  - The numbers are literals in the template, not variables; `tests/test_service_template.py` pins them and the continuation lines of `docker run`.
+  - The unit is ordered `After=docker.service containerd.service` so systemd stops the node before the container runtime.
+  - Any CLI step that stops a service synchronously must allow for a stop of up to 150 s. `_cleanup_runtime_artifacts` still waits `connection_timeout * 3` (90 s by default); it is retryable, and raising that floor is an open follow-up.
+- 2026-11-14T17:30:00+00:00 | The service definition also owns a needrestart file. Stable rules:
+  - `render_edge_node_definition.yml` renders `/etc/needrestart/conf.d/50-r1setup-<service>.conf` from `needrestart-edge-node.conf.j2`, only when `/etc/needrestart/conf.d` exists, validated with `perl -c`; `delete_edge_node.yml` removes it.
+  - The file defers only the instance's own unit, by an element assignment that keeps needrestart's stock table; do not defer host daemons from here.
+  - It is part of service file `v3`: a change to it needs a new `mnl_service_version` so deployed hosts are offered the update.
+- 2026-11-14T17:26:00+00:00 | Corrects the last rule of the 2026-11-14T17:05 entry ("raising that floor is an open follow-up"); the timestamps of that entry and of the 17:30 one are nominal, both were written at about 16:35 UTC. `_cleanup_runtime_artifacts` now waits `max(connection_timeout * 3, 180)` s for its SSH command, whose first step is a synchronous `systemctl stop`. Stable rules:
+  - The 180 s floor must stay at least 30 s above `TimeoutStopSec` of `edge_node.service.j2`; `tests/test_service_template.py` ties the two, so raising the unit limit fails that test until the CLI floor follows.
+  - This fix lives in the CLI and service file `v3` in the collection: release the CLI no later than the collection, or a migration rollback against a `v3` target can time out and offer to restart the source while the target copy is still closing.
+- 2026-11-14T17:27:00+00:00 | Narrows one rule of the 2026-11-14T17:05 entry ("ordered `After=docker.service containerd.service` so systemd stops the node before the container runtime"). Measured with two stand-in units on systemd 259: `systemctl stop|restart a b` sends one request per unit in command-line order, and an ordering only holds a job behind a job that is already queued. Stable rules:
+  - `After=` orders the node's stop before the other unit's only at a host shutdown or when the node's unit is named first in the command; a command that names the runtime first restarts it at once.
+  - Do not describe an `After=` line as a protection against a restart command that lists units alphabetically; for the node unit the needrestart file is what removes that command.
+  - Public texts of this repository (notes, changelog, template comments) state the reason for a change without fleet counts, dates of observation or host roles.

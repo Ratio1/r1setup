@@ -43,6 +43,12 @@
         path: "/etc/systemd/system/{{ edge_node_service_name }}.service"
         state: absent
 
+    # The deferral names a unit that no longer exists; remove it with the unit.
+    - name: Remove the needrestart deferral of the service
+      ansible.builtin.file:
+        path: "/etc/needrestart/conf.d/50-r1setup-{{ edge_node_service_name }}.conf"
+        state: absent
+
     - name: Remove r1setup metadata directory
       ansible.builtin.file:
         path: "{{ mnl_r1setup_metadata_host_dir }}"

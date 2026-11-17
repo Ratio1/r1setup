@@ -5,6 +5,50 @@ Ansible collection are recorded here. The CLI version (`scripts/ver.py`)
 and the collection version (`mnl_factory/galaxy.yml`) track separate
 lineages and may bump independently.
 
+## Unreleased (collection)
+
+Service file `v3`: the node gets time to stop in order. Collection version to be set at release.
+
+### Changed
+
+- **`edge_node.service` stop limit.** `docker stop -t 20` becomes
+  `docker stop -t 120` in `ExecStop` and `ExecStartPre`, the unit sets
+  `TimeoutStopSec=150`, `docker run` gets `--stop-timeout 120`, and the
+  unit is ordered after `containerd.service` as well as `docker.service`.
+  The node's orderly close, which it runs on SIGTERM since core 7.7.357,
+  took 61-94 s where it was measured, so the 20 s limit ended it with
+  SIGKILL part-way through. `mnl_service_version` bumps `v2` → `v3`, so deployed nodes are
+  reported as outdated; `Operations -> Update Service File` applies the
+  new unit and restarts the node once. See
+  [`docs/20261114_170500_service_file_v3_stop_limit.md`](docs/20261114_170500_service_file_v3_stop_limit.md).
+
+### Added
+
+- **needrestart no longer restarts the node after a host library
+  upgrade.** The service definition also renders
+  `/etc/needrestart/conf.d/50-r1setup-<service>.conf`, one line that
+  defers the instance's own unit, on hosts that have needrestart. The
+  node runs on the libraries of its image, so that restart patches
+  nothing, yet an upgrade of a widely used host library restarts the
+  node on every host that installs it. `Delete Edge Node` removes the
+  file. Part of service file `v3`.
+
+## Unreleased (CLI)
+
+CLI version to be set at release. Release it no later than the collection that carries service
+file `v3`.
+
+### Fixed
+
+- **Service cleanup waits for the node to stop.** The step that stops and
+  removes a service on a machine over SSH (target cleanup of a migration
+  rollback, `Remove the node copy left on the target`, source cleanup of
+  `Finalize Migration`) waited `connection_timeout x 3`, 90 s by default.
+  Service file `v3` lets a stop take up to 150 s, so the step could
+  report a failed cleanup while the node was still closing, and a
+  rollback then asked whether to restart the source anyway. The step now
+  waits at least 180 s; a larger `connection_timeout` keeps its own wait.
+
 ## CLI 1.9.6 / Collection 1.5.7 — 2026-11-10
 
 Migration recovery and hardening, after an end-to-end testbed run and two

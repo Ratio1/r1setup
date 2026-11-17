@@ -1,0 +1,11 @@
+# Managed by r1setup (service definition of {{ edge_node_service_name }}). Do not edit by hand.
+#
+# needrestart restarts every unit whose processes map a host library that a package
+# upgrade replaced. For this unit that is only the docker client: the node runs in a
+# container on the libraries of its image, so the restart patches nothing and stops
+# the node. 0 = needrestart lists the unit as deferred instead of restarting it.
+#
+# The line adds one pattern to needrestart's table and keeps the entries that are
+# already there. The pattern is a single-quoted string, so Perl takes the service name
+# literally.
+$nrconf{override_rc}{'^{{ edge_node_service_name | regex_escape }}\.service$'} = 0;

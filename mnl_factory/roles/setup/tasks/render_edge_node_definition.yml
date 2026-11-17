@@ -68,3 +68,25 @@
     dest: /etc/systemd/system/{{ edge_node_service_name }}.service
     mode: '0644'
     force: true
+
+# needrestart restarts every unit whose processes map a host library that a package
+# upgrade replaced. For the node unit that is only the docker client: the node runs
+# on the libraries of its image, so the restart patches nothing and stops the node.
+# A host without needrestart has no snippet folder and needs no deferral.
+- name: Check for needrestart
+  ansible.builtin.stat:
+    path: /etc/needrestart/conf.d
+  register: r1setup_needrestart_conf_dir
+
+# One file per service, so several instances on one machine do not overwrite each
+# other. The file is compiled with Perl before it is installed, because needrestart
+# stops with an error on a snippet that is not valid Perl.
+- name: Defer needrestart restarts of {{ edge_node_service_name }}
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../roles/setup/templates/needrestart-edge-node.conf.j2"
+    dest: "/etc/needrestart/conf.d/50-r1setup-{{ edge_node_service_name }}.conf"
+    owner: root
+    group: root
+    mode: '0644'
+    validate: perl -c %s
+  when: r1setup_needrestart_conf_dir.stat.exists

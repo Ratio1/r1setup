@@ -4,7 +4,9 @@ mnl_app_name: "edge_node"
 mnl_app_version: "1.0.0"
 # Version marker embedded in edge_node.service for tracking service-unit changes.
 # Bump this when the systemd template/behavior changes and redeploy the service.
-mnl_service_version: "v2"
+# v3: the node gets 120 s to stop (docker stop -t, --stop-timeout) and the unit 150 s
+# (TimeoutStopSec); the unit is ordered after containerd.service.
+mnl_service_version: "v3"
 mnl_dev_mode: false
 
 # Restart-loop watchdog: if the edge_node service hits `mnl_service_start_limit_burst`
